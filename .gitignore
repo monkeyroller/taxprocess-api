@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Test coverage
+coverage/
+
+# WSAA ticket cache (sensitive auth material at rest)
+.arca-tickets.json
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

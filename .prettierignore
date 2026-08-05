@@ -1,0 +1,6 @@
+node_modules/
+dist/
+coverage/
+# The copied SDK travels verbatim from webprocess-api — don't reformat it.
+src/arca/
+pnpm-lock.yaml
