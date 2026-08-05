@@ -1,4 +1,6 @@
+import fs from 'node:fs';
 import type {ArcaAuth, ArcaEnvironment, ServiceIdValue} from '../arca/index.js';
+import {env} from '../config/env.js';
 
 /** A WSAA ticket as minted by core and injected into a renewal re-send. */
 export interface InjectedTicket {
@@ -35,16 +37,20 @@ interface CacheEntry {
 const EXPIRY_MARGIN_MS = 2 * 60 * 1000;
 
 /**
- * In-memory cache of WSAA tickets, keyed by `(environment, cuit, service)`. This service owns the
- * cache but never mints: tickets arrive from core on a renewal re-send (`put`), are served until near
- * expiry (`getValid`), and a miss surfaces as {@link TicketRequiredError} (`resolve`).
+ * Cache of WSAA tickets, keyed by `(environment, cuit, service)`. This service owns the cache but
+ * never mints: tickets arrive from core on a renewal re-send (`put`), are served until near expiry
+ * (`getValid`), and a miss surfaces as {@link TicketRequiredError} (`resolve`).
  *
- * SKELETON: in-memory only. Persistence (survive restarts) and a shared Redis backing for horizontal
- * scale are deferred — a lost/cold cache simply triggers another `TICKET_REQUIRED`, and core
- * serializes minting, so no cross-node lock is required here.
+ * Persistence is best-effort via `ARCA_TICKET_CACHE_PATH` so injected tickets survive restarts (an
+ * empty/cold cache simply triggers another `TICKET_REQUIRED`). A shared Redis backing for horizontal
+ * scale is deferred; no cross-node lock is needed here since core serializes minting.
  */
 export class TicketStore {
     private readonly cache = new Map<string, CacheEntry>();
+
+    constructor(private readonly cachePath: string | undefined = env.ticketCachePath) {
+        this.loadFromFile();
+    }
 
     private keyFor(cuit: number, service: ServiceIdValue, environment: ArcaEnvironment): string {
         return `${environment}:${cuit}:${service}`;
@@ -67,6 +73,7 @@ export class TicketStore {
             cuit,
             expiresAt,
         });
+        this.saveToFile();
         return {token: ticket.token, sign: ticket.sign, cuit};
     }
 
@@ -102,6 +109,38 @@ export class TicketStore {
             return cached;
         }
         throw new TicketRequiredError(cuit, service, environment);
+    }
+
+    /** Loads persisted, non-expired entries into the in-memory cache. Best-effort. */
+    private loadFromFile(): void {
+        if (this.cachePath === undefined) {
+            return;
+        }
+        try {
+            const raw = fs.readFileSync(this.cachePath, 'utf8');
+            const stored = JSON.parse(raw) as Record<string, CacheEntry>;
+            const now = Date.now();
+            for (const [key, entry] of Object.entries(stored)) {
+                if (entry.expiresAt - now > EXPIRY_MARGIN_MS) {
+                    this.cache.set(key, entry);
+                }
+            }
+        } catch {
+            // No readable cache file — start empty.
+        }
+    }
+
+    /** Best-effort persist of the current cache. */
+    private saveToFile(): void {
+        if (this.cachePath === undefined) {
+            return;
+        }
+        try {
+            const record: Record<string, CacheEntry> = Object.fromEntries(this.cache);
+            fs.writeFileSync(this.cachePath, JSON.stringify(record, null, 2));
+        } catch {
+            // Persistence is best-effort; fall back to in-memory only.
+        }
     }
 }
 

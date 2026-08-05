@@ -4,8 +4,10 @@ Standalone **Argentina (ARCA/AFIP) tax-integration service** — the first insta
 service pattern extracted from `webprocess-api`. It wraps the self-contained `src/arca` SDK (WSAA + WSFEv1 +
 padrón) behind a neutral, country-agnostic HTTP contract so the core API stays country-agnostic.
 
-> Status: **Phase 2 scaffold / runnable skeleton.** `GET /api/health` and `POST /api/authority/status` are
-> wired to the real SDK; the invoice/taxpayer endpoints are honest `501` stubs.
+> Status: **Phase 2.** Health, authority status, and the invoicing endpoints (authorize / last-authorized /
+> query) are wired to the real SDK with the `TICKET_REQUIRED` handshake. `taxpayers/lookup` plumbing is wired
+> but returns `501` until the SDK's padrón parser lands. See [docs/CONTRACT.md](docs/CONTRACT.md) for the full
+> HTTP contract and the core-side (`webprocess-api`) obligations.
 
 ## Credential / auth model — "split WSAA", core-driven
 
@@ -58,10 +60,13 @@ curl -X POST http://localhost:4101/api/authority/status \
 | --- | --- | --- |
 | `GET /health` | ✅ live | liveness (no SDK) |
 | `POST /authority/status` | ✅ wired | WSFEv1 `FEDummy`; body `{ environment }` |
-| `POST /invoices/authorize` | 🚧 501 | neutral invoice doc → CAE |
-| `GET /invoices/last-authorized` | 🚧 501 | last authorized voucher number |
-| `POST /invoices/query` | 🚧 501 | idempotency backstop |
-| `POST /taxpayers/lookup` | 🚧 501 | padrón lookup |
+| `POST /invoices/authorize` | ✅ wired | resolved-codes invoice → CAE (+ RG-4892 QR) |
+| `POST /invoices/last-authorized` | ✅ wired | last authorized voucher number |
+| `POST /invoices/query` | ✅ wired | idempotency backstop |
+| `POST /taxpayers/lookup` | 🚧 501 | plumbing wired; SDK padrón parser is a seed |
+
+Authenticated endpoints reply `409 TICKET_REQUIRED` on a ticket-cache miss; core mints a ticket and re-sends
+with `issuer.ticket` attached (see the contract doc).
 
 ## Layout
 

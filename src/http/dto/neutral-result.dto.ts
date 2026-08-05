@@ -29,3 +29,15 @@ export class NeutralAuthorizationResultDto {
 
     observations!: Array<NeutralObservation>;
 }
+
+/** Result of `POST /invoices/last-authorized`. */
+export class LastAuthorizedResultDto {
+    number!: number;
+}
+
+/** Neutral taxpayer-registry (padrón) lookup result. */
+export class TaxpayerResultDto {
+    idPersona!: number;
+    taxId?: string;
+    name?: string;
+}
