@@ -1,7 +1,7 @@
 {
-  "name": "arca-webprocess-api",
+  "name": "tax-webprocess-api",
   "version": "0.1.0",
-  "description": "Standalone Argentina (ARCA/AFIP) tax-integration service — first instance of the per-country fiscal service pattern.",
+  "description": "Standalone general tax-integration service — dispatches per request on an entity code (ARCA/AFIP today; more entities via the provider registry).",
   "type": "module",
   "main": "dist/index.js",
   "packageManager": "pnpm@11.5.0",

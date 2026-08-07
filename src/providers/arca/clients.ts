@@ -6,19 +6,20 @@ import {
     type RegistryLevel,
     type ServiceIdValue,
     type TaxpayerRegistryService,
-} from './arca/index.js';
+} from './sdk/index.js';
 // Concrete padrón services are not re-exported from the SDK barrel — import them directly.
-import {BasicTaxpayerService} from './arca/taxpayer-registry/basic-taxpayer.service.js';
-import {DetailedTaxpayerService} from './arca/taxpayer-registry/detailed-taxpayer.service.js';
-import {TaxpayerRelationsService} from './arca/taxpayer-registry/taxpayer-relations.service.js';
-import {RegistrationStatusService} from './arca/taxpayer-registry/registration-status.service.js';
+import {BasicTaxpayerService} from './sdk/taxpayer-registry/basic-taxpayer.service.js';
+import {DetailedTaxpayerService} from './sdk/taxpayer-registry/detailed-taxpayer.service.js';
+import {TaxpayerRelationsService} from './sdk/taxpayer-registry/taxpayer-relations.service.js';
+import {RegistrationStatusService} from './sdk/taxpayer-registry/registration-status.service.js';
 
 /**
- * Shared SDK clients. The `SoapClient` is stateless (native `fetch`) and safe to share; service
- * instances are cheap value objects constructed per request bound to `(soap, environment)`. No WSAA
- * client / ticket cache lives in the SDK here — auth arrives as an `ArcaAuth` from the ticket store.
+ * Shared SDK clients. The `SoapClient` is stateless (native `fetch`) and safe to share process-wide;
+ * service instances are cheap value objects constructed per request bound to `(soap, environment)`.
+ * No WSAA client / ticket cache lives here — auth arrives as an `ArcaAuth` from the ticket store —
+ * but the ticket store's `WsaaClient` reuses this same `soap` so the whole process has one transport.
  */
-const soap = new SoapClient();
+export const soap = new SoapClient();
 
 export function commonInvoiceService(environment: ArcaEnvironment): CommonInvoiceService {
     return new CommonInvoiceService(soap, environment);

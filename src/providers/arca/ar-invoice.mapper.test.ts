@@ -1,19 +1,17 @@
-import {formatArcaDate, type CommonInvoiceResult} from '../../arca/index.js';
-import type {ArgentinaInvoiceDto} from '../dto/invoice.dto.js';
+import {ArcaValidationError, formatArcaDate, type CommonInvoiceResult} from './sdk/index.js';
+import type {NeutralInvoice} from '../provider.js';
 import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult} from './ar-invoice.mapper.js';
 
-function invoice(overrides: Partial<ArgentinaInvoiceDto> = {}): ArgentinaInvoiceDto {
+function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
     return {
-        voucherType: 1,
+        documentTypeId: 1,
         concept: 1,
         salesPointNumber: 1,
-        receiverIvaConditionId: 1,
-        receiverDocType: 80,
-        receiverDocNumber: 20_111_111_112,
-        currency: 'ARS',
+        receiver: {identificationTypeId: 80, identificationNumber: '20111111112', fiscalConditionId: 1},
+        currencyIso: 'ARS',
         currencyRate: 1,
         issueDate: '2026-08-05',
-        lines: [{netAmount: 100, vatRatePercent: 21, vatAmount: 21}],
+        lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}],
         ...overrides,
     };
 }
@@ -36,17 +34,31 @@ describe('buildCommonInvoiceRequest', () => {
         expect(req.tributes).toBeUndefined();
     });
 
+    it('resolves core ids to ARCA codes', () => {
+        const req = buildCommonInvoiceRequest(invoice(), 1, NOW);
+        expect(req.voucherType).toBe(1); // documentTypeId 1 → CbteTipo 1
+        expect(req.docType).toBe(80); // identificationTypeId 80 → DocTipo 80 (CUIT)
+        expect(req.docNumber).toBe(20_111_111_112); // identificationNumber string → number
+        expect(req.receiverIvaConditionId).toBe(1); // fiscalConditionId 1 → CondicionIVAReceptorId 1
+    });
+
     it('maps perceptions to a single Otros (99) tribute', () => {
-        const req = buildCommonInvoiceRequest(invoice({perceptionsTotal: 50}), 1, NOW);
+        const req = buildCommonInvoiceRequest(invoice({totals: {perceptions: 50}}), 1, NOW);
         expect(req.tributesAmount).toBe(50);
         expect(req.totalAmount).toBe(171);
         expect(req.tributes).toHaveLength(1);
         expect(req.tributes?.[0]).toMatchObject({id: 99, amount: 50, rate: 50, baseAmount: 100});
     });
 
-    it('maps ISO currency to ARCA MonId (unknown falls back to PES)', () => {
-        expect(buildCommonInvoiceRequest(invoice({currency: 'USD'}), 1, NOW).currencyId).toBe('DOL');
-        expect(buildCommonInvoiceRequest(invoice({currency: 'xyz'}), 1, NOW).currencyId).toBe('PES');
+    it('maps ISO currency to ARCA MonId and rejects an unmapped currency', () => {
+        expect(buildCommonInvoiceRequest(invoice({currencyIso: 'USD'}), 1, NOW).currencyId).toBe('DOL');
+        expect(() => buildCommonInvoiceRequest(invoice({currencyIso: 'xyz'}), 1, NOW)).toThrow(ArcaValidationError);
+    });
+
+    it('rejects a non-numeric receiver identification number instead of sending NaN', () => {
+        expect(() =>
+            buildCommonInvoiceRequest(invoice({receiver: {identificationTypeId: 80, identificationNumber: '20-1111111-2', fiscalConditionId: 1}}), 1, NOW),
+        ).toThrow(ArcaValidationError);
     });
 
     it('clamps an out-of-window concept-1 date to now', () => {
@@ -58,7 +70,7 @@ describe('buildCommonInvoiceRequest', () => {
 describe('buildQrUrl', () => {
     it('encodes the RG-4892 payload with the CAE', () => {
         const req = buildCommonInvoiceRequest(invoice(), 10, NOW);
-        const url = buildQrUrl(20_999_999_993, req, '75123456789012');
+        const url = buildQrUrl('20999999993', req, '75123456789012');
         expect(url.startsWith('https://www.arca.gob.ar/fe/qr/?p=')).toBe(true);
         const encoded = url.split('?p=')[1] ?? '';
         const payload = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')) as Record<string, unknown>;
@@ -87,6 +99,7 @@ describe('toNeutralResult', () => {
         expect(r.authorizedNumber).toBe(10);
         expect(r.qr).toBe('qr-url');
         expect(r.expiration).toContain('2026-08-15');
+        expect(r.providerMetadata).toEqual({});
     });
 
     it('maps a rejected result with observations and no CAE', () => {
@@ -101,5 +114,6 @@ describe('toNeutralResult', () => {
         expect(r.authorizationCode).toBe('');
         expect(r.qr).toBeUndefined();
         expect(r.observations).toHaveLength(1);
+        expect(r.providerMetadata).toEqual({});
     });
 });

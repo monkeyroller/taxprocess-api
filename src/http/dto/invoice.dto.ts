@@ -11,76 +11,102 @@ import {
     IsString,
     Length,
     Min,
+    MinLength,
     ValidateNested,
 } from 'class-validator';
-import type {InvoiceConcept} from '../../arca/index.js';
-import {ArgentinaIssuerDto} from './issuer-auth.dto.js';
+import type {NeutralInvoiceConcept} from '../../providers/provider.js';
+import {EntityAuthDto} from './entity-auth.dto.js';
 
 /**
- * PRAGMATIC contract: the request carries ARCA-resolved codes (voucher type, receiver IVA condition,
- * receiver document type) exactly as `webprocess-api`'s catalogs already provide them
- * (`documentType.arcaCode`, `contributorType.arcaFiscalConditionId`, `identificationType.isoCode`).
- * The AR service owns only the mechanical translation: ISO→`MonId`, VAT%→id, totals, perceptions→
- * `Tributos`, dates, and the QR. It does NOT infer the Factura A/B/C letter.
+ * NEUTRAL contract: the request carries core's own generic ids (`documentTypeId`,
+ * `receiver.identificationTypeId`, `receiver.fiscalConditionId`). The provider maps these to the tax
+ * entity's real codes and owns the mechanical translation (currency, tax rates, totals, dates, QR).
  */
 
-/** One taxed line: net (base imponible) + VAT amount at a given rate. */
+/** One taxed line: net (base) + tax amount at a given rate. */
 export class InvoiceLineDto {
     @IsNumber()
     netAmount!: number;
 
-    /** VAT rate as a percentage (e.g. 21, 10.5, 0). */
+    /** Tax rate as a percentage (e.g. 21, 10.5, 0). */
     @IsNumber()
     @Min(0)
-    vatRatePercent!: number;
+    taxRatePercent!: number;
 
     @IsNumber()
     @Min(0)
-    vatAmount!: number;
+    taxAmount!: number;
 }
 
-/** An Argentina invoice, with fiscal codes already resolved by the caller. */
-export class ArgentinaInvoiceDto {
-    /** ARCA `CbteTipo` (e.g. 1 = Factura A, 6 = Factura B, 11 = Factura C). Resolved by the caller. */
+/** The invoice receiver, identified by a per-entity identification type + number. */
+export class InvoiceReceiverDto {
+    /** core `identificationTypeId` → provider maps to the entity's document-type code (AR: DocTipo). */
+    @IsInt()
+    @Min(0)
+    identificationTypeId!: number;
+
+    /** The receiver's identification number (digits as a string; `"0"` for an anonymous receiver). */
+    @IsString()
+    @MinLength(1)
+    identificationNumber!: string;
+
+    /** core `fiscalConditionId` → provider maps to the entity's fiscal-condition code (AR: CondicionIVAReceptorId). */
     @IsInt()
     @IsPositive()
-    voucherType!: number;
+    fiscalConditionId!: number;
+}
 
-    /** ARCA `Concepto`: 1 = productos, 2 = servicios, 3 = productos y servicios. */
+/** Optional invoice-level totals not derivable from the taxed lines. */
+export class InvoiceTotalsDto {
+    /** Net not subject to tax (AR: `ImpTotConc`). */
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    untaxed?: number;
+
+    /** Exempt amount (AR: `ImpOpEx`). */
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    exempt?: number;
+
+    /** Total perceptions/other tributes (AR: `ImpTrib`), reported as a single "Otros" tribute. */
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    perceptions?: number;
+}
+
+/** A neutral invoice carrying core's generic ids. */
+export class NeutralInvoiceDto {
+    /** core `documentTypeId` → provider maps to the entity's voucher-type code (AR: CbteTipo). */
+    @IsInt()
+    @IsPositive()
+    documentTypeId!: number;
+
+    /** Concept: 1 = goods, 2 = services, 3 = both. */
     @IsIn([1, 2, 3])
-    concept!: InvoiceConcept;
+    concept!: NeutralInvoiceConcept;
 
-    /** `PtoVta`. */
     @IsInt()
     @IsPositive()
     salesPointNumber!: number;
 
-    /** ARCA `CondicionIVAReceptorId` (RG 5616). Resolved by the caller. */
-    @IsInt()
-    @IsPositive()
-    receiverIvaConditionId!: number;
+    @ValidateNested()
+    @Type(() => InvoiceReceiverDto)
+    receiver!: InvoiceReceiverDto;
 
-    /** ARCA `DocTipo` (80 = CUIT, 96 = DNI, 99 = consumidor final). */
-    @IsInt()
-    @Min(0)
-    receiverDocType!: number;
-
-    /** ARCA `DocNro` (0 for an anonymous consumidor final). */
-    @IsInt()
-    @Min(0)
-    receiverDocNumber!: number;
-
-    /** ISO-4217 currency (e.g. `ARS`, `USD`); mapped to ARCA `MonId` by the service. */
+    /** ISO-4217 currency (e.g. `ARS`, `USD`); mapped to the entity's currency code by the provider. */
     @IsString()
     @Length(3, 3)
-    currency!: string;
+    currencyIso!: string;
 
-    /** `MonCotiz` — exchange rate to ARS (1 for pesos). */
+    /** Exchange rate to the local currency (1 for the local currency itself). */
     @IsNumber()
     @IsPositive()
     currencyRate!: number;
 
-    /** ISO-8601 issue date. Clamped to AFIP's ±5-day window for concept 1. */
+    /** ISO-8601 issue date. */
     @IsISO8601()
     issueDate!: string;
 
@@ -90,35 +116,22 @@ export class ArgentinaInvoiceDto {
     @Type(() => InvoiceLineDto)
     lines!: Array<InvoiceLineDto>;
 
-    /** `ImpTotConc` — net not subject to VAT. */
     @IsOptional()
-    @IsNumber()
-    @Min(0)
-    untaxedTotal?: number;
+    @ValidateNested()
+    @Type(() => InvoiceTotalsDto)
+    totals?: InvoiceTotalsDto;
 
-    /** `ImpOpEx` — exempt amount. */
-    @IsOptional()
-    @IsNumber()
-    @Min(0)
-    exemptTotal?: number;
-
-    /** Total perceptions/other tributes (`ImpTrib`); reported as a single "Otros" (99) tribute. */
-    @IsOptional()
-    @IsNumber()
-    @Min(0)
-    perceptionsTotal?: number;
-
-    /** `FchServDesde` (ISO date) — required by ARCA when concept is 2 or 3. */
+    /** ISO date — required by the entity when concept is 2 or 3 (AR: `FchServDesde`). */
     @IsOptional()
     @IsISO8601()
     serviceDateFrom?: string;
 
-    /** `FchServHasta` (ISO date) — required by ARCA when concept is 2 or 3. */
+    /** ISO date — required by the entity when concept is 2 or 3 (AR: `FchServHasta`). */
     @IsOptional()
     @IsISO8601()
     serviceDateTo?: string;
 
-    /** `FchVtoPago` (ISO date) — required by ARCA when concept is 2 or 3. */
+    /** ISO date — required by the entity when concept is 2 or 3 (AR: `FchVtoPago`). */
     @IsOptional()
     @IsISO8601()
     paymentDueDate?: string;
@@ -127,19 +140,19 @@ export class ArgentinaInvoiceDto {
 /** Body for `POST /invoices/authorize`. */
 export class AuthorizeInvoiceRequestDto {
     @ValidateNested()
-    @Type(() => ArgentinaIssuerDto)
-    issuer!: ArgentinaIssuerDto;
+    @Type(() => EntityAuthDto)
+    entity!: EntityAuthDto;
 
     @ValidateNested()
-    @Type(() => ArgentinaInvoiceDto)
-    invoice!: ArgentinaInvoiceDto;
+    @Type(() => NeutralInvoiceDto)
+    invoice!: NeutralInvoiceDto;
 }
 
 /** Body for `POST /invoices/last-authorized`. */
 export class LastAuthorizedRequestDto {
     @ValidateNested()
-    @Type(() => ArgentinaIssuerDto)
-    issuer!: ArgentinaIssuerDto;
+    @Type(() => EntityAuthDto)
+    entity!: EntityAuthDto;
 
     @IsInt()
     @IsPositive()
@@ -147,14 +160,14 @@ export class LastAuthorizedRequestDto {
 
     @IsInt()
     @IsPositive()
-    voucherType!: number;
+    documentTypeId!: number;
 }
 
 /** Body for `POST /invoices/query`. */
 export class QueryVoucherRequestDto {
     @ValidateNested()
-    @Type(() => ArgentinaIssuerDto)
-    issuer!: ArgentinaIssuerDto;
+    @Type(() => EntityAuthDto)
+    entity!: EntityAuthDto;
 
     @IsInt()
     @IsPositive()
@@ -162,7 +175,7 @@ export class QueryVoucherRequestDto {
 
     @IsInt()
     @IsPositive()
-    voucherType!: number;
+    documentTypeId!: number;
 
     @IsInt()
     @IsPositive()

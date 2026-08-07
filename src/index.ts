@@ -7,6 +7,7 @@ import {env} from './config/env.js';
 import {StatusController} from './http/controllers/status.controller.js';
 import {InvoicesController} from './http/controllers/invoices.controller.js';
 import {TaxpayersController} from './http/controllers/taxpayers.controller.js';
+import {EntitiesController} from './http/controllers/entities.controller.js';
 import {toHttpError} from './http/error-mapper.js';
 
 /**
@@ -29,8 +30,16 @@ function bootstrap(): void {
 
     useExpressServer(app, {
         routePrefix: '/api',
-        controllers: [StatusController, InvoicesController, TaxpayersController],
-        validation: {whitelist: true, forbidNonWhitelisted: true},
+        controllers: [
+            StatusController,
+            InvoicesController,
+            TaxpayersController,
+            EntitiesController
+        ],
+        validation: {
+            whitelist: true,
+            forbidNonWhitelisted: true
+        },
         defaultErrorHandler: false,
         cors: false,
     });
@@ -40,7 +49,7 @@ function bootstrap(): void {
 
     const server = createServer(app);
     server.listen(env.port, () => {
-        console.log(`arca-webprocess-api listening on :${env.port} (${env.nodeEnv})`);
+        console.log(`tax-webprocess-api listening on :${env.port} (${env.nodeEnv})`);
     });
 
     const shutdown = (signal: string): void => {

@@ -1,4 +1,5 @@
 import {
+    ArcaValidationError,
     buildArcaQrUrl,
     calculateTotals,
     formatArcaDate,
@@ -7,25 +8,28 @@ import {
     type CommonInvoiceRequest,
     type CommonInvoiceResult,
     type InvoiceLineTax,
-} from '../../arca/index.js';
-import type {ArgentinaInvoiceDto} from '../dto/invoice.dto.js';
+} from './sdk/index.js';
+import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
+import {parseArcaId} from './ar-identifiers.js';
+import type {NeutralInvoice} from '../provider.js';
 import type {
     NeutralAuthorizationResultDto,
     NeutralAuthorizationStatus,
-} from '../dto/neutral-result.dto.js';
+} from '../../http/dto/neutral-result.dto.js';
 
 /**
- * Argentina-specific translation from the pragmatic invoice request to the SDK's
+ * Argentina-specific translation from the neutral invoice (carrying core's own ids) to the SDK's
  * {@link CommonInvoiceRequest}, plus the RG-4892 QR and the neutral result. Ported from
  * `webprocess-api/src/app/services/protected/transactions/electronic-invoice.service.ts:43-203`.
  *
- * The caller supplies already-resolved fiscal codes (voucher type, receiver IVA condition, receiver
- * document type); this module owns only the mechanical mapping.
+ * This module owns the entity-specific translation: id→ARCA-code (via {@link file://./code-maps.ts}) plus
+ * the mechanical mapping (ISO→`MonId`, VAT%→id, totals, perceptions→`Tributos`, dates, QR).
  */
 
 /**
  * ISO-4217 → ARCA `MonId`. The ARCA catalog is small; a larger deployment would source this from
- * `FEParamGetTiposMonedas`. Unknown currencies fall back to pesos.
+ * `FEParamGetTiposMonedas`. An unmapped currency is rejected (never silently billed as pesos, which —
+ * combined with the caller's non-1 rate — would produce a wrong invoice).
  */
 const ISO_TO_ARCA_CURRENCY: Readonly<Record<string, string>> = {
     ARS: 'PES',
@@ -34,7 +38,11 @@ const ISO_TO_ARCA_CURRENCY: Readonly<Record<string, string>> = {
 };
 
 function resolveCurrencyId(iso: string): string {
-    return ISO_TO_ARCA_CURRENCY[iso.toUpperCase()] ?? 'PES';
+    const key = iso.toUpperCase();
+    if (!Object.hasOwn(ISO_TO_ARCA_CURRENCY, key)) {
+        throw new ArcaValidationError(`Unsupported currency "${iso}" (no ARCA MonId mapping)`, 'UNMAPPED_CURRENCY');
+    }
+    return ISO_TO_ARCA_CURRENCY[key];
 }
 
 /**
@@ -54,23 +62,24 @@ function clampToArcaDateWindow(date: Date, now: Date): Date {
 
 /**
  * Builds the WSFEv1 authorization request for `voucherNumber`. `now` is injected (not read from the
- * clock) so the mapping stays pure and unit-testable.
+ * clock) so the mapping stays pure and unit-testable. Core's generic ids are translated to ARCA codes
+ * here via {@link file://./code-maps.ts}.
  */
 export function buildCommonInvoiceRequest(
-    invoice: ArgentinaInvoiceDto,
+    invoice: NeutralInvoice,
     voucherNumber: number,
     now: Date,
 ): CommonInvoiceRequest {
     const lines: Array<InvoiceLineTax> = invoice.lines.map((l) => ({
-        vatRatePercent: l.vatRatePercent,
+        vatRatePercent: l.taxRatePercent,
         netAmount: l.netAmount,
-        vatAmount: l.vatAmount,
+        vatAmount: l.taxAmount,
     }));
     const totals = calculateTotals(lines);
 
-    const netUntaxed = invoice.untaxedTotal ?? 0;
-    const exempt = invoice.exemptTotal ?? 0;
-    const perceptions = invoice.perceptionsTotal ?? 0;
+    const netUntaxed = invoice.totals?.untaxed ?? 0;
+    const exempt = invoice.totals?.exempt ?? 0;
+    const perceptions = invoice.totals?.perceptions ?? 0;
     const totalAmount = roundToTwo(totals.netTaxed + totals.vat + netUntaxed + exempt + perceptions);
 
     // Perceptions collapse into a single "Otros" (id 99) tribute over the taxed net, matching the
@@ -94,10 +103,10 @@ export function buildCommonInvoiceRequest(
 
     const request: CommonInvoiceRequest = {
         salesPointNumber: invoice.salesPointNumber,
-        voucherType: invoice.voucherType,
+        voucherType: toCbteTipo(invoice.documentTypeId),
         concept: invoice.concept,
-        docType: invoice.receiverDocType,
-        docNumber: invoice.receiverDocNumber,
+        docType: toDocTipo(invoice.receiver.identificationTypeId),
+        docNumber: parseArcaId(invoice.receiver.identificationNumber, 'receiver.identificationNumber'),
         voucherNumberFrom: voucherNumber,
         voucherNumberTo: voucherNumber,
         voucherDate: formatArcaDate(voucherDate),
@@ -107,8 +116,8 @@ export function buildCommonInvoiceRequest(
         exempt,
         vatAmount: totals.vat,
         tributesAmount: perceptions,
-        receiverIvaConditionId: invoice.receiverIvaConditionId,
-        currencyId: resolveCurrencyId(invoice.currency),
+        receiverIvaConditionId: toCondicionIvaReceptorId(invoice.receiver.fiscalConditionId),
+        currencyId: resolveCurrencyId(invoice.currencyIso),
         currencyRate: invoice.currencyRate,
         vatSubtotals: totals.subtotals,
         tributes,
@@ -131,10 +140,10 @@ export function buildCommonInvoiceRequest(
 }
 
 /** Builds the RG-4892 QR URL for an authorized voucher (all inputs derive from the request + CAE). */
-export function buildQrUrl(issuerCuit: number, request: CommonInvoiceRequest, cae: string): string {
+export function buildQrUrl(issuerTaxId: string, request: CommonInvoiceRequest, cae: string): string {
     return buildArcaQrUrl({
         date: parseArcaDate(request.voucherDate),
-        cuit: issuerCuit,
+        cuit: Number(issuerTaxId),
         salesPointNumber: request.salesPointNumber,
         voucherType: request.voucherType,
         voucherNumber: request.voucherNumberFrom,
@@ -154,8 +163,15 @@ function statusOf(result: CommonInvoiceResult['result']): NeutralAuthorizationSt
     return result === 'P' ? 'PARTIAL' : 'REJECTED';
 }
 
-/** Maps the SDK result (+ optional QR) into the neutral authorization result. */
-export function toNeutralResult(result: CommonInvoiceResult, qr?: string): NeutralAuthorizationResultDto {
+/**
+ * Maps the SDK result (+ optional QR) into the neutral authorization result. `providerMetadata` is always
+ * returned (empty by default); the ARCA provider derives none today, but the channel is stable for core.
+ */
+export function toNeutralResult(
+    result: CommonInvoiceResult,
+    qr?: string,
+    providerMetadata: Record<string, unknown> = {},
+): NeutralAuthorizationResultDto {
     return {
         authorizationCode: result.cae ?? '',
         expiration: result.caeExpiration !== undefined ? parseArcaDate(result.caeExpiration).toISOString() : '',
@@ -163,5 +179,6 @@ export function toNeutralResult(result: CommonInvoiceResult, qr?: string): Neutr
         qr,
         status: statusOf(result.result),
         observations: result.observations,
+        providerMetadata,
     };
 }

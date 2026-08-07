@@ -28,6 +28,14 @@ export class NeutralAuthorizationResultDto {
     status!: NeutralAuthorizationStatus;
 
     observations!: Array<NeutralObservation>;
+
+    /**
+     * Entity-specific extras for core to persist opaquely on the authorization row. **Always present**
+     * (an empty object when there are none). The meaningful fields are core-owned — e.g. core populates
+     * `conceptTypeId` itself from the `concept` it sent; this service does not currently derive any, so
+     * the object is `{}`. A provider may populate it in future for genuinely authority-derived fields.
+     */
+    providerMetadata!: Record<string, unknown>;
 }
 
 /** Result of `POST /invoices/last-authorized`. */

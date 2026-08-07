@@ -5,8 +5,10 @@ import 'dotenv/config';
  * service depends on {@link env} and never touches `process.env` directly. Invalid values fail fast at
  * import time (i.e. at boot).
  *
- * This service holds NO secrets: there is deliberately no `ARCA_MASTER_KEY` and no outbound core URL —
- * the private key + credential store live in `webprocess-api`, and core always initiates requests.
+ * This service stores NO secrets at rest: there is deliberately no `ARCA_MASTER_KEY` and no credential
+ * store — the encrypted credentials live in `webprocess-api`. Core sends the decrypted key on the
+ * `CREDENTIALS_REQUIRED` handshake; this service uses it only in memory to mint a ticket, then keeps only
+ * the ticket. Core always initiates (no outbound core URL here).
  */
 export interface AppConfig {
     readonly port: number;

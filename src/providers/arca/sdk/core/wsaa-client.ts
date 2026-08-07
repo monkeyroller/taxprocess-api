@@ -37,11 +37,12 @@ export class WsaaClient {
     /**
      * Optional file path for cross-restart ticket persistence. WSAA refuses to issue a new ticket
      * while a prior one is still valid (`coe.alreadyAuthenticated`), so an in-memory-only cache breaks
-     * on every process restart. When `ARCA_TICKET_CACHE_PATH` is set, tickets survive restarts.
+     * on every process restart. When a path is supplied (the app passes `env.ticketCachePath`, sourced
+     * from `ARCA_TICKET_CACHE_PATH`), tickets survive restarts; when omitted, the cache is in-memory only.
      */
     constructor(
         private readonly soap: SoapClient,
-        private readonly cachePath = process.env.ARCA_TICKET_CACHE_PATH,
+        private readonly cachePath?: string,
     ) {}
 
     /** Returns a valid access ticket for `serviceId`, logging in via WSAA only when needed. */
@@ -73,6 +74,21 @@ export class WsaaClient {
         return login;
     }
 
+    /**
+     * Returns a cached, still-valid ticket for `(ticketOwnerKey, serviceId)` WITHOUT logging in — used
+     * to serve a request that carries no credentials. Returns undefined on a miss so the caller can ask
+     * the credential holder to re-send credentials.
+     */
+    peekAccessTicket(ticketOwnerKey: string, serviceId: string): AccessTicket | undefined {
+        const cacheKey = `${ticketOwnerKey}:${serviceId}`;
+        const cached = this.cache.get(cacheKey) ?? this.loadFromFile(cacheKey);
+        if (cached && cached.expirationTime.getTime() - Date.now() > EXPIRY_MARGIN_MS) {
+            this.cache.set(cacheKey, cached);
+            return cached;
+        }
+        return undefined;
+    }
+
     /** Reads a persisted ticket for `cacheKey`, or undefined if none/unreadable. */
     private loadFromFile(cacheKey: string): AccessTicket | undefined {
         if (!this.cachePath) {
@@ -90,7 +106,13 @@ export class WsaaClient {
         }
     }
 
-    /** Best-effort persist of a ticket for `cacheKey` (merged into the existing file). */
+    /**
+     * Best-effort persist of a ticket for `cacheKey` (re-read → merge → write). The whole read-modify-write
+     * is synchronous, so within this process it is a serial critical section — no two concurrent logins can
+     * interleave and drop each other's entry. The write itself is serialized atomically: we write a
+     * per-pid temp file and `rename` it over the target (an atomic swap on the same filesystem), so a crash
+     * mid-write — or a second process sharing this cache file — can never observe or leave a torn file.
+     */
     private saveToFile(cacheKey: string, ticket: AccessTicket): void {
         if (!this.cachePath) {
             return;
@@ -107,7 +129,9 @@ export class WsaaClient {
                 sign: ticket.sign,
                 expirationTime: ticket.expirationTime.toISOString(),
             };
-            fs.writeFileSync(this.cachePath, JSON.stringify(all, null, 2));
+            const tmpPath = `${this.cachePath}.${process.pid}.tmp`;
+            fs.writeFileSync(tmpPath, JSON.stringify(all, null, 2));
+            fs.renameSync(tmpPath, this.cachePath);
         } catch {
             // persistence is best-effort; fall back to in-memory only
         }

@@ -6,8 +6,9 @@ import {
     ArcaSoapError,
     ArcaValidationError,
     NotImplementedError,
-} from '../arca/index.js';
-import {TicketRequiredError} from '../session/ticket-store.js';
+} from '../providers/arca/sdk/index.js';
+import {CredentialsRequiredError} from '../providers/arca/ticket-store.js';
+import {UnknownEntityError} from '../providers/provider.js';
 
 export interface HttpErrorResult {
     readonly status: number;
@@ -44,12 +45,16 @@ function messageOf(err: unknown, fallback: string): string {
  * routing-controllers) are matched by their numeric `httpCode`.
  */
 export function toHttpError(err: unknown): HttpErrorResult {
-    if (err instanceof TicketRequiredError) {
-        return make(409, 'TICKET_REQUIRED', err.message, {
-            cuit: err.cuit,
+    if (err instanceof CredentialsRequiredError) {
+        return make(409, 'CREDENTIALS_REQUIRED', err.message, {
+            entityCode: err.entityCode,
+            issuerTaxId: err.issuerTaxId,
             service: err.service,
             environment: err.environment,
         });
+    }
+    if (err instanceof UnknownEntityError) {
+        return make(400, 'UNKNOWN_ENTITY', err.message, {entityCode: err.entityCode});
     }
     if (err instanceof ArcaValidationError) {
         return make(400, 'ARCA_VALIDATION', err.message);

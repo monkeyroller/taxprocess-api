@@ -1,5 +1,5 @@
-// Flat ESLint config (ESM). Strict, type-checked linting for NEW code only — the copied `src/arca`
-// SDK is ignored (it travels as-is and is validated by its own unit tests + the tsc typecheck).
+// Flat ESLint config (ESM). Strict, type-checked linting for NEW code only — the copied ARCA SDK under
+// `src/providers/arca/sdk` is ignored (it travels as-is and is validated by its own unit tests + tsc).
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
@@ -9,7 +9,8 @@ export default tseslint.config(
       'dist/**',
       'node_modules/**',
       'coverage/**',
-      'src/arca/**',
+      '.claude/**', // transient agent worktrees / scratch — never lint
+      'src/providers/arca/sdk/**',
       '**/*.test.ts',
       '*.config.js',
       '*.config.cjs',

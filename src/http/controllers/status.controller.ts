@@ -1,7 +1,7 @@
 import type {Response} from 'express';
 import {Body, Get, JsonController, Post, Res} from 'routing-controllers';
-import {CommonInvoiceService, SoapClient} from '../../arca/index.js';
-import {AuthorityStatusDto} from '../dto/issuer-auth.dto.js';
+import {getProvider} from '../../providers/registry.js';
+import {AuthorityStatusDto} from '../dto/entity-auth.dto.js';
 import {sendError} from '../error-mapper.js';
 
 interface HealthResponse {
@@ -11,26 +11,27 @@ interface HealthResponse {
 }
 
 /**
- * Liveness + authority health. `GET /health` is a pure liveness probe (no SDK). `POST /authority/status`
- * runs WSFEv1 `FEDummy` through the real SDK — no ticket, no credentials — proving the service reaches
- * ARCA for the requested environment.
+ * Liveness + authority health. `GET /health` is a pure liveness probe (no provider). `POST
+ * /authority/status` dispatches on `entityCode` and runs the entity's health check — no ticket, no
+ * credentials — proving the service reaches the authority for the requested environment.
  */
 @JsonController()
 export class StatusController {
+    /** `GET /health` is a pure liveness probe (no provider). */
     @Get('/health')
     health(): HealthResponse {
         return {
             status: 'ok',
-            service: 'arca-webprocess-api',
+            service: 'tax-webprocess-api',
             uptimeSeconds: Math.floor(process.uptime()),
         };
     }
 
+    /** `POST /authority/status` dispatches on `entityCode` and runs the entity's health check. */
     @Post('/authority/status')
     async authorityStatus(@Body() body: AuthorityStatusDto, @Res() res: Response): Promise<Response> {
         try {
-            const service = new CommonInvoiceService(new SoapClient(), body.environment);
-            const status = await service.getServerStatus();
+            const status = await getProvider(body.entityCode).authorityStatus(body.environment);
             return res.json(status);
         } catch (err) {
             return sendError(res, err);
