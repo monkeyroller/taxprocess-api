@@ -25,12 +25,15 @@ export class IssuerCredentialsDto {
 export class EntityAuthDto {
     @IsString()
     @MinLength(1)
+    /** Selects the provider that handles the request. E.g. `"ARCA"` (Argentina/AFIP). */
     entityCode!: string;
 
+    /** Issuing taxpayer's canonical tax id, as a string. **AR: the CUIT** (11 digits), e.g. `"20123456789"`. */
     @IsString()
     @MinLength(1)
     issuerTaxId!: string;
 
+    /** Generic environment; the AR provider maps it to `homologacion` (testing) / `produccion` (production). */
     @IsIn(GENERIC_ENVIRONMENTS)
     environment!: GenericEnvironment;
 

@@ -92,6 +92,16 @@ export class NeutralInvoiceDto {
     @IsPositive()
     salesPointNumber!: number;
 
+    /** Exact voucher number to authorize (WSFEv1 CbteDesde). Required — core owns the number. */
+    @IsInt()
+    @IsPositive()
+    voucherNumberFrom!: number;
+
+    /** Exact voucher number to authorize (WSFEv1 CbteHasta). Single-voucher flow: equals voucherNumberFrom. */
+    @IsInt()
+    @IsPositive()
+    voucherNumberTo!: number;
+
     @ValidateNested()
     @Type(() => InvoiceReceiverDto)
     receiver!: InvoiceReceiverDto;

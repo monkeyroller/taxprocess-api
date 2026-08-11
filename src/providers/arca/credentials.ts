@@ -1,33 +1,33 @@
 import {
+    certificateSubjectSerialNumber,
     isCertificateSigningRequest,
     isValidCertificate,
     isValidPrivateKey,
     keyMatchesCertificatePem,
 } from './sdk/index.js';
+import {canonicalCuit} from './ar-identifiers.js';
 import type {
     CredentialValidationError,
     CredentialValidationResult,
     ValidateCredentialsInput,
 } from '../provider.js';
 
-/** An ARCA issuer CUIT is 11 digits. */
-const CUIT_RE = /^\d{11}$/;
-
 /**
- * Validates an ARCA credential bundle at registration time (H3). Checks the issuer CUIT format (from the
- * non-secret `configuration.issuerTaxId`), that the certificate is an issued cert (not a CSR), that the
- * private key parses, and that the key matches the certificate. Returns `{ ok: true }` or structured
- * errors. This is the PEM/CUIT validation that previously lived in core's `provider-adapters.ts`.
+ * Validates an ARCA credential bundle at registration time (H3): the certificate is an issued cert (not a
+ * CSR), the private key parses, the key matches the certificate, and the certificate was issued to the
+ * taxpayer core declares in `expectedTaxId` (the owning company's CUIT). Returns `{ ok: true }` or
+ * structured errors. This is the PEM/CUIT validation that previously lived in core's `provider-adapters.ts`.
  */
 export function validateArcaCredentials(input: ValidateCredentialsInput): CredentialValidationResult {
     const errors: Array<CredentialValidationError> = [];
-    const {configuration, credentials} = input;
+    const {credentials, expectedTaxId} = input;
 
-    const issuerTaxId = configuration.issuerTaxId;
-    if (typeof issuerTaxId !== 'string' || !CUIT_RE.test(issuerTaxId)) {
+    // The owning company's CUIT the cert must belong to, canonicalized so formatting is not significant.
+    const expected = canonicalCuit(expectedTaxId);
+    if (expected === null) {
         errors.push({
             code: 'INVALID_TAXPAYER_ID',
-            message: 'configuration.issuerTaxId must be an 11-digit CUIT',
+            message: `expectedTaxId "${expectedTaxId}" is not a valid CUIT`,
         });
     }
 
@@ -54,6 +54,25 @@ export function validateArcaCredentials(input: ValidateCredentialsInput): Creden
 
     if (certOk && keyOk && !keyMatchesCertificatePem(certPem, keyPem)) {
         errors.push({code: 'KEY_CERT_MISMATCH', message: 'keyPem does not match the certificate'});
+    }
+
+    // Identity check: the certificate must belong to the company that owns the integration. Runs only
+    // after the structural checks so an unparseable cert fails with its own code (per the contract), and
+    // only when `expectedTaxId` itself is a valid CUIT. The cert's serialNumber RDN goes through the same
+    // canonicalizer as `expectedTaxId`, so formatting (the `CUIT ` prefix, dashes) never causes a spurious
+    // mismatch.
+    if (certOk && expected !== null) {
+        const serial = certificateSubjectSerialNumber(certPem);
+        const certTaxId = serial === null ? null : canonicalCuit(serial);
+        if (certTaxId !== expected) {
+            errors.push({
+                code: 'TAXID_MISMATCH',
+                message:
+                    certTaxId === null
+                        ? `certificate subject carries no CUIT; expected ${expected}`
+                        : `certificate was issued to CUIT ${certTaxId}, expected ${expected}`,
+            });
+        }
     }
 
     return errors.length > 0 ? {ok: false, errors} : {ok: true};

@@ -111,6 +111,27 @@ export function keyMatchesCertificatePem(certPem: string, keyPem: string): boole
 }
 
 /**
+ * Returns the raw value of the certificate subject's `serialNumber` RDN (OID 2.5.4.5), or `null` if the
+ * material is not a parseable X.509 certificate or has no such RDN. ARCA embeds the taxpayer CUIT here,
+ * rendered by OpenSSL/Node as e.g. `serialNumber=CUIT 20441917369`. Only that RDN is consulted — a digit
+ * run elsewhere in the subject (a CN, an OU) is never mistaken for the taxpayer id. Interpreting the raw
+ * value as a CUIT (stripping the `CUIT ` prefix / separators, length check) is the caller's job; see
+ * `canonicalCuit`.
+ */
+export function certificateSubjectSerialNumber(certPem: string): string | null {
+    try {
+        const {subject} = new crypto.X509Certificate(ensureCertificatePem(certPem));
+        const serialLine = subject
+            .split('\n')
+            .map((line) => line.trim())
+            .find((line) => /^serialNumber=/i.test(line));
+        return serialLine === undefined ? null : serialLine.slice(serialLine.indexOf('=') + 1).trim();
+    } catch {
+        return null;
+    }
+}
+
+/**
  * True if the material is a CSR (certificate *request*) rather than an issued certificate — the most
  * common mistaken upload. Tolerates a missing/`CERTIFICATE`-mislabeled armor around the base64 body.
  */

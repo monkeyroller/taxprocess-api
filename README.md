@@ -65,7 +65,9 @@ curl -X POST http://localhost:4101/api/authority/status \
 ## HTTP contract (routePrefix `/api`)
 
 Every issuing call carries an `entity` block `{ entityCode, issuerTaxId, environment, credentials? }` and
-dispatches on `entityCode` (unknown code → `400 UNKNOWN_ENTITY`).
+dispatches on `entityCode` (unknown code → `400 UNKNOWN_ENTITY`). The neutral field names are generic by design;
+see the **Neutral field glossary** in [docs/CONTRACT.md](docs/CONTRACT.md) for what each maps to (e.g.
+`issuerTaxId` → ARCA CUIT, `documentTypeId` → CbteTipo).
 
 | endpoint | status | notes |
 | --- | --- | --- |

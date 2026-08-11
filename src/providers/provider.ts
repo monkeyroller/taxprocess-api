@@ -72,6 +72,10 @@ export interface NeutralInvoice {
     readonly documentTypeId: number;
     readonly concept: NeutralInvoiceConcept;
     readonly salesPointNumber: number;
+    /** Exact voucher number to authorize (WSFEv1 CbteDesde). Core owns the number; the service never computes it. */
+    readonly voucherNumberFrom: number;
+    /** Exact voucher number to authorize (WSFEv1 CbteHasta). Single-voucher flow: equals voucherNumberFrom. */
+    readonly voucherNumberTo: number;
     readonly receiver: NeutralInvoiceReceiver;
     readonly currencyIso: string;
     readonly currencyRate: number;
@@ -113,6 +117,12 @@ export interface ValidateCredentialsInput {
     readonly environment: GenericEnvironment;
     readonly configuration: Record<string, unknown>;
     readonly credentials: IssuerCredentials;
+    /**
+     * The owning company's registered tax id (AR: CUIT) that the certificate must belong to. Sent by core
+     * from `org.company.identificationNumber`. Formatting is not significant — the provider canonicalizes
+     * it (and the cert's) to 11 digits before matching. Required — core always sends it.
+     */
+    readonly expectedTaxId: string;
 }
 
 /**

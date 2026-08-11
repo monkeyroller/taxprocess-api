@@ -57,7 +57,10 @@ export function toHttpError(err: unknown): HttpErrorResult {
         return make(400, 'UNKNOWN_ENTITY', err.message, {entityCode: err.entityCode});
     }
     if (err instanceof ArcaValidationError) {
-        return make(400, 'ARCA_VALIDATION', err.message);
+        // Top-level `code` stays the stable category (§8); the specific reason (e.g.
+        // `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `UNMAPPED_CURRENCY`) rides in `details.code` so callers can
+        // branch on it without parsing the message. Absent when the validation error carried no code.
+        return make(400, 'ARCA_VALIDATION', err.message, err.code === undefined ? undefined : {code: err.code});
     }
     if (err instanceof NotImplementedError) {
         return make(501, 'NOT_IMPLEMENTED', err.message);

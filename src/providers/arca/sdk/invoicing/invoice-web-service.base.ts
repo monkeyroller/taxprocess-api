@@ -53,7 +53,11 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
         return this.parseLastAuthorizedNumber(result);
     }
 
-    /** Queries a previously authorized voucher. WSFEv1: `FECompConsultar`. */
+    /**
+     * Queries a previously authorized voucher. WSFEv1: `FECompConsultar`. The only operation that returns a
+     * stored CAE, so it is also the idempotency backstop for `requestAuthorization`: on an already-authorized
+     * number it recovers the issued CAE. See `docs/CONTRACT.md` (`/invoices/authorize` idempotency).
+     */
     async queryVoucher(
         auth: ArcaAuth,
         salesPointNumber: number,

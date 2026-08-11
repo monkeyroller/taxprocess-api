@@ -26,6 +26,7 @@ export {
     isValidCertificate,
     isValidPrivateKey,
     isCertificateSigningRequest,
+    certificateSubjectSerialNumber,
     canonicalizeCertificatePem,
     canonicalizePrivateKeyPem,
     keyMatchesCertificatePem,

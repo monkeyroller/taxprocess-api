@@ -22,6 +22,7 @@ export class EntitiesController {
                 environment: body.environment,
                 configuration: body.configuration,
                 credentials: body.credentials,
+                expectedTaxId: body.expectedTaxId,
             });
             return res.json(result);
         } catch (err) {

@@ -1,5 +1,5 @@
 import {Type} from 'class-transformer';
-import {IsIn, IsObject, ValidateNested} from 'class-validator';
+import {IsIn, IsNotEmpty, IsObject, IsString, ValidateNested} from 'class-validator';
 import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider.js';
 import {IssuerCredentialsDto} from './entity-auth.dto.js';
 
@@ -12,11 +12,25 @@ export class ValidateCredentialsRequestDto {
     @IsIn(GENERIC_ENVIRONMENTS)
     environment!: GenericEnvironment;
 
-    /** Free-form per-entity settings blob; the provider validates its contents. */
+    /**
+     * Free-form per-entity settings blob; the provider validates its contents. For ARCA the credential
+     * validation reads nothing from here — the issuer identity it checks the certificate against comes from
+     * `expectedTaxId`, not from this blob.
+     */
     @IsObject()
     configuration!: Record<string, unknown>;
 
     @ValidateNested()
     @Type(() => IssuerCredentialsDto)
     credentials!: IssuerCredentialsDto;
+
+    /**
+     * The owning company's registered tax id (AR: CUIT) the certificate must belong to — sourced from
+     * core's `org.company.identificationNumber`. Any formatting is accepted (`"20441917369"` or
+     * `"20-44191736-9"`); the provider canonicalizes it to 11 digits before matching. Required: core always
+     * sends it, and the provider enforces the taxpayer match against it.
+     */
+    @IsString()
+    @IsNotEmpty()
+    expectedTaxId!: string;
 }

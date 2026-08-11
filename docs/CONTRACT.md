@@ -65,6 +65,41 @@ store for horizontal scale is **deferred**.
 }
 ```
 
+### Neutral field glossary (what each field means → ARCA)
+
+The wire is deliberately **entity-neutral**: generic names (`issuerTaxId`, `documentTypeId`) replace the old
+domain-bound ones (`cuit`, `voucherType`) so the contract can serve future tax entities. This table is the
+plain-language key — for each neutral field: what it means, and what it maps to for **ARCA** (Argentina/AFIP).
+The ARCA-specific codes/terms live only inside the provider; the wire never carries them.
+
+| neutral field | plain meaning | ARCA correspondence |
+| --- | --- | --- |
+| `entity.entityCode` | which tax authority/provider handles the request | `"ARCA"` (Argentina AFIP) |
+| `entity.issuerTaxId` | issuing taxpayer's canonical tax id (string) | **CUIT**, 11 digits, e.g. `"20123456789"` |
+| `entity.environment` | generic environment selector | `"testing"`→homologación, `"production"`→producción |
+| `entity.credentials.certPem/keyPem` | issuer certificate + private key (on the re-send only) | the WSAA login cert/key |
+| `invoice.documentTypeId` | document/voucher type | **CbteTipo** (Factura A=1, B=6, C=11, M=51, FCE A=201…) |
+| `invoice.concept` | goods / services / both | **Concepto** (1 / 2 / 3) |
+| `invoice.salesPointNumber` | point of sale | **PtoVta** |
+| `invoice.receiver.identificationTypeId` | receiver's id-document type | **DocTipo** (80=CUIT, 96=DNI, 99=consumidor final) |
+| `invoice.receiver.identificationNumber` | receiver's id number (string; `"0"` = anonymous) | **DocNro** |
+| `invoice.receiver.fiscalConditionId` | receiver's VAT/fiscal condition | **CondicionIVAReceptorId** (RG 5616: 1=RI, 5=CF, 6=Monotributo…) |
+| `invoice.currencyIso` | ISO-4217 currency | **MonId** (ARS→PES, USD→DOL, EUR→060) |
+| `invoice.currencyRate` | exchange rate to the local currency | **MonCotiz** |
+| `invoice.issueDate` | ISO-8601 issue date | **CbteFch** (±5-day clamp for concept 1) |
+| `invoice.lines[].netAmount` | taxed line net (base) | part of **Iva[]** subtotal grouping |
+| `invoice.lines[].taxRatePercent` | tax rate % for the line (21, 10.5, 0…) | VAT alícuota → **Iva[].Id** |
+| `invoice.lines[].taxAmount` | tax amount for the line | **Iva[].Importe** |
+| `invoice.totals.untaxed` | net not subject to tax | **ImpTotConc** |
+| `invoice.totals.exempt` | exempt amount | **ImpOpEx** |
+| `invoice.totals.perceptions` | perceptions/other tributes | **Tributos** (single "Otros" id 99) |
+| result `authorizationCode` | the authorization code | **CAE** |
+| result `expiration` | authorization expiry (ISO-8601) | **CAEFchVto** |
+| result `authorizedNumber` | authority-assigned voucher number | **CbteDesde** |
+| result `qr` | fiscal QR URL | **RG-4892** QR |
+| result `status` | AUTHORIZED / PARTIAL / REJECTED | **Resultado** A / P / R |
+| result `providerMetadata` | entity-specific extras (core-owned; see §7) | `{}` today |
+
 ---
 
 ## 3. Endpoints
@@ -83,12 +118,22 @@ Validates a credential bundle at registration time. Core calls this synchronousl
 so bad credentials are rejected up front. Body:
 ```jsonc
 { "environment": "testing",
-  "configuration": { "issuerTaxId": "20123456789", "webService": "WSFEv1" },
-  "credentials":   { "certPem": "…", "keyPem": "…" } }
+  "configuration": { "webService": "WSFEv1" },   // ARCA validation reads nothing from here (see note)
+  "credentials":   { "certPem": "…", "keyPem": "…" },
+  "expectedTaxId": "20441917369" }   // required: the owning company's CUIT (any formatting; canonicalized to 11 digits)
 ```
 `200 → { "ok": true }` or `200 → { "ok": false, "errors": [ { "code": "...", "message": "..." } ] }`.
-For ARCA the checks are: `configuration.issuerTaxId` is an 11-digit CUIT; `certPem` is an issued certificate
-(**not** a CSR); `keyPem` parses; and the key matches the certificate.
+For ARCA the checks are: `expectedTaxId` is a valid CUIT; `certPem` is an issued certificate (**not** a CSR);
+`keyPem` parses; and the key matches the certificate. The CUIT in the certificate subject's `serialNumber` RDN
+must equal `expectedTaxId` — both are canonicalized to their bare 11 digits before comparison, so formatting
+(dashes, a `CUIT ` prefix) is not significant — else `TAXID_MISMATCH` (structural cert checks win first). Error
+`code`s: `INVALID_TAXPAYER_ID` (malformed `expectedTaxId`), `CERT_IS_CSR`, `INVALID_CERT`, `INVALID_KEY`,
+`KEY_CERT_MISMATCH`, `TAXID_MISMATCH`.
+
+> **Issuer identity.** Credential validation no longer takes an `issuerTaxId` — the certificate is checked
+> against the authoritative, core-supplied `expectedTaxId` (the owning company's CUIT). The operational issuer
+> identity used at **issuing** time is still `entity.issuerTaxId` on those calls; it is a separate field and is
+> unaffected by this endpoint.
 
 ### `POST /api/invoices/authorize`
 Requests an authorization (ARCA: a CAE). The caller supplies a **neutral invoice with core's own ids** (§5);
@@ -102,6 +147,8 @@ Request:
     "documentTypeId": 1,              // core id → this service maps to CbteTipo
     "concept": 1,                     // 1=goods, 2=services, 3=both
     "salesPointNumber": 1,            // PtoVta
+    "voucherNumberFrom": 42,          // CbteDesde — core owns the number (see below)
+    "voucherNumberTo": 42,            // CbteHasta — single-voucher flow: equals voucherNumberFrom
     "receiver": {
       "identificationTypeId": 1,      // core id → DocTipo (80=CUIT, 96=DNI, 99=consumidor final)
       "identificationNumber": "20111111112",  // digits as a string; "0" for anonymous
@@ -131,10 +178,21 @@ Responses:
 - `422` (rejected/partial): same shape, `status:"REJECTED"|"PARTIAL"`, empty `authorizationCode`, populated
   `observations`.
 
-**Voucher number:** this service asks the authority for the last authorized number and uses `+1` — the caller
-does not send it. **Idempotency:** if the authority authorizes but core's persistence then fails, the voucher
-number is consumed. On retry, call `POST /invoices/query` to recover the already-authorized voucher instead of
-re-authorizing.
+**Voucher number:** core owns the number and sends it as `voucherNumberFrom`/`voucherNumberTo` (single-voucher
+flow: equal). This service authorizes exactly that number — it never asks the authority for the last-authorized
+number and adds `+1`. Use `POST /invoices/last-authorized` to fetch the next number to assign.
+
+**Idempotency:** `authorize` is idempotent on the voucher number. If the authority authorizes but core's
+persistence then fails, the number is consumed on the authority's side; **re-sending the same invoice with the
+same number returns the already-issued CAE** (a full `200` result, QR included) instead of a rejection — this
+service reconciles internally via the authority's voucher query. Re-sending the *same number* with a *different
+amount* is refused (`400 ARCA_VALIDATION`, `details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than
+returning a CAE for the wrong invoice. `POST /invoices/query` remains available for explicit, caller-driven
+recovery.
+
+**Single-voucher only:** `voucherNumberFrom` and `voucherNumberTo` must be equal (§5). A range
+(`voucherNumberTo > voucherNumberFrom`) is refused (`400 ARCA_VALIDATION`,
+`details.code: "VOUCHER_RANGE_UNSUPPORTED"`); it is never silently truncated to a single voucher.
 
 ### `POST /api/invoices/last-authorized`
 Body `{ "entity": {...}, "salesPointNumber": 1, "documentTypeId": 1 }` → `200 { "number": 42 }`.
@@ -214,20 +272,22 @@ Constraints on core:
 This service publishes the shape of the three JSONB blobs core stores opaquely. The
 `credentials/validate` endpoint (§3) enforces `configuration` + `credentials`.
 
-### ARCA — `configuration` (non-secret settings incl. issuer identity)
+### ARCA — `configuration` (non-secret settings)
 ```jsonc
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["environment", "issuerTaxId", "webService"],
+  "required": ["environment", "webService"],
   "additionalProperties": false,
   "properties": {
     "environment": { "enum": ["production", "testing"] },
-    "issuerTaxId": { "type": "string", "pattern": "^\\d{11}$" },
     "webService":  { "enum": ["WSFEv1", "WSMTXCA", "WSFEXv1"] }
   }
 }
 ```
+> No `issuerTaxId` here: the issuer identity is the owning company's CUIT. Credential validation checks the
+> certificate against the core-supplied `expectedTaxId`; at issuing time the same CUIT rides the request as
+> `entity.issuerTaxId` (§4), sourced by core from the company record — it is not stored in `configuration`.
 
 ### ARCA — `credentials` (secret bundle only)
 ```jsonc
@@ -272,7 +332,7 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | --- | --- | --- |
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed (e.g. an unmapped id) |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`) when known |
 | 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |

@@ -7,6 +7,8 @@ function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
         documentTypeId: 1,
         concept: 1,
         salesPointNumber: 1,
+        voucherNumberFrom: 1,
+        voucherNumberTo: 1,
         receiver: {identificationTypeId: 80, identificationNumber: '20111111112', fiscalConditionId: 1},
         currencyIso: 'ARS',
         currencyRate: 1,
