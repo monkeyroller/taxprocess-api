@@ -46,7 +46,7 @@ detects `409 CREDENTIALS_REQUIRED` correctly — only the request **bodies** mus
 | `receiverIvaConditionId` (flat) | `receiver.fiscalConditionId` |
 | `vatRatePercent` / `vatAmount` (lines) | `taxRatePercent` / `taxAmount` |
 | `untaxedTotal` / `exemptTotal` / `perceptionsTotal` (flat) | `totals.untaxed` / `totals.exempt` / `totals.perceptions` |
-| `concept`, `salesPointNumber`, `currencyRate`, `issueDate`, `netAmount` | unchanged |
+| `concept`, `pointOfSaleNumber`, `currencyRate`, `issueDate`, `netAmount` | unchanged |
 
 Core sends the **generic ids** (`documentTypeId`, `receiver.identificationTypeId`,
 `receiver.fiscalConditionId`) — the tax service maps them to ARCA codes. Do **not** resolve ARCA codes core-side
@@ -57,7 +57,7 @@ anymore.
   zeros and the `"0"` anonymous-consumer sentinel the contract specifies.
 
 ### 5. last-authorized / query
-- `voucherType` → **`documentTypeId`** in both bodies (`{entity, salesPointNumber, documentTypeId[, voucherNumber]}`).
+- `voucherType` → **`documentTypeId`** in both bodies (`{entity, pointOfSaleNumber, documentTypeId[, voucherNumber]}`).
 
 ### 6. authority/status
 - Body becomes `{ entityCode, environment }` — add **`entityCode`**, send generic environment.

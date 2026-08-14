@@ -6,6 +6,7 @@ import {useExpressServer} from 'routing-controllers';
 import {env} from './config/env.js';
 import {StatusController} from './http/controllers/status.controller.js';
 import {InvoicesController} from './http/controllers/invoices.controller.js';
+import {PointsOfSaleController} from './http/controllers/points-of-sale.controller.js';
 import {TaxpayersController} from './http/controllers/taxpayers.controller.js';
 import {EntitiesController} from './http/controllers/entities.controller.js';
 import {toHttpError} from './http/error-mapper.js';
@@ -33,6 +34,7 @@ function bootstrap(): void {
         controllers: [
             StatusController,
             InvoicesController,
+            PointsOfSaleController,
             TaxpayersController,
             EntitiesController
         ],

@@ -4,6 +4,7 @@ import {getProvider} from '../../providers/registry.js';
 import {
     AuthorizeInvoiceRequestDto,
     LastAuthorizedRequestDto,
+    NextNumbersRequestDto,
     QueryVoucherRequestDto,
 } from '../dto/invoice.dto.js';
 import type {LastAuthorizedResultDto} from '../dto/neutral-result.dto.js';
@@ -36,8 +37,23 @@ export class InvoicesController {
             const {entity} = body;
             const result: LastAuthorizedResultDto = await getProvider(entity.entityCode).lastAuthorized(
                 entity,
-                body.salesPointNumber,
-                body.documentTypeId,
+                body.pointOfSaleNumber,
+                body.documentTypeCode,
+            );
+            return res.json(result);
+        } catch (err) {
+            return sendError(res, err);
+        }
+    }
+
+    @Post('/next-numbers')
+    async nextNumbers(@Body() body: NextNumbersRequestDto, @Res() res: Response): Promise<Response> {
+        try {
+            const {entity} = body;
+            const result = await getProvider(entity.entityCode).nextNumbers(
+                entity,
+                body.pointOfSaleNumber,
+                body.documentTypeCodes,
             );
             return res.json(result);
         } catch (err) {
@@ -51,8 +67,8 @@ export class InvoicesController {
             const {entity} = body;
             const result = await getProvider(entity.entityCode).queryVoucher(
                 entity,
-                body.salesPointNumber,
-                body.documentTypeId,
+                body.pointOfSaleNumber,
+                body.documentTypeCode,
                 body.voucherNumber,
             );
             return res.json(result);

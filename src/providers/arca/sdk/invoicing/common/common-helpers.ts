@@ -33,6 +33,15 @@ export function cleanCode(value: unknown): string | undefined {
     return s === '' || s === '0' ? undefined : s;
 }
 
+/** Like {@link cleanCode} for date fields that ARCA fills with the literal `"NULL"` when empty (e.g. `FchBaja`). */
+export function cleanArcaDate(value: unknown): string | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+    const s = String(value).trim();
+    return s === '' || s === '0' || s.toUpperCase() === 'NULL' ? undefined : s;
+}
+
 export function normalizeResultCode(value: string | undefined): 'A' | 'R' | 'P' {
     return value === 'A' || value === 'P' ? value : 'R';
 }

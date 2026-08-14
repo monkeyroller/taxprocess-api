@@ -17,7 +17,7 @@ describe('buildArcaQrUrl', () => {
         const url = buildArcaQrUrl({
             date: new Date('2026-08-04T12:00:00Z'),
             cuit: 20111111112,
-            salesPointNumber: 3,
+            pointOfSaleNumber: 3,
             voucherType: 6,
             voucherNumber: 145,
             totalAmount: 121.0,

@@ -105,7 +105,7 @@ Issuer/entity block on every issuing call:
 ```jsonc
 {
   "documentTypeId": 12,                     // core id → this service maps to CbteTipo
-  "salesPointNumber": 3,
+  "pointOfSaleNumber": 3,
   "receiver": { "identificationTypeId": 1,  // → DocTipo
                 "identificationNumber": "30111111118",
                 "fiscalConditionId": 5 },   // → CondicionIVAReceptorId

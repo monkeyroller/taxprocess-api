@@ -2,6 +2,7 @@ import {Type} from 'class-transformer';
 import {
     ArrayMinSize,
     IsArray,
+    IsDefined,
     IsIn,
     IsInt,
     IsISO8601,
@@ -18,8 +19,8 @@ import type {NeutralInvoiceConcept} from '../../providers/provider.js';
 import {EntityAuthDto} from './entity-auth.dto.js';
 
 /**
- * NEUTRAL contract: the request carries core's own generic ids (`documentTypeId`,
- * `receiver.identificationTypeId`, `receiver.fiscalConditionId`). The provider maps these to the tax
+ * NEUTRAL contract: the request carries provider-agnostic canonical codes (`documentTypeCode`,
+ * `receiver.identificationTypeCode`, `receiver.fiscalConditionCode`). The provider maps these to the tax
  * entity's real codes and owns the mechanical translation (currency, tax rates, totals, dates, QR).
  */
 
@@ -40,20 +41,20 @@ export class InvoiceLineDto {
 
 /** The invoice receiver, identified by a per-entity identification type + number. */
 export class InvoiceReceiverDto {
-    /** core `identificationTypeId` → provider maps to the entity's document-type code (AR: DocTipo). */
+    /** canonical `identificationTypeCode` → provider maps to the entity's document-type code (AR: DocTipo). */
     @IsInt()
     @Min(0)
-    identificationTypeId!: number;
+    identificationTypeCode!: number;
 
     /** The receiver's identification number (digits as a string; `"0"` for an anonymous receiver). */
     @IsString()
     @MinLength(1)
     identificationNumber!: string;
 
-    /** core `fiscalConditionId` → provider maps to the entity's fiscal-condition code (AR: CondicionIVAReceptorId). */
+    /** canonical `fiscalConditionCode` → provider maps to the entity's fiscal-condition code (AR: CondicionIVAReceptorId). */
     @IsInt()
     @IsPositive()
-    fiscalConditionId!: number;
+    fiscalConditionCode!: number;
 }
 
 /** Optional invoice-level totals not derivable from the taxed lines. */
@@ -79,10 +80,10 @@ export class InvoiceTotalsDto {
 
 /** A neutral invoice carrying core's generic ids. */
 export class NeutralInvoiceDto {
-    /** core `documentTypeId` → provider maps to the entity's voucher-type code (AR: CbteTipo). */
+    /** canonical `documentTypeCode` → provider maps to the entity's voucher-type code (AR: CbteTipo). */
     @IsInt()
     @IsPositive()
-    documentTypeId!: number;
+    documentTypeCode!: number;
 
     /** Concept: 1 = goods, 2 = services, 3 = both. */
     @IsIn([1, 2, 3])
@@ -90,7 +91,7 @@ export class NeutralInvoiceDto {
 
     @IsInt()
     @IsPositive()
-    salesPointNumber!: number;
+    pointOfSaleNumber!: number;
 
     /** Exact voucher number to authorize (WSFEv1 CbteDesde). Required — core owns the number. */
     @IsInt()
@@ -166,11 +167,42 @@ export class LastAuthorizedRequestDto {
 
     @IsInt()
     @IsPositive()
-    salesPointNumber!: number;
+    pointOfSaleNumber!: number;
 
     @IsInt()
     @IsPositive()
-    documentTypeId!: number;
+    documentTypeCode!: number;
+}
+
+/** Body for `POST /invoices/next-numbers` — batch next-expected-number lookup for one point of sale. */
+export class NextNumbersRequestDto {
+    // `@IsDefined` alongside `@ValidateNested`: nested validation alone passes a *missing* `entity` (nothing to
+    // validate), which would then NPE in the controller → 500. This makes a missing entity a clean 400.
+    @IsDefined()
+    @ValidateNested()
+    @Type(() => EntityAuthDto)
+    entity!: EntityAuthDto;
+
+    @IsInt()
+    @IsPositive()
+    pointOfSaleNumber!: number;
+
+    /** Canonical document-type codes (AR: each a CbteTipo). Non-empty; core may de-duplicate before sending. */
+    @IsArray()
+    @ArrayMinSize(1)
+    @IsInt({each: true})
+    @IsPositive({each: true})
+    documentTypeCodes!: Array<number>;
+}
+
+/** Body for `POST /points-of-sale` — identity only; the point-of-sale list is scoped to the entity/issuer. */
+export class PointsOfSaleRequestDto {
+    // `@IsDefined` is required alongside `@ValidateNested`: nested validation alone passes a *missing* `entity`
+    // (there is nothing to validate), which would then NPE in the controller → 500. This makes it a clean 400.
+    @IsDefined()
+    @ValidateNested()
+    @Type(() => EntityAuthDto)
+    entity!: EntityAuthDto;
 }
 
 /** Body for `POST /invoices/query`. */
@@ -181,11 +213,11 @@ export class QueryVoucherRequestDto {
 
     @IsInt()
     @IsPositive()
-    salesPointNumber!: number;
+    pointOfSaleNumber!: number;
 
     @IsInt()
     @IsPositive()
-    documentTypeId!: number;
+    documentTypeCode!: number;
 
     @IsInt()
     @IsPositive()

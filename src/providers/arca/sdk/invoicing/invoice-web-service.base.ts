@@ -1,7 +1,7 @@
 import {SoapClient} from '../core/soap-client.js';
 import {ArcaServiceError, NotImplementedError, type ArcaErrorEntry} from '../core/errors.js';
 import type {ArcaEnvironment} from '../core/constants.js';
-import type {ArcaAuth, ServerStatus} from '../core/types.js';
+import type {ArcaAuth, PointOfSaleInfo, ServerStatus} from '../core/types.js';
 
 /**
  * Shared base for every ARCA invoice-authorization web service (WSFEv1, WSFEXv1, …).
@@ -46,9 +46,9 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
         return this.parseAuthorizationResponse(result);
     }
 
-    /** Last authorized voucher number for a sales point + voucher type. WSFEv1: `FECompUltimoAutorizado`. */
-    async getLastAuthorizedNumber(auth: ArcaAuth, salesPointNumber: number, voucherType: number): Promise<number> {
-        const payload = this.buildLastAuthorizedRequest(auth, salesPointNumber, voucherType);
+    /** Last authorized voucher number for a point of sale + voucher type. WSFEv1: `FECompUltimoAutorizado`. */
+    async getLastAuthorizedNumber(auth: ArcaAuth, pointOfSaleNumber: number, voucherType: number): Promise<number> {
+        const payload = this.buildLastAuthorizedRequest(auth, pointOfSaleNumber, voucherType);
         const result = await this.invoke(this.lastAuthorizedOperation, payload);
         return this.parseLastAuthorizedNumber(result);
     }
@@ -60,13 +60,20 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
      */
     async queryVoucher(
         auth: ArcaAuth,
-        salesPointNumber: number,
+        pointOfSaleNumber: number,
         voucherType: number,
         voucherNumber: number,
     ): Promise<TResponse> {
-        const payload = this.buildQueryRequest(auth, salesPointNumber, voucherType, voucherNumber);
+        const payload = this.buildQueryRequest(auth, pointOfSaleNumber, voucherType, voucherNumber);
         const result = await this.invoke(this.queryOperation, payload);
         return this.parseVoucherQuery(result);
+    }
+
+    /** The entity's registered points of sale. WSFEv1: `FEParamGetPtosVenta`. */
+    async getPointsOfSale(auth: ArcaAuth): Promise<Array<PointOfSaleInfo>> {
+        const payload = this.buildPointsOfSaleRequest(auth);
+        const result = await this.invoke(this.pointsOfSaleOperation, payload);
+        return this.parsePointsOfSale(result);
     }
 
     /** Service health check. WSFEv1: `FEDummy` (unauthenticated). */
@@ -105,6 +112,7 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
     protected readonly authorizeOperation: string = '';
     protected readonly lastAuthorizedOperation: string = '';
     protected readonly queryOperation: string = '';
+    protected readonly pointsOfSaleOperation: string = '';
     protected readonly dummyOperation: string = '';
 
     protected buildAuthorizationRequest(_auth: ArcaAuth, _request: TRequest): Record<string, unknown> {
@@ -117,7 +125,7 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
 
     protected buildLastAuthorizedRequest(
         _auth: ArcaAuth,
-        _salesPointNumber: number,
+        _pointOfSaleNumber: number,
         _voucherType: number,
     ): Record<string, unknown> {
         throw new NotImplementedError(`${this.constructor.name}.getLastAuthorizedNumber`);
@@ -129,7 +137,7 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
 
     protected buildQueryRequest(
         _auth: ArcaAuth,
-        _salesPointNumber: number,
+        _pointOfSaleNumber: number,
         _voucherType: number,
         _voucherNumber: number,
     ): Record<string, unknown> {
@@ -138,6 +146,14 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
 
     protected parseVoucherQuery(_result: Record<string, unknown>): TResponse {
         throw new NotImplementedError(`${this.constructor.name}.queryVoucher`);
+    }
+
+    protected buildPointsOfSaleRequest(_auth: ArcaAuth): Record<string, unknown> {
+        throw new NotImplementedError(`${this.constructor.name}.getPointsOfSale`);
+    }
+
+    protected parsePointsOfSale(_result: Record<string, unknown>): Array<PointOfSaleInfo> {
+        throw new NotImplementedError(`${this.constructor.name}.getPointsOfSale`);
     }
 
     protected parseServerStatus(_result: Record<string, unknown>): ServerStatus {

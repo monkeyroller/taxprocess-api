@@ -1,5 +1,7 @@
 import type {
     NeutralAuthorizationResultDto,
+    NextNumbersResultDto,
+    PointsOfSaleResultDto,
     TaxpayerResultDto,
 } from '../http/dto/neutral-result.dto.js';
 
@@ -52,9 +54,9 @@ export interface NeutralInvoiceLine {
 
 /** The invoice receiver, identified by a per-entity identification type + number. */
 export interface NeutralInvoiceReceiver {
-    readonly identificationTypeId: number;
+    readonly identificationTypeCode: number;
     readonly identificationNumber: string;
-    readonly fiscalConditionId: number;
+    readonly fiscalConditionCode: number;
 }
 
 /** Optional invoice-level totals not derivable from the taxed lines. */
@@ -65,13 +67,14 @@ export interface NeutralInvoiceTotals {
 }
 
 /**
- * A neutral invoice carrying core's own generic ids (`documentTypeId`, `receiver.identificationTypeId`,
- * `receiver.fiscalConditionId`). The provider maps these to the entity's real codes.
+ * A neutral invoice carrying provider-agnostic canonical codes (`documentTypeCode`,
+ * `receiver.identificationTypeCode`, `receiver.fiscalConditionCode`). The provider maps these to the
+ * entity's real codes.
  */
 export interface NeutralInvoice {
-    readonly documentTypeId: number;
+    readonly documentTypeCode: number;
     readonly concept: NeutralInvoiceConcept;
-    readonly salesPointNumber: number;
+    readonly pointOfSaleNumber: number;
     /** Exact voucher number to authorize (WSFEv1 CbteDesde). Core owns the number; the service never computes it. */
     readonly voucherNumberFrom: number;
     /** Exact voucher number to authorize (WSFEv1 CbteHasta). Single-voucher flow: equals voucherNumberFrom. */
@@ -92,6 +95,12 @@ export type TaxAuthorizationResult = NeutralAuthorizationResultDto;
 
 /** Neutral taxpayer-registry lookup result (reuses the country-agnostic result DTO). */
 export type TaxpayerResult = TaxpayerResultDto;
+
+/** Neutral list of the entity's registered points of sale (reuses the country-agnostic result DTO). */
+export type PointsOfSaleResult = PointsOfSaleResultDto;
+
+/** Neutral batch of next-expected voucher numbers, one per requested code (reuses the country-agnostic DTO). */
+export type NextNumbersResult = NextNumbersResultDto;
 
 /** Neutral authority health result. */
 export interface AuthorityStatusResult {
@@ -132,10 +141,12 @@ export interface ValidateCredentialsInput {
 export abstract class TaxEntityProvider {
     abstract validateCredentials(input: ValidateCredentialsInput): Promise<CredentialValidationResult>;
     abstract authorizeInvoice(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult>;
-    abstract lastAuthorized(entity: EntityAuthBlock, salesPointNumber: number, documentTypeId: number): Promise<{number: number}>;
-    abstract queryVoucher(entity: EntityAuthBlock, salesPointNumber: number, documentTypeId: number, voucherNumber: number): Promise<TaxAuthorizationResult>;
+    abstract lastAuthorized(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number): Promise<{number: number}>;
+    abstract nextNumbers(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCodes: ReadonlyArray<number>): Promise<NextNumbersResult>;
+    abstract queryVoucher(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number, voucherNumber: number): Promise<TaxAuthorizationResult>;
     abstract authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult>;
     abstract lookupTaxpayer(entity: EntityAuthBlock, taxpayerId: string, level?: string): Promise<TaxpayerResult>;
+    abstract pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult>;
 }
 
 /** Raised when a request names an entity code with no registered provider. Maps to `400`. */
@@ -143,5 +154,32 @@ export class UnknownEntityError extends Error {
     constructor(readonly entityCode: string) {
         super(`Unknown entity code: "${entityCode}"`);
         this.name = 'UnknownEntityError';
+    }
+}
+
+/**
+ * Raised by {@link TaxEntityProvider.queryVoucher} when the authority has no record of the queried voucher —
+ * it was never issued. Deliberately distinct from an authority transport/business failure (which stays a
+ * `502`): a genuine not-found is a stable, deterministic outcome, not a transient error. Maps to
+ * `404 VOUCHER_NOT_FOUND`.
+ *
+ * This is the exact signal core's orphan reconciliation depends on. A sale left PENDING after an authorize
+ * whose response never persisted may be cleared and re-authorized **only** once the authority confirms the
+ * voucher does not exist; any other query outcome (`502`, timeout) must keep the sale PENDING for a later
+ * retry, never clear it — clearing on an ambiguous failure risks issuing a second fiscal document for a sale
+ * that was in fact already authorized.
+ */
+export class VoucherNotFoundError extends Error {
+    constructor(
+        readonly entityCode: string,
+        readonly pointOfSaleNumber: number,
+        readonly documentTypeCode: number,
+        readonly voucherNumber: number,
+    ) {
+        super(
+            `No voucher ${voucherNumber} for point of sale ${pointOfSaleNumber}, document type ` +
+                `${documentTypeCode} (entity "${entityCode}")`,
+        );
+        this.name = 'VoucherNotFoundError';
     }
 }

@@ -1,12 +1,14 @@
 import {
+    ArcaValidationError,
     WsaaClient,
+    certificateSubjectSerialNumber,
     type ArcaAuth,
     type ArcaConfig,
     type ServiceIdValue,
 } from './sdk/index.js';
 import {soap} from './clients.js';
 import {toArcaEnvironment} from './environment.js';
-import {parseArcaId} from './ar-identifiers.js';
+import {canonicalCuit, parseArcaId} from './ar-identifiers.js';
 import {env} from '../../config/env.js';
 import type {GenericEnvironment, IssuerCredentials} from '../provider.js';
 
@@ -69,6 +71,26 @@ export class TicketStore {
 
         if (!credentials) {
             throw new CredentialsRequiredError(entityCode, issuerTaxId, service, environment);
+        }
+
+        // Fail fast when `issuerTaxId` doesn't match the certificate being sent. WSAA login authenticates the
+        // certificate and carries no CUIT, so a mismatch would otherwise mint a valid ticket under the wrong
+        // identity and only surface far downstream as an opaque WSFEv1 `600 ValidacionDeToken` rejection. The
+        // cert's subject serialNumber RDN and `issuerTaxId` go through the same canonicalizer, so formatting
+        // (dashes, a `CUIT ` prefix) never trips this — mirroring the registration-time check in `credentials.ts`.
+        const serial = certificateSubjectSerialNumber(credentials.certPem);
+        const certCuit = serial === null ? null : canonicalCuit(serial);
+        // Gate on a canonical `issuerTaxId` first: comparing raw `!==` would let a both-`null` case
+        // (cert carries no CUIT *and* `issuerTaxId` doesn't reduce to a CUIT) slip through and mint under an
+        // unverified identity. Mirrors the `expected !== null` guard in `credentials.ts`.
+        const expected = canonicalCuit(issuerTaxId);
+        if (expected === null || certCuit !== expected) {
+            throw new ArcaValidationError(
+                certCuit === null
+                    ? `certificate subject carries no CUIT; expected issuerTaxId ${issuerTaxId}`
+                    : `issuerTaxId ${issuerTaxId} does not match the certificate's CUIT ${certCuit}`,
+                'ISSUER_TAXID_CERT_MISMATCH',
+            );
         }
 
         const config: ArcaConfig = {

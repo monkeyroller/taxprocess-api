@@ -1,164 +1,145 @@
 import {ArcaValidationError} from './sdk/index.js';
 
 /**
- * AR id→real-code maps: translate core's own generic ids into the codes ARCA's WSFEv1 expects. This
- * service is the sole owner of this mapping (core stops resolving ARCA codes and sends its ids instead).
+ * Canonical taxprocess codes → real ARCA codes. Core sends a **provider-agnostic canonical code** for
+ * each of the three fiscal ids (no longer its own DB primary keys); this service is the sole owner of the
+ * translation to each provider's real codes.
  *
- * Seeded from an authoritative dump of core's `common` catalogs at migration time, so the translation
- * reproduces core's previous behavior exactly (core used to send `Number(document_type.arca_code)`,
- * `contributor_type.fiscal_condition_id`, and `Number(identification_type.iso_code)`):
- *   - documentTypeId       ← common.document_type.id      → Number(arca_code)   (→ CbteTipo)
- *   - fiscalConditionId    ← common.fiscal_condition.id                         (→ CondicionIVAReceptorId,
- *                                                                                 RG 5616; the PK equals
- *                                                                                 the AFIP code, so identity)
- *   - identificationTypeId ← common.identification_type.id → Number(iso_code)   (→ DocTipo)
- * See docs/tax-api-generalization-handoff.md (H2).
+ * The canonical set is expressed as in-code enums (this service has no DB). For ARCA the canonical code
+ * **equals** ARCA's own code, so all three translations are the identity — each function only validates
+ * that the code is a known member of its domain and returns it unchanged:
+ *   - documentTypeCode       → CbteTipo               (WSFEv1)
+ *   - fiscalConditionCode    → CondicionIVAReceptorId (RG 5616)
+ *   - identificationTypeCode → DocTipo
+ * The functions are kept as the per-provider extension point: a future non-ARCA provider supplies a real
+ * (non-identity) map from the same canonical enum to its own codes. See
+ * docs/contract-changes/2026-08-11_taxprocess-canonical-codes.md.
  */
 
 /**
- * core `documentTypeId` → ARCA `CbteTipo`. Key is the `common.document_type` PK; value is that row's
- * `Number(arca_code)`. NOTE the id and the code are NOT equal in general (e.g. 17→19, 21→30, 36→80).
- * Only fiscal document types (rows with a non-null `arca_code`) are mapped; non-fiscal internal types
- * (remito, presupuesto, …) have no ARCA code and are intentionally absent (they never reach WSFEv1).
- * Both catalog id-sets that carry an `arca_code` are included — the legacy 1–213 rows and the 1xxx
- * rows — so whichever id core references resolves to the same CbteTipo it sent before.
+ * Canonical document-type codes — provider-agnostic. Member **values** are the contract (core's
+ * `common.document_type.fiscal_code`); member names are non-normative. For ARCA the value is already the
+ * `CbteTipo`. The legacy-vs-`1xxx` core-PK duplication is gone: one entry per code.
  */
-const DOCUMENT_TYPE_TO_CBTE_TIPO: Readonly<Record<number, number>> = {
-    // --- legacy id-set (id == arca_code for A/B/C/M families; diverges for export/RG-3419/etc.) ---
-    1: 1, //    FACTURA A
-    2: 2, //    NOTA DE DÉBITO A
-    3: 3, //    NOTA DE CRÉDITO A
-    4: 4, //    RECIBO A
-    5: 5, //    NOTA DE VENTA A
-    6: 6, //    FACTURA B
-    7: 7, //    NOTA DE DÉBITO B
-    8: 8, //    NOTA DE CRÉDITO B
-    9: 9, //    RECIBO B
-    10: 10, //  NOTA DE VENTA B
-    11: 11, //  FACTURA C
-    12: 12, //  NOTA DE DÉBITO C
-    13: 13, //  NOTA DE CRÉDITO C
-    14: 14, //  DOCUMENTO ADUANERO
-    15: 15, //  RECIBO C
-    16: 16, //  NOTA DE VENTA AL CONTADO C
-    17: 19, //  FACTURA DE EXPORTACIÓN            (id ≠ code)
-    18: 20, //  NOTA DE DÉBITO OPERACIONES EXTERIOR (id ≠ code)
-    19: 21, //  NOTA DE CRÉDITO OPERACIONES EXTERIOR (id ≠ code)
-    20: 22, //  FACTURA - PERMISO EXPORTACIÓN SIMPLIFICADO (id ≠ code)
-    21: 30, //  COMPROBANTE DE COMPRA DE BIENES USADOS (id ≠ code)
-    22: 34, //  COMPROBANTE A ART.3 INC.E) RG 3419 (id ≠ code)
-    23: 35, //  COMPROBANTE B ART.3 INC.E) RG 3419 (id ≠ code)
-    24: 36, //  COMPROBANTE C ART.3 INC.E) RG 3419 (id ≠ code)
-    25: 37, //  NC/ND EQUIVALENTE RG 3419 (id ≠ code)
-    26: 38, //  NC/ND EQUIVALENTE RG 3419 (id ≠ code)
-    27: 39, //  OTROS COMPROBANTES A RG 3419 (id ≠ code)
-    28: 40, //  OTROS COMPROBANTES B RG 3419 (id ≠ code)
-    29: 41, //  OTROS COMPROBANTES C RG 3419 (id ≠ code)
-    30: 60, //  CUENTA VENTA Y LÍQUIDO PRODUCTO A (id ≠ code)
-    31: 61, //  CUENTA VENTA Y LÍQUIDO PRODUCTO B (id ≠ code)
-    32: 62, //  CUENTA VENTA Y LÍQUIDO PRODUCTO C (id ≠ code)
-    33: 63, //  LIQUIDACIÓN A (id ≠ code)
-    34: 64, //  LIQUIDACIÓN B (id ≠ code)
-    35: 65, //  LIQUIDACIÓN C (id ≠ code)
-    36: 80, //  COMPROBANTE DIARIO DE CIERRE (ZETA) (id ≠ code)
-    37: 81, //  TIQUE-FACTURA A (id ≠ code)
-    38: 82, //  TIQUE-FACTURA B (id ≠ code)
-    39: 91, //  COMPROBANTE/FACTURA SERVICIOS PÚBLICOS (id ≠ code)
-    40: 92, //  AJUSTE CONTABLE INCREMENTA DÉBITO FISCAL (id ≠ code)
-    41: 93, //  AJUSTE CONTABLE DISMINUYE DÉBITO FISCAL (id ≠ code)
-    42: 94, //  AJUSTE CONTABLE INCREMENTA CRÉDITO FISCAL (id ≠ code)
-    43: 95, //  AJUSTE CONTABLE DISMINUYE CRÉDITO FISCAL (id ≠ code)
-    51: 51, //  FACTURA M
-    52: 52, //  NOTA DE DÉBITO M
-    53: 53, //  NOTA DE CRÉDITO M
-    54: 54, //  RECIBO M
-    55: 55, //  NOTA DE VENTA M
-    201: 201, // FACTURA CRED. ELECT. A (FCE A)
-    202: 202, // NOTA DÉBITO ELECT. A
-    203: 203, // NOTA CRÉDITO ELECT. A
-    206: 206, // FACTURA CRED. ELECT. B (FCE B)
-    207: 207, // NOTA DÉBITO ELECT. B
-    208: 208, // NOTA CRÉDITO ELECT. B
-    211: 211, // FACTURA CRED. ELECT. C (FCE C)
-    212: 212, // NOTA DÉBITO ELECT. C
-    213: 213, // NOTA CRÉDITO ELECT. C
-    // --- 1xxx id-set (same ARCA codes, different core PKs) ---
-    1001: 1, //   FACTURA A
-    1002: 2, //   NOTA DE DÉBITO A
-    1003: 3, //   NOTA DE CRÉDITO A
-    1006: 6, //   FACTURA B
-    1007: 7, //   NOTA DE DÉBITO B
-    1008: 8, //   NOTA DE CRÉDITO B
-    1011: 11, //  FACTURA C
-    1012: 12, //  NOTA DE DÉBITO C
-    1013: 13, //  NOTA DE CRÉDITO C
-    1051: 51, //  FACTURA M
-    1052: 52, //  NOTA DE DÉBITO M
-    1053: 53, //  NOTA DE CRÉDITO M
-    1201: 201, // FACTURA CRED. ELECT. A (FCE A)
-    1202: 202, // NOTA DÉBITO ELECT. A
-    1203: 203, // NOTA CRÉDITO ELECT. A
-    1206: 206, // FACTURA CRED. ELECT. B (FCE B)
-    1207: 207, // NOTA DÉBITO ELECT. B
-    1208: 208, // NOTA CRÉDITO ELECT. B
-    1211: 211, // FACTURA CRED. ELECT. C (FCE C)
-    1212: 212, // NOTA DÉBITO ELECT. C
-    1213: 213, // NOTA CRÉDITO ELECT. C
-};
+export enum TaxProcessDocumentTypeCode {
+    FACTURA_A = 1,
+    NOTA_DEBITO_A = 2,
+    NOTA_CREDITO_A = 3,
+    RECIBO_A = 4,
+    NOTA_VENTA_A = 5,
+    FACTURA_B = 6,
+    NOTA_DEBITO_B = 7,
+    NOTA_CREDITO_B = 8,
+    RECIBO_B = 9,
+    NOTA_VENTA_B = 10,
+    FACTURA_C = 11,
+    NOTA_DEBITO_C = 12,
+    NOTA_CREDITO_C = 13,
+    DOCUMENTO_ADUANERO = 14,
+    RECIBO_C = 15,
+    NOTA_VENTA_CONTADO_C = 16,
+    FACTURA_EXPORTACION = 19,
+    NOTA_DEBITO_EXTERIOR = 20,
+    NOTA_CREDITO_EXTERIOR = 21,
+    FACTURA_PERMISO_EXPORTACION_SIMPLIFICADO = 22,
+    COMPRA_BIENES_USADOS = 30,
+    COMPROBANTE_A_3419 = 34,
+    COMPROBANTE_B_3419 = 35,
+    COMPROBANTE_C_3419 = 36,
+    NOTA_DEBITO_3419 = 37,
+    NOTA_CREDITO_3419 = 38,
+    OTROS_A_3419 = 39,
+    OTROS_B_3419 = 40,
+    OTROS_C_3419 = 41,
+    CUENTA_VENTA_LIQUIDO_A = 60,
+    CUENTA_VENTA_LIQUIDO_B = 61,
+    CUENTA_VENTA_LIQUIDO_C = 62,
+    LIQUIDACION_A = 63,
+    LIQUIDACION_B = 64,
+    LIQUIDACION_C = 65,
+    CIERRE_ZETA = 80,
+    TIQUE_FACTURA_A = 81,
+    TIQUE_FACTURA_B = 82,
+    FACTURA_SERVICIOS_PUBLICOS = 91,
+    AJUSTE_INCREMENTA_DEBITO = 92,
+    AJUSTE_DISMINUYE_DEBITO = 93,
+    AJUSTE_INCREMENTA_CREDITO = 94,
+    AJUSTE_DISMINUYE_CREDITO = 95,
+    FACTURA_M = 51,
+    NOTA_DEBITO_M = 52,
+    NOTA_CREDITO_M = 53,
+    RECIBO_M = 54,
+    NOTA_VENTA_M = 55,
+    FCE_FACTURA_A = 201,
+    FCE_NOTA_DEBITO_A = 202,
+    FCE_NOTA_CREDITO_A = 203,
+    FCE_FACTURA_B = 206,
+    FCE_NOTA_DEBITO_B = 207,
+    FCE_NOTA_CREDITO_B = 208,
+    FCE_FACTURA_C = 211,
+    FCE_NOTA_DEBITO_C = 212,
+    FCE_NOTA_CREDITO_C = 213,
+}
+
+/** Canonical identification-type codes — provider-agnostic. For ARCA the value is already the `DocTipo`. */
+export enum TaxProcessIdentificationTypeCode {
+    CUIT = 80,
+    CUIL = 86,
+    CDI = 87,
+    LE = 89,
+    LC = 90,
+    CI_EXTRANJERA = 91,
+    PASAPORTE = 94,
+    DNI = 96,
+    SIN_IDENTIFICAR = 99,
+}
 
 /**
- * core `fiscalConditionId` → ARCA `CondicionIVAReceptorId` (RG 5616). The `common.fiscal_condition` PKs
- * equal the AFIP `CondicionIVAReceptorId`, so this is an identity map over the seeded PK set.
+ * Canonical fiscal-condition codes — provider-agnostic. For ARCA the value is already the
+ * `CondicionIVAReceptorId` (RG 5616).
  */
-const FISCAL_CONDITION_TO_IVA_RECEPTOR: Readonly<Record<number, number>> = {
-    1: 1, //   IVA Responsable Inscripto
-    4: 4, //   IVA Sujeto Exento
-    5: 5, //   Consumidor Final
-    6: 6, //   Responsable Monotributo
-    7: 7, //   Sujeto no Categorizado
-    8: 8, //   Proveedor del Exterior
-    9: 9, //   Cliente del Exterior
-    10: 10, // IVA Liberado – Ley Nº 19.640
-    13: 13, // Monotributista Social
-    15: 15, // IVA No Alcanzado
-    16: 16, // Monotributo Trabajador Independiente Promovido
-};
+export enum TaxProcessFiscalConditionCode {
+    RESPONSABLE_INSCRIPTO = 1,
+    SUJETO_EXENTO = 4,
+    CONSUMIDOR_FINAL = 5,
+    MONOTRIBUTO = 6,
+    NO_CATEGORIZADO = 7,
+    PROVEEDOR_EXTERIOR = 8,
+    CLIENTE_EXTERIOR = 9,
+    IVA_LIBERADO = 10,
+    MONOTRIBUTISTA_SOCIAL = 13,
+    IVA_NO_ALCANZADO = 15,
+    MONOTRIBUTO_INDEP_PROMOVIDO = 16,
+}
 
 /**
- * core `identificationTypeId` → ARCA `DocTipo`. The `common.identification_type` PKs equal their
- * `iso_code` (which is the AFIP DocTipo), so this is an identity map over the seeded PK set
- * (80 = CUIT, 96 = DNI, 99 = SIN IDENTIFICAR / consumidor final anónimo).
+ * Validates that `code` is a known member of the numeric enum `values` and returns it. Throws
+ * `ArcaValidationError` (`UNKNOWN_CODE`) otherwise. Numeric TS enums are reverse-mapped, so a plain
+ * membership test filters the value half of the object.
  */
-const IDENTIFICATION_TYPE_TO_DOC_TIPO: Readonly<Record<number, number>> = {
-    80: 80, // CUIT
-    86: 86, // CUIL
-    87: 87, // CDI
-    89: 89, // LE
-    90: 90, // LC
-    91: 91, // CI EXTRANJERA
-    94: 94, // PASAPORTE
-    96: 96, // DNI
-    99: 99, // SIN IDENTIFICAR (consumidor final anónimo)
-};
-
-function resolve(map: Readonly<Record<number, number>>, id: number, what: string): number {
-    if (!Object.hasOwn(map, id)) {
-        throw new ArcaValidationError(`No ARCA ${what} mapping for id ${id}`, 'UNMAPPED_ID');
+function assertKnownCode(values: Record<string, string | number>, code: number, what: string): number {
+    const known = Object.values(values).some((v) => v === code);
+    if (!known) {
+        throw new ArcaValidationError(`No ARCA ${what} mapping for canonical code ${code}`, 'UNKNOWN_CODE');
     }
-    return map[id];
+    return code;
 }
 
-/** Maps a core `documentTypeId` to the ARCA `CbteTipo`. Throws `ArcaValidationError` if unmapped. */
-export function toCbteTipo(documentTypeId: number): number {
-    return resolve(DOCUMENT_TYPE_TO_CBTE_TIPO, documentTypeId, 'CbteTipo (documentType)');
+/** Maps a canonical `documentTypeCode` to the ARCA `CbteTipo` (identity). Throws if the code is unknown. */
+export function toCbteTipo(documentTypeCode: number): number {
+    return assertKnownCode(TaxProcessDocumentTypeCode, documentTypeCode, 'CbteTipo (documentType)');
 }
 
-/** Maps a core `fiscalConditionId` to the ARCA `CondicionIVAReceptorId`. Throws if unmapped. */
-export function toCondicionIvaReceptorId(fiscalConditionId: number): number {
-    return resolve(FISCAL_CONDITION_TO_IVA_RECEPTOR, fiscalConditionId, 'CondicionIVAReceptorId (fiscalCondition)');
+/** Maps a canonical `fiscalConditionCode` to the ARCA `CondicionIVAReceptorId` (identity). Throws if unknown. */
+export function toCondicionIvaReceptorId(fiscalConditionCode: number): number {
+    return assertKnownCode(
+        TaxProcessFiscalConditionCode,
+        fiscalConditionCode,
+        'CondicionIVAReceptorId (fiscalCondition)',
+    );
 }
 
-/** Maps a core `identificationTypeId` to the ARCA `DocTipo`. Throws if unmapped. */
-export function toDocTipo(identificationTypeId: number): number {
-    return resolve(IDENTIFICATION_TYPE_TO_DOC_TIPO, identificationTypeId, 'DocTipo (identificationType)');
+/** Maps a canonical `identificationTypeCode` to the ARCA `DocTipo` (identity). Throws if the code is unknown. */
+export function toDocTipo(identificationTypeCode: number): number {
+    return assertKnownCode(TaxProcessIdentificationTypeCode, identificationTypeCode, 'DocTipo (identificationType)');
 }

@@ -9,7 +9,7 @@ export {WsaaClient} from './core/wsaa-client.js';
 export {ENDPOINTS, Namespaces, ServiceId} from './core/constants.js';
 export type {ArcaEnvironment, ServiceIdValue} from './core/constants.js';
 export type {ArcaConfig} from './core/arca-config.js';
-export type {ArcaAuth, AccessTicket, ServerStatus} from './core/types.js';
+export type {ArcaAuth, AccessTicket, ServerStatus, PointOfSaleInfo} from './core/types.js';
 export {
     ArcaError,
     ArcaAuthError,

@@ -38,7 +38,7 @@ export interface ArcaQrParams {
     /** Issuer CUIT (digits). */
     cuit: number;
     /** `PtoVta`. */
-    salesPointNumber: number;
+    pointOfSaleNumber: number;
     /** `CbteTipo`. */
     voucherType: number;
     /** `CbteNro`. */
@@ -64,7 +64,7 @@ export function buildArcaQrUrl(params: ArcaQrParams): string {
         ver: 1,
         fecha: `${year}-${month}-${day}`,
         cuit: params.cuit,
-        ptoVta: params.salesPointNumber,
+        ptoVta: params.pointOfSaleNumber,
         tipoCmp: params.voucherType,
         nroCmp: params.voucherNumber,
         importe: params.totalAmount,

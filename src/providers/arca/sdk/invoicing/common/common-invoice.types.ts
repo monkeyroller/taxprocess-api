@@ -16,7 +16,7 @@ export interface AssociatedVoucher {
     /** `Tipo` — ARCA voucher type code. */
     voucherType: number;
     /** `PtoVta`. */
-    salesPointNumber: number;
+    pointOfSaleNumber: number;
     /** `Nro`. */
     number: number;
     /** `Cuit` of the associated voucher's issuer (optional). */
@@ -42,7 +42,7 @@ export interface InvoiceTribute {
 }
 
 export interface CommonInvoiceRequest {
-    salesPointNumber: number;
+    pointOfSaleNumber: number;
     voucherType: number;
     concept: InvoiceConcept;
     /** ARCA DocTipo (e.g. 80 = CUIT, 96 = DNI, 99 = consumidor final). */

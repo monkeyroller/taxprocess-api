@@ -67,8 +67,9 @@ store for horizontal scale is **deferred**.
 
 ### Neutral field glossary (what each field means → ARCA)
 
-The wire is deliberately **entity-neutral**: generic names (`issuerTaxId`, `documentTypeId`) replace the old
-domain-bound ones (`cuit`, `voucherType`) so the contract can serve future tax entities. This table is the
+The wire is deliberately **entity-neutral**: generic names (`issuerTaxId`, `documentTypeCode`) replace the old
+domain-bound ones (`cuit`, `voucherType`) so the contract can serve future tax entities. The three fiscal
+ids carry **provider-agnostic canonical codes** (no longer core's DB primary keys). This table is the
 plain-language key — for each neutral field: what it means, and what it maps to for **ARCA** (Argentina/AFIP).
 The ARCA-specific codes/terms live only inside the provider; the wire never carries them.
 
@@ -78,12 +79,12 @@ The ARCA-specific codes/terms live only inside the provider; the wire never carr
 | `entity.issuerTaxId` | issuing taxpayer's canonical tax id (string) | **CUIT**, 11 digits, e.g. `"20123456789"` |
 | `entity.environment` | generic environment selector | `"testing"`→homologación, `"production"`→producción |
 | `entity.credentials.certPem/keyPem` | issuer certificate + private key (on the re-send only) | the WSAA login cert/key |
-| `invoice.documentTypeId` | document/voucher type | **CbteTipo** (Factura A=1, B=6, C=11, M=51, FCE A=201…) |
+| `invoice.documentTypeCode` | document/voucher type (canonical code) | **CbteTipo** (Factura A=1, B=6, C=11, M=51, FCE A=201…) |
 | `invoice.concept` | goods / services / both | **Concepto** (1 / 2 / 3) |
-| `invoice.salesPointNumber` | point of sale | **PtoVta** |
-| `invoice.receiver.identificationTypeId` | receiver's id-document type | **DocTipo** (80=CUIT, 96=DNI, 99=consumidor final) |
+| `invoice.pointOfSaleNumber` | point of sale | **PtoVta** |
+| `invoice.receiver.identificationTypeCode` | receiver's id-document type (canonical code) | **DocTipo** (80=CUIT, 96=DNI, 99=consumidor final) |
 | `invoice.receiver.identificationNumber` | receiver's id number (string; `"0"` = anonymous) | **DocNro** |
-| `invoice.receiver.fiscalConditionId` | receiver's VAT/fiscal condition | **CondicionIVAReceptorId** (RG 5616: 1=RI, 5=CF, 6=Monotributo…) |
+| `invoice.receiver.fiscalConditionCode` | receiver's VAT/fiscal condition (canonical code) | **CondicionIVAReceptorId** (RG 5616: 1=RI, 5=CF, 6=Monotributo…) |
 | `invoice.currencyIso` | ISO-4217 currency | **MonId** (ARS→PES, USD→DOL, EUR→060) |
 | `invoice.currencyRate` | exchange rate to the local currency | **MonCotiz** |
 | `invoice.issueDate` | ISO-8601 issue date | **CbteFch** (±5-day clamp for concept 1) |
@@ -99,6 +100,10 @@ The ARCA-specific codes/terms live only inside the provider; the wire never carr
 | result `qr` | fiscal QR URL | **RG-4892** QR |
 | result `status` | AUTHORIZED / PARTIAL / REJECTED | **Resultado** A / P / R |
 | result `providerMetadata` | entity-specific extras (core-owned; see §7) | `{}` today |
+| point-of-sale `number` | a registered point of sale | **PtoVta** / `Nro` (`FEParamGetPtosVenta`) |
+| point-of-sale `issuanceMode` | how the point issues | **EmisionTipo** (`CAE`, `CAEA`, `RECE`…) |
+| point-of-sale `blocked` | authority has the point blocked | **Bloqueado** (`S`→true) |
+| point-of-sale `dischargeDate` | de-registration date (ISO-8601); key omitted while active | **FchBaja** (`NULL` while active) |
 
 ---
 
@@ -144,15 +149,15 @@ Request:
 {
   "entity": { "entityCode":"ARCA", "issuerTaxId":"20123456789", "environment":"testing" },
   "invoice": {
-    "documentTypeId": 1,              // core id → this service maps to CbteTipo
+    "documentTypeCode": 1,            // canonical code → this service maps to CbteTipo
     "concept": 1,                     // 1=goods, 2=services, 3=both
-    "salesPointNumber": 1,            // PtoVta
+    "pointOfSaleNumber": 1,            // PtoVta
     "voucherNumberFrom": 42,          // CbteDesde — core owns the number (see below)
     "voucherNumberTo": 42,            // CbteHasta — single-voucher flow: equals voucherNumberFrom
     "receiver": {
-      "identificationTypeId": 1,      // core id → DocTipo (80=CUIT, 96=DNI, 99=consumidor final)
+      "identificationTypeCode": 80,   // canonical code → DocTipo (80=CUIT, 96=DNI, 99=consumidor final)
       "identificationNumber": "20111111112",  // digits as a string; "0" for anonymous
-      "fiscalConditionId": 1          // core id → CondicionIVAReceptorId (RG 5616)
+      "fiscalConditionCode": 1        // canonical code → CondicionIVAReceptorId (RG 5616)
     },
     "currencyIso": "ARS",             // ISO-4217 → mapped to MonId by this service
     "currencyRate": 1,                // exchange rate to the local currency
@@ -195,11 +200,65 @@ recovery.
 `details.code: "VOUCHER_RANGE_UNSUPPORTED"`); it is never silently truncated to a single voucher.
 
 ### `POST /api/invoices/last-authorized`
-Body `{ "entity": {...}, "salesPointNumber": 1, "documentTypeId": 1 }` → `200 { "number": 42 }`.
+Body `{ "entity": {...}, "pointOfSaleNumber": 1, "documentTypeCode": 1 }` → `200 { "number": 42 }`.
+
+### `POST /api/invoices/next-numbers`
+Batch lookup of the authority's **next expected** voucher number for several document types of one point of
+sale, in a single call. Read-only and side-effect-free (consumes no voucher number; safe to retry). Ticket
+scope `wsfe`, so it may respond `409 CREDENTIALS_REQUIRED` (§4).
+```jsonc
+{ "entity": { "entityCode":"ARCA", "issuerTaxId":"20123456789", "environment":"testing" },
+  "pointOfSaleNumber": 3,
+  "documentTypeCodes": [1, 6, 11] }   // canonical fiscal codes (AR: each a CbteTipo); non-empty
+```
+`200 →`
+```json
+{ "numbers": [
+    { "documentTypeCode": 1,  "nextNumber": 18 },
+    { "documentTypeCode": 6,  "nextNumber": 5  },
+    { "documentTypeCode": 11, "nextNumber": 1  }
+] }
+```
+Per code, `nextNumber` is the authority's next expected correlative (AR: `FECompUltimoAutorizado` + 1); a
+document type never authorized on this point of sale returns `nextNumber: 1`. Every requested code is
+**echoed** in `numbers` (order-independent; core maps back by `documentTypeCode`). An unrecognized code fails
+the whole batch with the standard error envelope (`400 ARCA_VALIDATION`, `details.code: "UNKNOWN_CODE"`) —
+never a silent omission. Keeps the "next" semantics on this service so core stays agnostic (it does not assume
+`next = last + 1`); `last-authorized` is unchanged and answers the single-document-type case.
 
 ### `POST /api/invoices/query`
-Body `{ "entity": {...}, "salesPointNumber": 1, "documentTypeId": 1, "voucherNumber": 42 }` → same shape as
+Body `{ "entity": {...}, "pointOfSaleNumber": 1, "documentTypeCode": 1, "voucherNumber": 42 }` → same shape as
 `authorize`'s result.
+
+**Not-found is a `404`, never a `502`.** When the authority has no record of the queried voucher — it was
+never issued — this endpoint returns `404 { "error": { "code": "VOUCHER_NOT_FOUND", "details": {
+"entityCode", "pointOfSaleNumber", "documentTypeCode", "voucherNumber" } } }`. This is a **stable, deterministic
+outcome**, deliberately separated from authority transport/business/auth failures (which stay `502`). Core's
+orphan reconciliation depends on the distinction: a sale left PENDING after an authorize whose response never
+persisted may be cleared and re-authorized **only** on a `404 VOUCHER_NOT_FOUND`; on any `502`/timeout it must
+keep the sale PENDING and retry, because an ambiguous failure is not proof the voucher was never issued —
+clearing on it risks a second fiscal document for an already-authorized sale. (ARCA reports this as a `602 "No
+existe el comprobante"` `Errors` block, which the provider translates to the neutral `404`.)
+
+### `POST /api/points-of-sale`
+Lists the issuer's registered points of sale (ARCA: WSFEv1 `FEParamGetPtosVenta`). Identity-only body — the list
+is scoped to `entity.issuerTaxId`. Ticket scope `wsfe`, so it may respond `409 CREDENTIALS_REQUIRED` (§4).
+```jsonc
+{ "entity": { "entityCode":"ARCA", "issuerTaxId":"20123456789", "environment":"testing" } }
+```
+`200 →`
+```json
+{ "pointsOfSale": [
+    { "number": 1, "issuanceMode": "CAE",  "blocked": false },
+    { "number": 2, "issuanceMode": "CAEA", "blocked": true, "dischargeDate": "2024-01-15T03:00:00.000Z" }
+] }
+```
+The list is **non-lossy** — blocked and de-registered points are included with flags, so core decides what is
+usable (typically `!blocked && dischargeDate == null`, which reads a missing key as "active"). Optional keys are
+**omitted when absent** (matching `qr`/`taxId` elsewhere): `issuanceMode` (ARCA `EmisionTipo`) is dropped when
+the authority returns none, and `dischargeDate` (ARCA `FchBaja`) is present **only** for a de-registered point —
+while active the key is omitted. An issuer with no registered points returns `{ "pointsOfSale": [] }` (ARCA signals
+this as a `602 "Sin Resultados"` error, which the provider normalizes to the empty list — never a `502`).
 
 ### `POST /api/taxpayers/lookup`
 Body `{ "entity": {...}, "taxpayerId": "20111111112", "level": "A5" }` → `200 { "idPersona":…, "taxId":…,
@@ -225,30 +284,38 @@ Core's tax client must:
    request** with `entity.credentials = { certPem, keyPem }`.
 3. Treat a second `409` as an error (one retry is sufficient).
 
+**Issuer/cert match (mint-time guard):** on the credentialed re-send, this service verifies that the
+certificate's subject CUIT equals `entity.issuerTaxId` **before** logging in to the authority. A mismatch is
+rejected with `400 ARCA_VALIDATION` / `details.code: "ISSUER_TAXID_CERT_MISMATCH"` — so a wrong `issuerTaxId`
+fails fast here instead of minting a ticket under the wrong identity and surfacing later as an opaque authority
+token rejection. Formatting (dashes, a `CUIT ` prefix) is not significant; both sides are canonicalized to 11
+digits. Core should send the CUIT that owns the certificate.
+
 `service` values (in `details`, ARCA): `wsfe` (invoicing) and `ws_sr_padron_a4|a5|a10|a13` (lookups). This
 service caches tickets keyed by `(entityCode, environment, issuerTaxId, service)`, shared across core
 instances — so after a refresh, most requests are served identity-only for ~12h.
 
 ---
 
-## 5. Neutral ids the caller supplies (from core's DB catalogs)
+## 5. Canonical codes the caller supplies
 
-Core sends its **own generic ids**; this service maps them to the entity's real codes (for ARCA, via the maps
-in `src/providers/arca/code-maps.ts`, seeded from core's catalogs).
+Core sends **provider-agnostic canonical codes** (from its `common.*.fiscal_code` columns — no longer its DB
+primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/code-maps.ts`,
+where the three translations are the identity — canonical code == ARCA code).
 
 | Request field | Source in webprocess-api | ARCA target code |
 | --- | --- | --- |
-| `invoice.documentTypeId` | `documentType` PK | `CbteTipo` |
-| `invoice.receiver.fiscalConditionId` | `contributorType`/fiscal-condition PK | `CondicionIVAReceptorId` |
-| `invoice.receiver.identificationTypeId` | `identificationType` PK | `DocTipo` |
+| `invoice.documentTypeCode` | `document_type.fiscal_code` | `CbteTipo` (identity) |
+| `invoice.receiver.fiscalConditionCode` | `fiscal_condition.fiscal_code` | `CondicionIVAReceptorId` (identity) |
+| `invoice.receiver.identificationTypeCode` | `identification_type.fiscal_code` | `DocTipo` (identity) |
 | `invoice.receiver.identificationNumber` | sale's receiver id number (digits) | `DocNro` |
-| `invoice.salesPointNumber` | `pointOfSaleNumber` | `PtoVta` |
+| `invoice.pointOfSaleNumber` | `pointOfSaleNumber` | `PtoVta` |
 | `invoice.currencyIso` | `currency.isoCode` | `MonId` (this service maps ISO→MonId) |
 | `invoice.lines[]` | per taxed line: `netAmount`, `taxAmount`, `taxRatePercent` | `Iva[]` subtotals |
 | `invoice.totals.untaxed/exempt/perceptions` | `sale.totalNotTaxed / totalExempt / totalPerceptions` | `ImpTotConc`/`ImpOpEx`/`Tributos` |
 
-This service owns the id→code translation plus the mechanical mapping: ISO→`MonId`, tax%→id + subtotal
-grouping, perceptions→`Tributos`, date formatting/clamping, and the RG-4892 QR.
+This service owns the canonical-code→code translation plus the mechanical mapping: ISO→`MonId`, tax%→id +
+subtotal grouping, perceptions→`Tributos`, date formatting/clamping, and the RG-4892 QR.
 
 ---
 
@@ -332,7 +399,8 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | --- | --- | --- |
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`) when known |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
 | 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |

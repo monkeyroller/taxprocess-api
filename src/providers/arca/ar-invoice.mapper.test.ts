@@ -4,12 +4,12 @@ import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult} from './ar-invoi
 
 function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
     return {
-        documentTypeId: 1,
+        documentTypeCode: 1,
         concept: 1,
-        salesPointNumber: 1,
+        pointOfSaleNumber: 1,
         voucherNumberFrom: 1,
         voucherNumberTo: 1,
-        receiver: {identificationTypeId: 80, identificationNumber: '20111111112', fiscalConditionId: 1},
+        receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
         currencyIso: 'ARS',
         currencyRate: 1,
         issueDate: '2026-08-05',
@@ -36,12 +36,12 @@ describe('buildCommonInvoiceRequest', () => {
         expect(req.tributes).toBeUndefined();
     });
 
-    it('resolves core ids to ARCA codes', () => {
+    it('resolves canonical codes to ARCA codes', () => {
         const req = buildCommonInvoiceRequest(invoice(), 1, NOW);
-        expect(req.voucherType).toBe(1); // documentTypeId 1 → CbteTipo 1
-        expect(req.docType).toBe(80); // identificationTypeId 80 → DocTipo 80 (CUIT)
+        expect(req.voucherType).toBe(1); // documentTypeCode 1 → CbteTipo 1
+        expect(req.docType).toBe(80); // identificationTypeCode 80 → DocTipo 80 (CUIT)
         expect(req.docNumber).toBe(20_111_111_112); // identificationNumber string → number
-        expect(req.receiverIvaConditionId).toBe(1); // fiscalConditionId 1 → CondicionIVAReceptorId 1
+        expect(req.receiverIvaConditionId).toBe(1); // fiscalConditionCode 1 → CondicionIVAReceptorId 1
     });
 
     it('maps perceptions to a single Otros (99) tribute', () => {
@@ -59,7 +59,7 @@ describe('buildCommonInvoiceRequest', () => {
 
     it('rejects a non-numeric receiver identification number instead of sending NaN', () => {
         expect(() =>
-            buildCommonInvoiceRequest(invoice({receiver: {identificationTypeId: 80, identificationNumber: '20-1111111-2', fiscalConditionId: 1}}), 1, NOW),
+            buildCommonInvoiceRequest(invoice({receiver: {identificationTypeCode: 80, identificationNumber: '20-1111111-2', fiscalConditionCode: 1}}), 1, NOW),
         ).toThrow(ArcaValidationError);
     });
 

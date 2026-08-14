@@ -92,7 +92,7 @@ including the `id ≠ arca_code` divergences; identity `fiscal_condition` and `i
 |---|---|---|---|
 | `documentTypeId` | int > 0 | ✅ | `CbteTipo` |
 | `concept` | `1` \| `2` \| `3` | ✅ | `Concepto` |
-| `salesPointNumber` | int > 0 | ✅ | `PtoVta` |
+| `pointOfSaleNumber` | int > 0 | ✅ | `PtoVta` |
 | `receiver.identificationTypeId` | int ≥ 0 | ✅ | `DocTipo` |
 | `receiver.identificationNumber` | string (≥1 char) | ✅ | `DocNro` (`"0"` for anonymous) |
 | `receiver.fiscalConditionId` | int > 0 | ✅ | `CondicionIVAReceptorId` |
@@ -113,8 +113,8 @@ including the `id ≠ arca_code` divergences; identity `fiscal_condition` and `i
 
 | endpoint | body |
 |---|---|
-| `POST /api/invoices/last-authorized` | `salesPointNumber` (int>0), `documentTypeId` (int>0) |
-| `POST /api/invoices/query` | `salesPointNumber` (int>0), `documentTypeId` (int>0), `voucherNumber` (int>0) |
+| `POST /api/invoices/last-authorized` | `pointOfSaleNumber` (int>0), `documentTypeId` (int>0) |
+| `POST /api/invoices/query` | `pointOfSaleNumber` (int>0), `documentTypeId` (int>0), `voucherNumber` (int>0) |
 | `POST /api/taxpayers/lookup` | `taxpayerId` (string, subject to look up), `level?` (`A4`\|`A5`\|`A10`\|`A13`, default `A5`) |
 | `POST /api/entities/:entityCode/credentials/validate` | `environment`, `configuration` (object), `credentials` `{certPem,keyPem}` |
 

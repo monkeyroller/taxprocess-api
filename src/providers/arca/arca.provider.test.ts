@@ -2,9 +2,9 @@ import 'reflect-metadata';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {plainToInstance} from 'class-transformer';
 import {validate} from 'class-validator';
-import {ArcaServiceError, type CommonInvoiceResult} from './sdk/index.js';
-import type {EntityAuthBlock, NeutralInvoice} from '../provider.js';
-import {NeutralInvoiceDto} from '../../http/dto/invoice.dto.js';
+import {ArcaServiceError, type CommonInvoiceResult, type PointOfSaleInfo} from './sdk/index.js';
+import {VoucherNotFoundError, type EntityAuthBlock, type NeutralInvoice} from '../provider.js';
+import {NeutralInvoiceDto, NextNumbersRequestDto, PointsOfSaleRequestDto} from '../../http/dto/invoice.dto.js';
 
 /**
  * The provider reaches ARCA through two module-level singletons — the ticket store and the
@@ -17,10 +17,11 @@ import {NeutralInvoiceDto} from '../../http/dto/invoice.dto.js';
 const getLastAuthorizedNumber = jest.fn<() => Promise<number>>();
 const requestAuthorization = jest.fn<(auth: unknown, req: any) => Promise<CommonInvoiceResult>>();
 const queryVoucher = jest.fn<(auth: unknown, sp: number, vt: number, n: number) => Promise<CommonInvoiceResult>>();
+const getPointsOfSale = jest.fn<() => Promise<Array<PointOfSaleInfo>>>();
 const resolve = jest.fn<() => Promise<{token: string; sign: string; cuit: number}>>();
 
 jest.unstable_mockModule('./clients.js', () => ({
-    commonInvoiceService: () => ({getLastAuthorizedNumber, requestAuthorization, queryVoucher}),
+    commonInvoiceService: () => ({getLastAuthorizedNumber, requestAuthorization, queryVoucher, getPointsOfSale}),
     // Unused by authorizeInvoice but part of the module's surface — provide inert stubs.
     padronService: () => ({}),
     padronServiceId: () => '',
@@ -38,12 +39,12 @@ const ENTITY: EntityAuthBlock = {entityCode: 'ARCA', issuerTaxId: '20111111112',
 
 function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
     return {
-        documentTypeId: 1,
+        documentTypeCode: 1,
         concept: 1,
-        salesPointNumber: 3,
+        pointOfSaleNumber: 3,
         voucherNumberFrom: 17,
         voucherNumberTo: 17,
-        receiver: {identificationTypeId: 80, identificationNumber: '20111111112', fiscalConditionId: 1},
+        receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
         currencyIso: 'ARS',
         currencyRate: 1,
         issueDate: '2026-08-05',
@@ -189,15 +190,184 @@ describe('ArcaProvider.authorizeInvoice', () => {
     });
 });
 
+describe('ArcaProvider.queryVoucher', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+    });
+
+    it('returns the neutral result for an existing voucher', async () => {
+        queryVoucher.mockResolvedValue(queriedAuthorized);
+
+        const result = await new ArcaProvider().queryVoucher(ENTITY, 3, 1, 17);
+
+        expect(queryVoucher).toHaveBeenCalledWith(expect.anything(), 3, expect.any(Number), 17);
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.authorizationCode).toBe('75123456789012');
+    });
+
+    it('translates ARCA 602 not-found to VoucherNotFoundError (→ 404, not a 502)', async () => {
+        // The orphan-reconciliation contract hinges on this: a never-issued voucher must be a distinct,
+        // deterministic not-found — never a 502 ARCA_SERVICE that would leave the sale stuck PENDING forever.
+        queryVoucher.mockRejectedValue(notFoundError);
+
+        await expect(new ArcaProvider().queryVoucher(ENTITY, 3, 1, 42)).rejects.toMatchObject({
+            name: 'VoucherNotFoundError',
+            entityCode: 'ARCA',
+            pointOfSaleNumber: 3,
+            documentTypeCode: 1,
+            voucherNumber: 42,
+        });
+        await expect(new ArcaProvider().queryVoucher(ENTITY, 3, 1, 42)).rejects.toBeInstanceOf(VoucherNotFoundError);
+    });
+
+    it('propagates a non-602 service error unchanged (stays a 502, sale kept PENDING)', async () => {
+        // A token/auth/transport failure is NOT proof the voucher is missing — it must not masquerade as
+        // not-found, or core could clear an orphan that was in fact already authorized.
+        const thrown = new ArcaServiceError('[600] token', [{code: '600', message: 'ValidacionDeToken'}]);
+        queryVoucher.mockRejectedValue(thrown);
+
+        await expect(new ArcaProvider().queryVoucher(ENTITY, 3, 1, 42)).rejects.toBe(thrown);
+    });
+});
+
+describe('ArcaProvider.pointsOfSale', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+    });
+
+    it('maps SDK points of sale to the neutral shape (blocked boolean; discharge date rendered ISO)', async () => {
+        getPointsOfSale.mockResolvedValue([
+            {number: 1, issuanceMode: 'CAE', blocked: false, dischargeDate: undefined},
+            {number: 2, issuanceMode: 'CAEA', blocked: true, dischargeDate: '20240115'},
+        ]);
+
+        const result = await new ArcaProvider().pointsOfSale(ENTITY);
+
+        expect(result.pointsOfSale).toEqual([
+            {number: 1, issuanceMode: 'CAE', blocked: false, dischargeDate: undefined},
+            {number: 2, issuanceMode: 'CAEA', blocked: true, dischargeDate: '2024-01-15T03:00:00.000Z'},
+        ]);
+    });
+
+    it('returns an empty list when the entity has no registered points of sale', async () => {
+        getPointsOfSale.mockResolvedValue([]);
+
+        const result = await new ArcaProvider().pointsOfSale(ENTITY);
+
+        expect(result.pointsOfSale).toEqual([]);
+    });
+
+    it('normalizes ARCA 602 "Sin Resultados" to an empty list (not a 502)', async () => {
+        getPointsOfSale.mockRejectedValue(
+            new ArcaServiceError('[602] Sin Resultados', [{code: '602', message: 'Sin Resultados'}]),
+        );
+
+        const result = await new ArcaProvider().pointsOfSale(ENTITY);
+
+        expect(result.pointsOfSale).toEqual([]);
+    });
+
+    it('propagates a non-602 service error unchanged', async () => {
+        const thrown = new ArcaServiceError('[600] token', [{code: '600', message: 'ValidacionDeToken'}]);
+        getPointsOfSale.mockRejectedValue(thrown);
+
+        await expect(new ArcaProvider().pointsOfSale(ENTITY)).rejects.toBe(thrown);
+    });
+});
+
+describe('ArcaProvider.nextNumbers', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+    });
+
+    it('returns last-authorized + 1 per code, mapping never-authorized (0) to 1', async () => {
+        // Codes [1, 6, 11] → ARCA last-authorized 17, 4, 0 (11 never authorized on this point of sale).
+        getLastAuthorizedNumber.mockResolvedValueOnce(17).mockResolvedValueOnce(4).mockResolvedValueOnce(0);
+
+        const result = await new ArcaProvider().nextNumbers(ENTITY, 3, [1, 6, 11]);
+
+        expect(result.numbers).toEqual([
+            {documentTypeCode: 1, nextNumber: 18},
+            {documentTypeCode: 6, nextNumber: 5},
+            {documentTypeCode: 11, nextNumber: 1},
+        ]);
+        // The ticket is resolved exactly once for the whole batch, not once per document type.
+        expect(resolve).toHaveBeenCalledTimes(1);
+        expect(getLastAuthorizedNumber).toHaveBeenCalledTimes(3);
+    });
+
+    it('handles a single-element set the same as last-authorized + 1', async () => {
+        getLastAuthorizedNumber.mockResolvedValue(41);
+
+        const result = await new ArcaProvider().nextNumbers(ENTITY, 3, [1]);
+
+        expect(result.numbers).toEqual([{documentTypeCode: 1, nextNumber: 42}]);
+    });
+
+    it('echoes each requested code so core can map the response back regardless of order', async () => {
+        getLastAuthorizedNumber.mockResolvedValueOnce(0).mockResolvedValueOnce(9);
+
+        const result = await new ArcaProvider().nextNumbers(ENTITY, 3, [11, 1]);
+
+        expect(result.numbers.map((n) => n.documentTypeCode)).toEqual([11, 1]);
+    });
+
+    it('fails the whole batch on an unrecognized code, before any authority call (no silent omission)', async () => {
+        // 9999 is not a known canonical CbteTipo → toCbteTipo throws up front.
+        await expect(new ArcaProvider().nextNumbers(ENTITY, 3, [1, 9999])).rejects.toMatchObject({
+            code: 'UNKNOWN_CODE',
+        });
+        // Validated before minting a ticket or issuing any FECompUltimoAutorizado call.
+        expect(resolve).not.toHaveBeenCalled();
+        expect(getLastAuthorizedNumber).not.toHaveBeenCalled();
+    });
+});
+
+describe('PointsOfSaleRequestDto validation', () => {
+    it('accepts a body carrying a well-formed entity block', async () => {
+        const dto = plainToInstance(PointsOfSaleRequestDto, {
+            entity: {entityCode: 'ARCA', issuerTaxId: '20111111112', environment: 'testing'},
+        });
+        expect(await validate(dto)).toHaveLength(0);
+    });
+
+    it('rejects a body with no entity (→ 400, not a controller NPE → 500)', async () => {
+        const errors = await validate(plainToInstance(PointsOfSaleRequestDto, {}));
+        expect(errors.map((e) => e.property)).toContain('entity');
+    });
+});
+
+describe('NextNumbersRequestDto validation', () => {
+    const entity = {entityCode: 'ARCA', issuerTaxId: '20111111112', environment: 'testing'};
+
+    it('accepts a well-formed batch request', async () => {
+        const dto = plainToInstance(NextNumbersRequestDto, {entity, pointOfSaleNumber: 3, documentTypeCodes: [1, 6, 11]});
+        expect(await validate(dto)).toHaveLength(0);
+    });
+
+    it('rejects an empty documentTypeCodes array', async () => {
+        const dto = plainToInstance(NextNumbersRequestDto, {entity, pointOfSaleNumber: 3, documentTypeCodes: []});
+        expect((await validate(dto)).map((e) => e.property)).toContain('documentTypeCodes');
+    });
+
+    it('rejects a body with no entity (→ 400, not a controller NPE → 500)', async () => {
+        const errors = await validate(plainToInstance(NextNumbersRequestDto, {pointOfSaleNumber: 3, documentTypeCodes: [1]}));
+        expect(errors.map((e) => e.property)).toContain('entity');
+    });
+});
+
 describe('NeutralInvoiceDto voucher-number validation', () => {
     function base(): Record<string, unknown> {
         return {
-            documentTypeId: 1,
+            documentTypeCode: 1,
             concept: 1,
-            salesPointNumber: 3,
+            pointOfSaleNumber: 3,
             voucherNumberFrom: 17,
             voucherNumberTo: 17,
-            receiver: {identificationTypeId: 80, identificationNumber: '20111111112', fiscalConditionId: 1},
+            receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
             currencyIso: 'ARS',
             currencyRate: 1,
             issueDate: '2026-08-05',

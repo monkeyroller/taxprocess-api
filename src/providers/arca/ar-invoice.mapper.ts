@@ -8,6 +8,7 @@ import {
     type CommonInvoiceRequest,
     type CommonInvoiceResult,
     type InvoiceLineTax,
+    type PointOfSaleInfo,
 } from './sdk/index.js';
 import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
 import {parseArcaId} from './ar-identifiers.js';
@@ -15,15 +16,17 @@ import type {NeutralInvoice} from '../provider.js';
 import type {
     NeutralAuthorizationResultDto,
     NeutralAuthorizationStatus,
+    PointOfSaleDto,
 } from '../../http/dto/neutral-result.dto.js';
 
 /**
- * Argentina-specific translation from the neutral invoice (carrying core's own ids) to the SDK's
- * {@link CommonInvoiceRequest}, plus the RG-4892 QR and the neutral result. Ported from
+ * Argentina-specific translation from the neutral invoice (carrying canonical taxprocess codes) to the
+ * SDK's {@link CommonInvoiceRequest}, plus the RG-4892 QR and the neutral result. Ported from
  * `webprocess-api/src/app/services/protected/transactions/electronic-invoice.service.ts:43-203`.
  *
- * This module owns the entity-specific translation: id→ARCA-code (via {@link file://./code-maps.ts}) plus
- * the mechanical mapping (ISO→`MonId`, VAT%→id, totals, perceptions→`Tributos`, dates, QR).
+ * This module owns the entity-specific translation: canonical-code→ARCA-code (via
+ * {@link file://./code-maps.ts}) plus the mechanical mapping (ISO→`MonId`, VAT%→id, totals,
+ * perceptions→`Tributos`, dates, QR).
  */
 
 /**
@@ -62,8 +65,8 @@ function clampToArcaDateWindow(date: Date, now: Date): Date {
 
 /**
  * Builds the WSFEv1 authorization request for `voucherNumber`. `now` is injected (not read from the
- * clock) so the mapping stays pure and unit-testable. Core's generic ids are translated to ARCA codes
- * here via {@link file://./code-maps.ts}.
+ * clock) so the mapping stays pure and unit-testable. The canonical taxprocess codes are translated to
+ * ARCA codes here via {@link file://./code-maps.ts}.
  */
 export function buildCommonInvoiceRequest(
     invoice: NeutralInvoice,
@@ -102,10 +105,10 @@ export function buildCommonInvoiceRequest(
     const voucherDate = invoice.concept === 1 ? clampToArcaDateWindow(issueDate, now) : issueDate;
 
     const request: CommonInvoiceRequest = {
-        salesPointNumber: invoice.salesPointNumber,
-        voucherType: toCbteTipo(invoice.documentTypeId),
+        pointOfSaleNumber: invoice.pointOfSaleNumber,
+        voucherType: toCbteTipo(invoice.documentTypeCode),
         concept: invoice.concept,
-        docType: toDocTipo(invoice.receiver.identificationTypeId),
+        docType: toDocTipo(invoice.receiver.identificationTypeCode),
         docNumber: parseArcaId(invoice.receiver.identificationNumber, 'receiver.identificationNumber'),
         voucherNumberFrom: voucherNumber,
         voucherNumberTo: voucherNumber,
@@ -116,7 +119,7 @@ export function buildCommonInvoiceRequest(
         exempt,
         vatAmount: totals.vat,
         tributesAmount: perceptions,
-        receiverIvaConditionId: toCondicionIvaReceptorId(invoice.receiver.fiscalConditionId),
+        receiverIvaConditionId: toCondicionIvaReceptorId(invoice.receiver.fiscalConditionCode),
         currencyId: resolveCurrencyId(invoice.currencyIso),
         currencyRate: invoice.currencyRate,
         vatSubtotals: totals.subtotals,
@@ -144,7 +147,7 @@ export function buildQrUrl(issuerTaxId: string, request: CommonInvoiceRequest, c
     return buildArcaQrUrl({
         date: parseArcaDate(request.voucherDate),
         cuit: Number(issuerTaxId),
-        salesPointNumber: request.salesPointNumber,
+        pointOfSaleNumber: request.pointOfSaleNumber,
         voucherType: request.voucherType,
         voucherNumber: request.voucherNumberFrom,
         totalAmount: request.totalAmount,
@@ -180,5 +183,24 @@ export function toNeutralResult(
         status: statusOf(result.result),
         observations: result.observations,
         providerMetadata,
+    };
+}
+
+/** Renders an ARCA `yyyymmdd` date as ISO-8601, surfacing an unexpected format verbatim rather than an invalid date. */
+function arcaDateToIso(yyyymmdd: string): string {
+    if (!/^\d{8}$/.test(yyyymmdd)) {
+        return yyyymmdd;
+    }
+    const date = parseArcaDate(yyyymmdd);
+    return Number.isNaN(date.getTime()) ? yyyymmdd : date.toISOString();
+}
+
+/** Maps one SDK point of sale to the neutral DTO; `dischargeDate` (ARCA `yyyymmdd`) is rendered ISO-8601. */
+export function toNeutralPointOfSale(info: PointOfSaleInfo): PointOfSaleDto {
+    return {
+        number: info.number,
+        issuanceMode: info.issuanceMode,
+        blocked: info.blocked,
+        dischargeDate: info.dischargeDate !== undefined ? arcaDateToIso(info.dischargeDate) : undefined,
     };
 }

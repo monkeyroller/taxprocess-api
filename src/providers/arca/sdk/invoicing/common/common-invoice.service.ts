@@ -1,12 +1,13 @@
 import {InvoiceWebService} from '../invoice-web-service.base.js';
 import {ENDPOINTS, Namespaces, ServiceId} from '../../core/constants.js';
-import type {ArcaAuth, ServerStatus} from '../../core/types.js';
+import type {ArcaAuth, PointOfSaleInfo, ServerStatus} from '../../core/types.js';
 import type {
     CommonInvoiceRequest,
     CommonInvoiceResult,
 } from './common-invoice.types.js';
 import {
     authElement,
+    cleanArcaDate,
     cleanCode,
     extractObservations,
     firstOf,
@@ -29,6 +30,7 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
     protected override readonly authorizeOperation = 'FECAESolicitar';
     protected override readonly lastAuthorizedOperation = 'FECompUltimoAutorizado';
     protected override readonly queryOperation = 'FECompConsultar';
+    protected override readonly pointsOfSaleOperation = 'FEParamGetPtosVenta';
     protected override readonly dummyOperation = 'FEDummy';
 
     protected endpoint(): string {
@@ -76,7 +78,7 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
             detail.CbtesAsoc = {
                 CbteAsoc: request.associatedVouchers.map((v) => ({
                     Tipo: v.voucherType,
-                    PtoVta: v.salesPointNumber,
+                    PtoVta: v.pointOfSaleNumber,
                     Nro: v.number,
                     ...(v.cuit !== undefined ? {Cuit: v.cuit} : {}),
                 })),
@@ -116,7 +118,7 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
             FeCAEReq: {
                 FeCabReq: {
                     CantReg: registerCount,
-                    PtoVta: request.salesPointNumber,
+                    PtoVta: request.pointOfSaleNumber,
                     CbteTipo: request.voucherType,
                 },
                 FeDetReq: {FECAEDetRequest: detail},
@@ -148,19 +150,37 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
 
     protected override buildLastAuthorizedRequest(
         auth: ArcaAuth,
-        salesPointNumber: number,
+        pointOfSaleNumber: number,
         voucherType: number,
     ): Record<string, unknown> {
-        return {Auth: authElement(auth), PtoVta: salesPointNumber, CbteTipo: voucherType};
+        return {Auth: authElement(auth), PtoVta: pointOfSaleNumber, CbteTipo: voucherType};
     }
 
     protected override parseLastAuthorizedNumber(result: Record<string, unknown>): number {
         return toInt(result.CbteNro);
     }
 
+    protected override buildPointsOfSaleRequest(auth: ArcaAuth): Record<string, unknown> {
+        return {Auth: authElement(auth)};
+    }
+
+    protected override parsePointsOfSale(result: Record<string, unknown>): Array<PointOfSaleInfo> {
+        const node = (result.ResultGet as {PtoVenta?: unknown} | undefined)?.PtoVenta;
+        if (node === undefined || node === null) {
+            return []; // CUIT with no registered points of sale
+        }
+        const list = Array.isArray(node) ? node : [node];
+        return list.map((p: Record<string, unknown>) => ({
+            number: toInt(p.Nro),
+            issuanceMode: cleanCode(p.EmisionTipo),
+            blocked: String(p.Bloqueado ?? '').trim().toUpperCase() === 'S',
+            dischargeDate: cleanArcaDate(p.FchBaja),
+        }));
+    }
+
     protected override buildQueryRequest(
         auth: ArcaAuth,
-        salesPointNumber: number,
+        pointOfSaleNumber: number,
         voucherType: number,
         voucherNumber: number,
     ): Record<string, unknown> {
@@ -169,7 +189,7 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
             FeCompConsReq: {
                 CbteTipo: voucherType,
                 CbteNro: voucherNumber,
-                PtoVta: salesPointNumber
+                PtoVta: pointOfSaleNumber
             },
         };
     }

@@ -25,3 +25,15 @@ export interface ServerStatus {
     dbServer: string;
     authServer: string;
 }
+
+/** One registered point of sale (WSFEv1 `FEParamGetPtosVenta` → `ResultGet.PtoVenta`). English SDK shape. */
+export interface PointOfSaleInfo {
+    /** `Nro` — the point-of-sale number. */
+    number: number;
+    /** `EmisionTipo` — issuance mode (e.g. `CAE`, `CAEA`, `RECE`). */
+    issuanceMode?: string;
+    /** `Bloqueado` = `'S'` → true. */
+    blocked: boolean;
+    /** `FchBaja` — de-registration date in ARCA `yyyymmdd`; undefined when active (`''`/`'NULL'`). */
+    dischargeDate?: string;
+}

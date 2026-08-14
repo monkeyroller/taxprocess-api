@@ -11,7 +11,7 @@ import {commonInvoiceService, padronService, padronServiceId} from './clients.js
 import {ticketStore} from './ticket-store.js';
 import {toArcaEnvironment} from './environment.js';
 import {toCbteTipo} from './code-maps.js';
-import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult} from './ar-invoice.mapper.js';
+import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult, toNeutralPointOfSale} from './ar-invoice.mapper.js';
 import {validateArcaCredentials} from './credentials.js';
 import {parseArcaId} from './ar-identifiers.js';
 import {
@@ -21,9 +21,12 @@ import {
     type EntityAuthBlock,
     type GenericEnvironment,
     type NeutralInvoice,
+    type NextNumbersResult,
+    type PointsOfSaleResult,
     type TaxAuthorizationResult,
     type TaxpayerResult,
     type ValidateCredentialsInput,
+    VoucherNotFoundError,
 } from '../provider.js';
 
 /**
@@ -33,6 +36,22 @@ import {
  * the sequence), so it only flags a *candidate* for recovery; `queryVoucher` is the arbiter.
  */
 const ALREADY_AUTHORIZED_CODE = '10016';
+
+/**
+ * ARCA `FEParamGetPtosVenta` returns this code with message "Sin Resultados" when the issuer has no
+ * registered points of sale — its way of expressing an empty list. `pointsOfSale` normalizes it to `[]`.
+ */
+const NO_RESULTS_CODE = '602';
+
+/**
+ * ARCA `FECompConsultar` reports a voucher that was never authorized with this code (message "No existe el
+ * comprobante que se solicita…") as a thrown `Errors` block, not an empty `200`. `queryVoucher` translates
+ * exactly this to a neutral {@link VoucherNotFoundError} (→ `404`) so a genuine not-found is distinguishable
+ * from an authority/token/transport failure (which stays a `502`) — the distinction core's orphan
+ * reconciliation relies on to decide a stuck-PENDING sale is safe to clear and re-authorize. (Same literal as
+ * {@link NO_RESULTS_CODE}, but a different operation and meaning; named separately to keep the intent local.)
+ */
+const VOUCHER_NOT_FOUND_CODE = '602';
 
 /** True when an authorize result is a `10016` rejection — the signal to reconcile against ARCA. */
 function isAlreadyAuthorizedRejection(result: CommonInvoiceResult): boolean {
@@ -69,8 +88,8 @@ function assertRecoveredVoucherMatches(request: CommonInvoiceRequest, queried: C
 
 /**
  * The ARCA (Argentina/AFIP) tax entity provider — the sole owner of every AR-specific detail: WSAA ticket
- * minting (via the ticket store), id→ARCA-code translation (via code-maps + the invoice mapper), the
- * RG-4892 QR, and `production`/`testing` → `produccion`/`homologacion` naming.
+ * minting (via the ticket store), canonical-code→ARCA-code translation (via code-maps + the invoice
+ * mapper), the RG-4892 QR, and `production`/`testing` → `produccion`/`homologacion` naming.
  */
 export class ArcaProvider extends TaxEntityProvider {
     validateCredentials(input: ValidateCredentialsInput): Promise<CredentialValidationResult> {
@@ -156,8 +175,8 @@ export class ArcaProvider extends TaxEntityProvider {
         try {
             queried = await service.queryVoucher(
                 auth,
-                invoice.salesPointNumber,
-                toCbteTipo(invoice.documentTypeId),
+                invoice.pointOfSaleNumber,
+                toCbteTipo(invoice.documentTypeCode),
                 invoice.voucherNumberFrom,
             );
         } catch (err) {
@@ -182,8 +201,8 @@ export class ArcaProvider extends TaxEntityProvider {
 
     async lastAuthorized(
         entity: EntityAuthBlock,
-        salesPointNumber: number,
-        documentTypeId: number,
+        pointOfSaleNumber: number,
+        documentTypeCode: number,
     ): Promise<{number: number}> {
         const auth = await ticketStore.resolve(
             entity.entityCode,
@@ -194,16 +213,48 @@ export class ArcaProvider extends TaxEntityProvider {
         );
         const number = await commonInvoiceService(toArcaEnvironment(entity.environment)).getLastAuthorizedNumber(
             auth,
-            salesPointNumber,
-            toCbteTipo(documentTypeId),
+            pointOfSaleNumber,
+            toCbteTipo(documentTypeCode),
         );
         return {number};
     }
 
+    async nextNumbers(
+        entity: EntityAuthBlock,
+        pointOfSaleNumber: number,
+        documentTypeCodes: ReadonlyArray<number>,
+    ): Promise<NextNumbersResult> {
+        // Validate every canonical code up front (before minting a ticket or any SOAP call): an unmapped code
+        // throws ArcaValidationError('UNKNOWN_CODE') → 400, surfacing as an error envelope, never a silent
+        // omission. WSFEv1 has no batch operation, so we fan out FECompUltimoAutorizado per code on a single
+        // ticket + service instance and return the authority's next expected number (last + 1) for each.
+        const mapped = documentTypeCodes.map((code) => ({code, cbteTipo: toCbteTipo(code)}));
+
+        const auth = await ticketStore.resolve(
+            entity.entityCode,
+            entity.issuerTaxId,
+            ServiceId.WSFEV1,
+            entity.environment,
+            entity.credentials,
+        );
+        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
+
+        // The per-code lookups are independent read-only calls sharing one ticket, so issue them concurrently.
+        // `Promise.all` preserves input order, so `numbers` still echoes `documentTypeCodes` positionally.
+        const numbers = await Promise.all(
+            mapped.map(async ({code, cbteTipo}) => {
+                const last = await service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo);
+                // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
+                return {documentTypeCode: code, nextNumber: last + 1};
+            }),
+        );
+        return {numbers};
+    }
+
     async queryVoucher(
         entity: EntityAuthBlock,
-        salesPointNumber: number,
-        documentTypeId: number,
+        pointOfSaleNumber: number,
+        documentTypeCode: number,
         voucherNumber: number,
     ): Promise<TaxAuthorizationResult> {
         const auth = await ticketStore.resolve(
@@ -213,17 +264,50 @@ export class ArcaProvider extends TaxEntityProvider {
             entity.environment,
             entity.credentials,
         );
-        const result = await commonInvoiceService(toArcaEnvironment(entity.environment)).queryVoucher(
-            auth,
-            salesPointNumber,
-            toCbteTipo(documentTypeId),
-            voucherNumber,
-        );
-        return toNeutralResult(result);
+        try {
+            const result = await commonInvoiceService(toArcaEnvironment(entity.environment)).queryVoucher(
+                auth,
+                pointOfSaleNumber,
+                toCbteTipo(documentTypeCode),
+                voucherNumber,
+            );
+            return toNeutralResult(result);
+        } catch (err) {
+            // ARCA surfaces a never-issued voucher as a 602 `Errors` block (thrown ArcaServiceError), not an
+            // empty 200. Translate ONLY that to a neutral not-found (→ 404); every other service error
+            // (auth/token/transport) propagates unchanged as a 502, so core keeps the sale PENDING and retries
+            // rather than clearing an orphan it cannot prove was never issued.
+            if (err instanceof ArcaServiceError && err.errors.some((e) => e.code === VOUCHER_NOT_FOUND_CODE)) {
+                throw new VoucherNotFoundError(entity.entityCode, pointOfSaleNumber, documentTypeCode, voucherNumber);
+            }
+            throw err;
+        }
     }
 
     async authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult> {
         return commonInvoiceService(toArcaEnvironment(environment)).getServerStatus();
+    }
+
+    async pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
+        const auth = await ticketStore.resolve(
+            entity.entityCode,
+            entity.issuerTaxId,
+            ServiceId.WSFEV1,
+            entity.environment,
+            entity.credentials,
+        );
+        try {
+            const points = await commonInvoiceService(toArcaEnvironment(entity.environment)).getPointsOfSale(auth);
+            return {pointsOfSale: points.map(toNeutralPointOfSale)};
+        } catch (err) {
+            // ARCA signals "this issuer has no registered points of sale" with a `602 Sin Resultados` error on
+            // FEParamGetPtosVenta rather than an empty ResultGet. That is the documented empty case, not a
+            // failure — normalize it to an empty list (any other service error propagates unchanged).
+            if (err instanceof ArcaServiceError && err.errors.some((e) => e.code === NO_RESULTS_CODE)) {
+                return {pointsOfSale: []};
+            }
+            throw err;
+        }
     }
 
     async lookupTaxpayer(
