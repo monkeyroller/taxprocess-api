@@ -51,7 +51,7 @@ function bootstrap(): void {
 
     const server = createServer(app);
     server.listen(env.port, () => {
-        console.log(`tax-webprocess-api listening on :${env.port} (${env.nodeEnv})`);
+        console.log(`taxprocess-api listening on :${env.port} (${env.nodeEnv})`);
     });
 
     const shutdown = (signal: string): void => {

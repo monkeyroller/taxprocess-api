@@ -113,7 +113,7 @@ export function keyMatchesCertificatePem(certPem: string, keyPem: string): boole
 /**
  * Returns the raw value of the certificate subject's `serialNumber` RDN (OID 2.5.4.5), or `null` if the
  * material is not a parseable X.509 certificate or has no such RDN. ARCA embeds the taxpayer CUIT here,
- * rendered by OpenSSL/Node as e.g. `serialNumber=CUIT 20441917369`. Only that RDN is consulted — a digit
+ * rendered by OpenSSL/Node as e.g. `serialNumber=CUIT 20111111112`. Only that RDN is consulted — a digit
  * run elsewhere in the subject (a CN, an OU) is never mistaken for the taxpayer id. Interpreting the raw
  * value as a CUIT (stripping the `CUIT ` prefix / separators, length check) is the caller's job; see
  * `canonicalCuit`.

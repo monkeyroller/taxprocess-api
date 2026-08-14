@@ -22,7 +22,7 @@ export class StatusController {
     health(): HealthResponse {
         return {
             status: 'ok',
-            service: 'tax-webprocess-api',
+            service: 'taxprocess-api',
             uptimeSeconds: Math.floor(process.uptime()),
         };
     }

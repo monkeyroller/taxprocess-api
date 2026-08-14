@@ -82,18 +82,18 @@ describe('validateArcaCredentials', () => {
     });
 
     it('accepts a cert issued to expectedTaxId', () => {
-        const pair = makePair('company', '20441917369');
+        const pair = makePair('company', '20111111112');
         const result = validateArcaCredentials({
             environment: 'testing',
             configuration: {}, // ARCA credential validation reads nothing from configuration
             credentials: {certPem: pair.certPem, keyPem: pair.keyPem},
-            expectedTaxId: '20441917369',
+            expectedTaxId: '20111111112',
         });
         expect(result).toEqual({ok: true});
     });
 
     it('rejects a valid cert issued to a different CUIT than expectedTaxId', () => {
-        const pair = makePair('company', '20441917369');
+        const pair = makePair('company', '20111111112');
         const result = validateArcaCredentials({
             environment: 'testing',
             configuration: {}, // ARCA credential validation reads nothing from configuration
@@ -116,24 +116,24 @@ describe('validateArcaCredentials', () => {
 
     it('matches regardless of CUIT formatting (dashes vs bare digits) on either side', () => {
         // cert carries a dash-formatted CUIT, expectedTaxId is bare digits
-        const dashedCert = makePair('company', '20-44191736-9');
+        const dashedCert = makePair('company', '20-11111111-2');
         expect(
             validateArcaCredentials({
                 environment: 'testing',
                 configuration: {}, // ARCA credential validation reads nothing from configuration
                 credentials: {certPem: dashedCert.certPem, keyPem: dashedCert.keyPem},
-                expectedTaxId: '20441917369',
+                expectedTaxId: '20111111112',
             }),
         ).toEqual({ok: true});
 
         // cert carries bare digits, expectedTaxId is dash-formatted
-        const bareCert = makePair('company', '20441917369');
+        const bareCert = makePair('company', '20111111112');
         expect(
             validateArcaCredentials({
                 environment: 'testing',
                 configuration: {}, // ARCA credential validation reads nothing from configuration
                 credentials: {certPem: bareCert.certPem, keyPem: bareCert.keyPem},
-                expectedTaxId: '20-44191736-9',
+                expectedTaxId: '20-11111111-2',
             }),
         ).toEqual({ok: true});
     });
@@ -141,12 +141,12 @@ describe('validateArcaCredentials', () => {
     it('does not mistake an 11-digit run elsewhere in the subject for the taxpayer id', () => {
         // No serialNumber RDN; the CN coincidentally contains the expected 11 digits. The tightened
         // extraction reads only the serialNumber RDN, so this is a mismatch, not an accidental pass.
-        const pair = makePair('Empresa 20441917369 SA');
+        const pair = makePair('Empresa 20111111112 SA');
         const result = validateArcaCredentials({
             environment: 'testing',
             configuration: {}, // ARCA credential validation reads nothing from configuration
             credentials: {certPem: pair.certPem, keyPem: pair.keyPem},
-            expectedTaxId: '20441917369',
+            expectedTaxId: '20111111112',
         });
         expect(result.ok).toBe(false);
         expect(result.errors?.map((e) => e.code)).toEqual(['TAXID_MISMATCH']);

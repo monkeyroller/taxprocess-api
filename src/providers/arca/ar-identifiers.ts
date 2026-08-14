@@ -15,8 +15,8 @@ export function parseArcaId(value: string, field: string): number {
 
 /**
  * Canonicalizes an issuer/company CUIT to its bare 11-digit form so differently-formatted spellings of the
- * same id compare equal: `"20-44191736-9"`, `"20441917369"`, and a certificate's `"CUIT 20441917369"` all
- * canonicalize to `"20441917369"`. Returns `null` when the value does not reduce to exactly 11 digits.
+ * same id compare equal: `"20-11111111-2"`, `"20111111112"`, and a certificate's `"CUIT 20111111112"` all
+ * canonicalize to `"20111111112"`. Returns `null` when the value does not reduce to exactly 11 digits.
  *
  * This is the normalization rule for the issuer taxpayer id, which is always a CUIT. Receiver ids carry
  * their own document type (`DocTipo`: CUIT / DNI / consumidor final) and are normalized where that type

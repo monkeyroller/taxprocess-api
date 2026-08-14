@@ -1,5 +1,5 @@
 {
-  "name": "tax-webprocess-api",
+  "name": "taxprocess-api",
   "version": "0.1.0",
   "description": "Standalone general tax-integration service — dispatches per request on an entity code (ARCA/AFIP today; more entities via the provider registry).",
   "type": "module",

@@ -1,4 +1,4 @@
-# tax-webprocess-api — HTTP contract & core-side obligations
+# taxprocess-api — HTTP contract & core-side obligations
 
 Audience: the **`webprocess-api`** (core) team. This is the integration contract between the core API and the
 standalone **general tax service**, plus what core must implement on its side (the credential store and the
@@ -112,7 +112,7 @@ The ARCA-specific codes/terms live only inside the provider; the wire never carr
 Every issuing endpoint dispatches on `entity.entityCode` and may respond `409 CREDENTIALS_REQUIRED` (see §4).
 
 ### `GET /api/health`
-Liveness. `200 → { "status":"ok", "service":"tax-webprocess-api", "uptimeSeconds": <n> }`. No auth.
+Liveness. `200 → { "status":"ok", "service":"taxprocess-api", "uptimeSeconds": <n> }`. No auth.
 
 ### `POST /api/authority/status`
 Authority health check (ARCA: WSFEv1 `FEDummy`). Body `{ "entityCode":"ARCA", "environment":"testing" }`. No
@@ -125,7 +125,7 @@ so bad credentials are rejected up front. Body:
 { "environment": "testing",
   "configuration": { "webService": "WSFEv1" },   // ARCA validation reads nothing from here (see note)
   "credentials":   { "certPem": "…", "keyPem": "…" },
-  "expectedTaxId": "20441917369" }   // required: the owning company's CUIT (any formatting; canonicalized to 11 digits)
+  "expectedTaxId": "20111111112" }   // required: the owning company's CUIT (any formatting; canonicalized to 11 digits)
 ```
 `200 → { "ok": true }` or `200 → { "ok": false, "errors": [ { "code": "...", "message": "..." } ] }`.
 For ARCA the checks are: `expectedTaxId` is a valid CUIT; `certPem` is an issued certificate (**not** a CSR);

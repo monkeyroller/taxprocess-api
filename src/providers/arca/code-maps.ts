@@ -12,8 +12,8 @@ import {ArcaValidationError} from './sdk/index.js';
  *   - fiscalConditionCode    → CondicionIVAReceptorId (RG 5616)
  *   - identificationTypeCode → DocTipo
  * The functions are kept as the per-provider extension point: a future non-ARCA provider supplies a real
- * (non-identity) map from the same canonical enum to its own codes. See
- * docs/contract-changes/2026-08-11_taxprocess-canonical-codes.md.
+ * (non-identity) map from the same canonical enum to its own codes. See the canonical-code glossary in
+ * docs/CONTRACT.md.
  */
 
 /**

@@ -26,8 +26,8 @@ export class ValidateCredentialsRequestDto {
 
     /**
      * The owning company's registered tax id (AR: CUIT) the certificate must belong to — sourced from
-     * core's `org.company.identificationNumber`. Any formatting is accepted (`"20441917369"` or
-     * `"20-44191736-9"`); the provider canonicalizes it to 11 digits before matching. Required: core always
+     * core's `org.company.identificationNumber`. Any formatting is accepted (`"20111111112"` or
+     * `"20-11111111-2"`); the provider canonicalizes it to 11 digits before matching. Required: core always
      * sends it, and the provider enforces the taxpayer match against it.
      */
     @IsString()
