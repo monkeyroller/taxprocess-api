@@ -8,7 +8,12 @@ import {
     NotImplementedError,
 } from '../providers/arca/sdk/index.js';
 import {CredentialsRequiredError} from '../providers/arca/ticket-store.js';
-import {UnknownEntityError, VoucherNotFoundError} from '../providers/provider.js';
+import {
+    DelegationNotAuthorizedError,
+    DelegationNotConfiguredError,
+    UnknownEntityError,
+    VoucherNotFoundError,
+} from '../providers/provider.js';
 
 export interface HttpErrorResult {
     readonly status: number;
@@ -97,6 +102,21 @@ export function toHttpError(err: unknown): HttpErrorResult {
     }
     if (err instanceof UnknownEntityError) {
         return make(400, 'UNKNOWN_ENTITY', err.message, {entityCode: err.entityCode});
+    }
+    if (err instanceof DelegationNotAuthorizedError) {
+        // A delegated call the authority refused because the represented CUIT hasn't delegated to us — a
+        // deterministic, user-actionable outcome (grant the delegation), so a distinct `403`, never a `502`.
+        return make(403, 'DELEGATION_NOT_AUTHORIZED', err.message, {
+            delegateTaxId: err.delegateTaxId,
+            issuerTaxId: err.issuerTaxId,
+            arcaCode: err.authorityCode,
+            arcaMessage: err.authorityMessage,
+        });
+    }
+    if (err instanceof DelegationNotConfiguredError) {
+        // `delegated:true` but this service has no valid delegate certificate for the environment — a server
+        // misconfiguration, not a caller error.
+        return make(500, 'DELEGATION_NOT_CONFIGURED', err.message, {environment: err.environment, reason: err.reason});
     }
     if (err instanceof VoucherNotFoundError) {
         // A never-issued voucher is a stable outcome, not a transport failure — a distinct `404` (never a

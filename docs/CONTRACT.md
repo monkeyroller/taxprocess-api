@@ -61,7 +61,10 @@ store for horizontal scale is **deferred**.
   "credentials": {                // OMITTED on first send; ATTACHED by core on a CREDENTIALS_REQUIRED re-send
     "certPem": "-----BEGIN CERTIFICATE----- …",
     "keyPem":  "-----BEGIN PRIVATE KEY----- …"  // already-decrypted; used in-memory only, never persisted
-  }
+  },
+  "delegated": true               // OPTIONAL. true ⇒ issuerTaxId is the represented taxpayer and this
+                                  //   service signs with its OWN platform certificate (credentials ignored,
+                                  //   no CREDENTIALS_REQUIRED). Omit/false ⇒ the tenant-certificate flow. See §10.
 }
 ```
 
@@ -292,8 +295,20 @@ token rejection. Formatting (dashes, a `CUIT ` prefix) is not significant; both 
 digits. Core should send the CUIT that owns the certificate.
 
 `service` values (in `details`, ARCA): `wsfe` (invoicing) and `ws_sr_padron_a4|a5|a10|a13` (lookups). This
-service caches tickets keyed by `(entityCode, environment, issuerTaxId, service)`, shared across core
-instances — so after a refresh, most requests are served identity-only for ~12h.
+service caches tickets keyed by the **signing certificate's identity**, shared across core instances, so after
+a refresh most requests are served identity-only for ~12h. Tenant and delegate signers occupy **separate
+partitions**:
+
+| signer | partition |
+| --- | --- |
+| tenant certificate (§4) | `(entityCode, environment, issuerTaxId, service)` — unchanged from earlier releases |
+| our delegate certificate (§10) | `(entityCode, environment, delegate, delegateCuit, service)` |
+
+A credential-less request is only ever served from **its own issuer's** tenant partition: the delegate ticket
+is never lent to a request that has not presented a certificate for the CUIT it names, even when that CUIT is
+our own. So if core also self-issues non-delegated for our own CUIT, that flow keeps its normal
+`CREDENTIALS_REQUIRED` handshake (§4). The two partitions merge only when the credentials core sends *are* our
+delegate certificate — provably the same physical certificate, hence the same authority ticket.
 
 ---
 
@@ -400,11 +415,13 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
 | 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
-| 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4) |
+| 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |
 | 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure |
+| 500 | `DELEGATION_NOT_CONFIGURED` | `delegated:true` but this service has no valid delegate certificate configured for that `environment` (server misconfiguration); `details: { environment, reason }` |
 | 500 | `ARCA_ERROR` / `INTERNAL` | unexpected |
 
 ---
@@ -413,3 +430,54 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day clamp,
 WSAA/CMS signing, `homologacion`/`produccion` — all inside `src/providers/arca/`. The neutral result already
 abstracts CAE → `authorizationCode`.
+
+---
+
+## 10. Delegated authorization (this service's own certificate)
+
+ARCA lets a taxpayer (the *representado*) delegate a web service (WSFEv1) to another CUIT (the
+*computador/delegate*) via **Administrador de Relaciones**. This service can act as that delegate using
+**its own certificate** (our organization's CUIT), so core can authorize a sale for a taxpayer whose
+certificate it does not hold.
+
+- **How to invoke:** set `entity.delegated = true` and `entity.issuerTaxId` = the represented taxpayer's
+  CUIT. Do **not** send `credentials` — this service uses its own delegate certificate (configured per
+  environment via `ARCA_DELEGATE_*`, see `.env.example`). A delegated request therefore **never** returns
+  `409 CREDENTIALS_REQUIRED`; the tenant-credential handshake (§4) does not apply.
+- **On the wire to ARCA:** `Auth.Cuit` = `issuerTaxId` (the representado); the WSAA ticket is signed with
+  our delegate certificate and shared across all represented CUITs (keyed by the delegate identity, in its
+  own cache partition — see the table in §4).
+- **Prerequisite (user-side, out of band):** the represented taxpayer must delegate the WSFEv1 web service
+  to our delegate CUIT in ARCA's *Administrador de Relaciones*. **This service keeps no allow-list** of who
+  has delegated — it does not pre-validate the issuer.
+- **If the delegation is missing:** the call returns **`403 DELEGATION_NOT_AUTHORIZED`** — including when the
+  rejection surfaces on the internal `10016` recovery query rather than on the authorize itself,
+  `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` — surface it to the user as "grant WSFEv1
+  to CUIT `<delegateTaxId>` in Administrador de Relaciones." A missing/insufficient delegation surfaces at the
+  **WSFEv1 business call** (WSAA login only authenticates our certificate and never sees `Auth.Cuit`, so it
+  cannot check the representación): either as the representación-specific **`601` (`CUIT representada no
+  incluida en token`)** — unambiguous — or as an authorization-flavored **`600 ValidacionDeToken`** (e.g.
+  `Usuario no autorizado a realizar esta operación`). A genuine token fault (bad signature, clock skew,
+  expired ticket) is **also** reported under the overloaded `600` but is **not** a delegation problem: it
+  stays a `502` token error, so a service-side cert/clock issue is never mislabeled as the user's missing
+  delegation. (Note: WSAA's own login-time `computador no autorizado a acceder al servicio` is a *different*
+  failure — our certificate isn't enrolled to the `wsfe` service — and surfaces before this classification as
+  a `502`.)
+- **Server misconfiguration:** `delegated:true` for an environment with no valid delegate certificate returns
+  **`500 DELEGATION_NOT_CONFIGURED`**. A misconfigured (present-but-invalid) delegate certificate fails at
+  **boot**, not per request.
+- **Non-delegated (tenant-certificate) requests are unchanged:** omit `delegated` (or send `false`) and the
+  `CREDENTIALS_REQUIRED` handshake behaves exactly as in §4.
+
+**Deployment note (ticket cache).** ARCA binds a ticket to the `(certificate, service)` that minted it and
+refuses to issue a second one while the first is valid, so the delegate identity gets its **own** cache
+partition (§4) rather than sharing the tenant partition of the same CUIT: a taxpayer may hold several ARCA
+certificates, and a *representación* is granted to one specific computador, so a ticket minted by a different
+certificate of our CUIT would be rejected (`601`) as if the delegation were missing. If our own organization
+*also* issues for itself non-delegated with the very certificate we delegate with, the two roles converge on
+the one cached ticket automatically. Otherwise each certificate holds its own, and the single-node / shared
+`ARCA_TICKET_CACHE_PATH` guidance in §1 still holds.
+
+When ARCA rejects a delegate ticket with a genuine token fault, only that **service's** delegate ticket is
+dropped — the delegate identity's other tickets (e.g. padrón) are still valid and ARCA would not re-issue them
+for ~12h.

@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import forge from 'node-forge';
 import {WsaaClient} from './wsaa-client.js';
 import {SoapClient} from './soap-client.js';
@@ -101,5 +104,53 @@ describe('WsaaClient', () => {
         await client.getAccessTicket(config, 'wsfe');
         await client.getAccessTicket(config, 'wsfe');
         expect(soap.calls).toHaveLength(2);
+    });
+
+    it('clearCache purges the persisted file so an evicted ticket cannot resurrect from disk', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsaa-'));
+        const cachePath = path.join(dir, 'tickets.json');
+        try {
+            const soap = new FakeSoap(ticketXml('2999-01-01T00:00:00.000Z'));
+            const client = new WsaaClient(soap as unknown as SoapClient, cachePath);
+            const config = makeConfig();
+
+            await client.getAccessTicket(config, 'wsfe');
+            expect(JSON.parse(fs.readFileSync(cachePath, 'utf8'))).toHaveProperty(`${config.ticketOwnerKey}:wsfe`);
+
+            client.clearCache(config.ticketOwnerKey);
+
+            // Gone from the file, so a fresh client sharing the path finds no ticket to peek.
+            expect(JSON.parse(fs.readFileSync(cachePath, 'utf8'))).not.toHaveProperty(`${config.ticketOwnerKey}:wsfe`);
+            const fresh = new WsaaClient(soap as unknown as SoapClient, cachePath);
+            expect(fresh.peekAccessTicket(config.ticketOwnerKey, 'wsfe')).toBeUndefined();
+        } finally {
+            fs.rmSync(dir, {recursive: true, force: true});
+        }
+    });
+
+    it('clearCache with a serviceId evicts only that service, in memory and on disk', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsaa-'));
+        const cachePath = path.join(dir, 'tickets.json');
+        try {
+            const soap = new FakeSoap(ticketXml('2999-01-01T00:00:00.000Z'));
+            const client = new WsaaClient(soap as unknown as SoapClient, cachePath);
+            const config = makeConfig();
+            const owner = config.ticketOwnerKey;
+
+            await client.getAccessTicket(config, 'wsfe');
+            await client.getAccessTicket(config, 'ws_sr_padron_a5');
+
+            client.clearCache(owner, 'wsfe');
+
+            // ARCA won't re-issue a ticket while a prior one lives, so the service ARCA never rejected must
+            // keep both its in-memory and its persisted copy.
+            expect(client.peekAccessTicket(owner, 'wsfe')).toBeUndefined();
+            expect(client.peekAccessTicket(owner, 'ws_sr_padron_a5')).toBeDefined();
+            const persisted = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+            expect(persisted).not.toHaveProperty(`${owner}:wsfe`);
+            expect(persisted).toHaveProperty(`${owner}:ws_sr_padron_a5`);
+        } finally {
+            fs.rmSync(dir, {recursive: true, force: true});
+        }
     });
 });

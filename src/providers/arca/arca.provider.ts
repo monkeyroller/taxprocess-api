@@ -1,4 +1,5 @@
 import {
+    ArcaAuthError,
     ArcaServiceError,
     ArcaValidationError,
     ServiceId,
@@ -6,15 +7,18 @@ import {
     type CommonInvoiceRequest,
     type CommonInvoiceResult,
     type RegistryLevel,
+    type ServiceIdValue,
 } from './sdk/index.js';
 import {commonInvoiceService, padronService, padronServiceId} from './clients.js';
 import {ticketStore} from './ticket-store.js';
+import {delegateCredentialStore, type DelegateCredentialStore} from './delegate-credentials.js';
 import {toArcaEnvironment} from './environment.js';
 import {toCbteTipo} from './code-maps.js';
 import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult, toNeutralPointOfSale} from './ar-invoice.mapper.js';
 import {validateArcaCredentials} from './credentials.js';
-import {parseArcaId} from './ar-identifiers.js';
+import {canonicalCuit, parseArcaId} from './ar-identifiers.js';
 import {
+    DelegationNotAuthorizedError,
     TaxEntityProvider,
     type AuthorityStatusResult,
     type CredentialValidationResult,
@@ -87,11 +91,135 @@ function assertRecoveredVoucherMatches(request: CommonInvoiceRequest, queried: C
 }
 
 /**
+ * WSFEv1 `ValidacionDeToken` — one overloaded code covering BOTH genuine token faults (bad signature/hash,
+ * expired/skewed clock) AND authorization/relationship problems; only the message text disambiguates.
+ * Returned inside the response `Errors` block, so it surfaces as an {@link ArcaServiceError}.
+ */
+const TOKEN_VALIDATION_CODE = '600';
+
+/**
+ * WSFEv1 `CUIT representada no incluida en token` — the representación-SPECIFIC rejection: the delegate's
+ * token does not cover the CUIT in `Auth.Cuit`. Unlike the overloaded `600`, this code is unambiguous (never
+ * a cryptographic token fault), so a delegated call that hits it is always a missing/insufficient delegation.
+ * WSAA's own `coe.notAuthorized` "computador no autorizado a acceder al servicio" is a DIFFERENT failure
+ * (our cert isn't enrolled to the service) that surfaces at login, before this classifier ever runs.
+ */
+const REPRESENTADO_NOT_IN_TOKEN_CODE = '601';
+
+/**
+ * A genuine token/authentication fault (bad signature/hash, expired/clock-skewed ticket) — for a delegated
+ * request this is OUR certificate/clock, not the represented taxpayer's missing delegation, so it stays a
+ * token error in both modes and is NEVER reported as a delegation problem. Matched on the specific crypto
+ * phrasing ARCA uses (`firma digital`, `VerificacionDeHash`, `no validó`, expiry) rather than the bare word
+ * `firma`, because authorization rejections also mention it (e.g. `No se corresponden token y firma. Usuario
+ * no autorizado…`) and must NOT be misrouted here.
+ */
+const TOKEN_FAULT_MESSAGE = /firma digital|no valid[óo]|hash|expir|caduc|vencid/i;
+
+/**
+ * An authorization/relationship problem inside an overloaded `600`: the token/relationship does not authorize
+ * this operation (e.g. `Usuario no autorizado a realizar esta operación`, `CUIT representada no incluida`).
+ * On a delegated request that means the represented taxpayer has not delegated the web service to our CUIT —
+ * the actionable {@link DelegationNotAuthorizedError}.
+ */
+const AUTHORIZATION_MESSAGE = /no autoriz|computador|relaci[oó]n|represent/i;
+
+/**
  * The ARCA (Argentina/AFIP) tax entity provider — the sole owner of every AR-specific detail: WSAA ticket
  * minting (via the ticket store), canonical-code→ARCA-code translation (via code-maps + the invoice
  * mapper), the RG-4892 QR, and `production`/`testing` → `produccion`/`homologacion` naming.
  */
 export class ArcaProvider extends TaxEntityProvider {
+    /**
+     * The delegate certificate store is injected so the `403` can name our real delegate CUIT — the one
+     * field the caller acts on — instead of reading a module singleton that a test (or a future second
+     * provider instance) may not share.
+     */
+    constructor(private readonly delegate: DelegateCredentialStore = delegateCredentialStore) {
+        super();
+    }
+
+    /**
+     * Runs a delegated SDK call and, on failure, classifies a WSFEv1 token/representación rejection (see the
+     * 2×2 in `docs/CONTRACT.md` §10): a `601 CUIT representada no incluida` — or an authorization-flavored
+     * overloaded `600` — → {@link DelegationNotAuthorizedError} (403, the represented CUIT hasn't delegated to
+     * us); a genuine signature/hash/clock `600` → {@link ArcaAuthError} (502 token error, our cert/clock —
+     * never a delegation error); anything else (ambiguous `600`, other codes, non-delegated calls) passes
+     * through untouched. Applied at the SDK-call boundary so the existing `10016`/`602` recovery — which keys
+     * on other codes — is unaffected.
+     *
+     * `service` is the WSAA service the call consumed; a token fault evicts only that service's delegate
+     * ticket, never the delegate identity's tickets for other services (which ARCA would then refuse to
+     * re-mint until they expire).
+     */
+    private async delegationAware<T>(
+        entity: EntityAuthBlock,
+        service: ServiceIdValue,
+        op: () => Promise<T>,
+    ): Promise<T> {
+        if (entity.delegated !== true) {
+            return op();
+        }
+        try {
+            return await op();
+        } catch (err) {
+            const translated = this.translateDelegatedTokenError(err, entity);
+            if (translated instanceof ArcaAuthError) {
+                // A genuine token fault on OUR delegate ticket — evict it so the next delegated request
+                // re-mints, rather than every represented CUIT sharing the one bad ticket until local expiry.
+                // (A delegation/authorization rejection leaves the ticket cached: it is valid, the delegation
+                // is what's missing, so re-minting the same ticket would change nothing.)
+                ticketStore.invalidateDelegated(entity.entityCode, entity.environment, service);
+            }
+            throw translated;
+        }
+    }
+
+    /** Maps an ARCA token/representación error on a delegated call to a delegation/token error; passes others through. */
+    private translateDelegatedTokenError(err: unknown, entity: EntityAuthBlock): unknown {
+        if (!(err instanceof ArcaServiceError)) {
+            return err;
+        }
+        // `601` is representación-specific and unambiguous — always a missing delegation, no message needed.
+        const representado = err.errors.find((e) => e.code === REPRESENTADO_NOT_IN_TOKEN_CODE);
+        if (representado !== undefined) {
+            return this.delegationNotAuthorized(entity, representado.code, representado.message);
+        }
+        const entry = err.errors.find((e) => e.code === TOKEN_VALIDATION_CODE);
+        if (entry === undefined) {
+            return err;
+        }
+        const message = entry.message;
+        if (TOKEN_FAULT_MESSAGE.test(message)) {
+            return new ArcaAuthError(`WSFEv1 token validation failed (ARCA ${TOKEN_VALIDATION_CODE}): ${message}`);
+        }
+        if (AUTHORIZATION_MESSAGE.test(message)) {
+            return this.delegationNotAuthorized(entity, TOKEN_VALIDATION_CODE, message);
+        }
+        return err; // ambiguous 600 → leave as the original authority error (502)
+    }
+
+    /** Builds a {@link DelegationNotAuthorizedError} carrying our delegate CUIT + the represented issuer. */
+    private delegationNotAuthorized(entity: EntityAuthBlock, code: string, message: string): DelegationNotAuthorizedError {
+        const issuer = canonicalCuit(entity.issuerTaxId) ?? entity.issuerTaxId;
+        return new DelegationNotAuthorizedError(this.delegateCuit(entity.environment), issuer, code, message);
+    }
+
+    /**
+     * Our delegate CUIT for `environment` — the CUIT the user must grant the web service to. Reading it runs
+     * inside an error handler, so a delegate store that throws (a certificate that became unreadable after
+     * boot) degrades to a placeholder rather than replacing the actionable `403` with a config error. A
+     * delegated call cannot reach here unconfigured: `resolve` would have failed with
+     * `DELEGATION_NOT_CONFIGURED` before the SDK call.
+     */
+    private delegateCuit(environment: GenericEnvironment): string {
+        try {
+            return this.delegate.get(environment)?.delegateCuit ?? '(delegate)';
+        } catch {
+            return '(delegate)';
+        }
+    }
+
     validateCredentials(input: ValidateCredentialsInput): Promise<CredentialValidationResult> {
         return Promise.resolve(validateArcaCredentials(input));
     }
@@ -114,6 +242,7 @@ export class ArcaProvider extends TaxEntityProvider {
             ServiceId.WSFEV1,
             entity.environment,
             entity.credentials,
+            entity.delegated,
         );
         const service = commonInvoiceService(toArcaEnvironment(entity.environment));
 
@@ -123,7 +252,9 @@ export class ArcaProvider extends TaxEntityProvider {
 
         let result: CommonInvoiceResult;
         try {
-            result = await service.requestAuthorization(auth, request);
+            result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
+                service.requestAuthorization(auth, request),
+            );
         } catch (err) {
             // AFIP may surface an already-authorized number as a thrown `10016` `Errors` block rather than a
             // soft rejection. Reconcile ONLY that conflict (mirroring the soft-rejection path); any other
@@ -163,6 +294,10 @@ export class ArcaProvider extends TaxEntityProvider {
      * body) when `invoice.voucherNumberFrom` is genuinely authorized, or `undefined` when it is not — leaving
      * the caller to surface the original authorize outcome. A not-found query (ARCA ~602, thrown as
      * `ArcaServiceError`) counts as "not recoverable", not an error.
+     *
+     * The query is delegation-aware like every other SDK call: on a delegated request a token/representación
+     * rejection here is the true cause of the failure, so it propagates (403/502) instead of being flattened
+     * into "not recoverable" and reported as the original `10016`.
      */
     private async recoverAuthorizedVoucher(
         entity: EntityAuthBlock,
@@ -173,11 +308,13 @@ export class ArcaProvider extends TaxEntityProvider {
     ): Promise<TaxAuthorizationResult | undefined> {
         let queried: CommonInvoiceResult;
         try {
-            queried = await service.queryVoucher(
-                auth,
-                invoice.pointOfSaleNumber,
-                toCbteTipo(invoice.documentTypeCode),
-                invoice.voucherNumberFrom,
+            queried = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
+                service.queryVoucher(
+                    auth,
+                    invoice.pointOfSaleNumber,
+                    toCbteTipo(invoice.documentTypeCode),
+                    invoice.voucherNumberFrom,
+                ),
             );
         } catch (err) {
             if (err instanceof ArcaServiceError) {
@@ -210,11 +347,11 @@ export class ArcaProvider extends TaxEntityProvider {
             ServiceId.WSFEV1,
             entity.environment,
             entity.credentials,
+            entity.delegated,
         );
-        const number = await commonInvoiceService(toArcaEnvironment(entity.environment)).getLastAuthorizedNumber(
-            auth,
-            pointOfSaleNumber,
-            toCbteTipo(documentTypeCode),
+        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
+        const number = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
+            service.getLastAuthorizedNumber(auth, pointOfSaleNumber, toCbteTipo(documentTypeCode)),
         );
         return {number};
     }
@@ -236,17 +373,20 @@ export class ArcaProvider extends TaxEntityProvider {
             ServiceId.WSFEV1,
             entity.environment,
             entity.credentials,
+            entity.delegated,
         );
         const service = commonInvoiceService(toArcaEnvironment(entity.environment));
 
         // The per-code lookups are independent read-only calls sharing one ticket, so issue them concurrently.
         // `Promise.all` preserves input order, so `numbers` still echoes `documentTypeCodes` positionally.
-        const numbers = await Promise.all(
-            mapped.map(async ({code, cbteTipo}) => {
-                const last = await service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo);
-                // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
-                return {documentTypeCode: code, nextNumber: last + 1};
-            }),
+        const numbers = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
+            Promise.all(
+                mapped.map(async ({code, cbteTipo}) => {
+                    const last = await service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo);
+                    // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
+                    return {documentTypeCode: code, nextNumber: last + 1};
+                }),
+            ),
         );
         return {numbers};
     }
@@ -263,13 +403,12 @@ export class ArcaProvider extends TaxEntityProvider {
             ServiceId.WSFEV1,
             entity.environment,
             entity.credentials,
+            entity.delegated,
         );
+        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
         try {
-            const result = await commonInvoiceService(toArcaEnvironment(entity.environment)).queryVoucher(
-                auth,
-                pointOfSaleNumber,
-                toCbteTipo(documentTypeCode),
-                voucherNumber,
+            const result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
+                service.queryVoucher(auth, pointOfSaleNumber, toCbteTipo(documentTypeCode), voucherNumber),
             );
             return toNeutralResult(result);
         } catch (err) {
@@ -295,9 +434,11 @@ export class ArcaProvider extends TaxEntityProvider {
             ServiceId.WSFEV1,
             entity.environment,
             entity.credentials,
+            entity.delegated,
         );
+        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
         try {
-            const points = await commonInvoiceService(toArcaEnvironment(entity.environment)).getPointsOfSale(auth);
+            const points = await this.delegationAware(entity, ServiceId.WSFEV1, () => service.getPointsOfSale(auth));
             return {pointsOfSale: points.map(toNeutralPointOfSale)};
         } catch (err) {
             // ARCA signals "this issuer has no registered points of sale" with a `602 Sin Resultados` error on
@@ -323,10 +464,13 @@ export class ArcaProvider extends TaxEntityProvider {
             serviceId,
             entity.environment,
             entity.credentials,
+            entity.delegated,
         );
-        const data = await padronService(toArcaEnvironment(entity.environment), lvl).getTaxpayer(
-            auth,
-            parseArcaId(taxpayerId, 'taxpayerId'),
+        const data = await this.delegationAware(entity, serviceId, () =>
+            padronService(toArcaEnvironment(entity.environment), lvl).getTaxpayer(
+                auth,
+                parseArcaId(taxpayerId, 'taxpayerId'),
+            ),
         );
         return {idPersona: data.idPersona, taxId: data.taxId, name: data.name};
     }

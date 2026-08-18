@@ -2,8 +2,13 @@ import 'reflect-metadata';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {plainToInstance} from 'class-transformer';
 import {validate} from 'class-validator';
-import {ArcaServiceError, type CommonInvoiceResult, type PointOfSaleInfo} from './sdk/index.js';
-import {VoucherNotFoundError, type EntityAuthBlock, type NeutralInvoice} from '../provider.js';
+import {ArcaAuthError, ArcaServiceError, type CommonInvoiceResult, type PointOfSaleInfo} from './sdk/index.js';
+import {
+    DelegationNotAuthorizedError,
+    VoucherNotFoundError,
+    type EntityAuthBlock,
+    type NeutralInvoice,
+} from '../provider.js';
 import {NeutralInvoiceDto, NextNumbersRequestDto, PointsOfSaleRequestDto} from '../../http/dto/invoice.dto.js';
 
 /**
@@ -19,6 +24,7 @@ const requestAuthorization = jest.fn<(auth: unknown, req: any) => Promise<Common
 const queryVoucher = jest.fn<(auth: unknown, sp: number, vt: number, n: number) => Promise<CommonInvoiceResult>>();
 const getPointsOfSale = jest.fn<() => Promise<Array<PointOfSaleInfo>>>();
 const resolve = jest.fn<() => Promise<{token: string; sign: string; cuit: number}>>();
+const invalidateDelegated = jest.fn<(entityCode: string, environment: string, service: string) => void>();
 
 jest.unstable_mockModule('./clients.js', () => ({
     commonInvoiceService: () => ({getLastAuthorizedNumber, requestAuthorization, queryVoucher, getPointsOfSale}),
@@ -29,7 +35,7 @@ jest.unstable_mockModule('./clients.js', () => ({
 }));
 
 jest.unstable_mockModule('./ticket-store.js', () => ({
-    ticketStore: {resolve},
+    ticketStore: {resolve, invalidateDelegated},
     CredentialsRequiredError: class extends Error {},
 }));
 
@@ -187,6 +193,110 @@ describe('ArcaProvider.authorizeInvoice', () => {
 
         await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
         expect(queryVoucher).not.toHaveBeenCalled();
+    });
+});
+
+describe('ArcaProvider delegated token/representación classification', () => {
+    const DELEGATED: EntityAuthBlock = {...ENTITY, delegated: true};
+    const DELEGATE_CUIT = '30711111118';
+
+    /** A provider whose delegate store is configured, so the 403 can name our real delegate CUIT. */
+    function provider(): InstanceType<typeof ArcaProvider> {
+        const delegate = {
+            get: () => ({certPem: 'C', keyPem: 'K', delegateCuit: DELEGATE_CUIT}),
+            matchesDelegateCertificate: () => false,
+        };
+        return new ArcaProvider(delegate as never);
+    }
+
+    /** Builds a WSFEv1 `Errors` block (→ ArcaServiceError) carrying a single `{code, msg}` pair. */
+    function arcaError(code: string, msg: string): ArcaServiceError {
+        return new ArcaServiceError(`[${code}] ${msg}`, [{code, message: msg}]);
+    }
+    /** A WSFEv1 600 ValidacionDeToken rejection with `msg`. */
+    function tokenError(msg: string): ArcaServiceError {
+        return arcaError('600', msg);
+    }
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+    });
+
+    it('maps the representación-specific 601 (CUIT representada no incluida) to DelegationNotAuthorizedError (→ 403)', async () => {
+        requestAuthorization.mockRejectedValue(arcaError('601', 'CUIT representada no incluida en token'));
+
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toBeInstanceOf(
+            DelegationNotAuthorizedError,
+        );
+        // 601 is a missing delegation, not a token fault — the ticket is valid, so it must NOT be evicted.
+        expect(invalidateDelegated).not.toHaveBeenCalled();
+    });
+
+    it('maps an authorization-flavored 600 on a delegated call to DelegationNotAuthorizedError (→ 403)', async () => {
+        requestAuthorization.mockRejectedValue(
+            tokenError('No se corresponden token y firma. Usuario no autorizado a realizar esta operación'),
+        );
+
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toBeInstanceOf(
+            DelegationNotAuthorizedError,
+        );
+        // The delegate ticket is valid — only the delegation is missing — so it must NOT be evicted.
+        expect(invalidateDelegated).not.toHaveBeenCalled();
+    });
+
+    it('maps a genuine token fault (signature/hash) 600 to a token error, NOT a delegation error', async () => {
+        requestAuthorization.mockRejectedValue(
+            tokenError('ValidacionDeToken: VerificacionDeHash: No validó la firma digital'),
+        );
+
+        const p = provider().authorizeInvoice(DELEGATED, invoice());
+        await expect(p).rejects.toBeInstanceOf(ArcaAuthError);
+        await expect(p).rejects.not.toBeInstanceOf(DelegationNotAuthorizedError);
+        // A genuine token fault ⇒ evict the shared delegate ticket so the next request re-mints.
+        expect(invalidateDelegated).toHaveBeenCalledWith('ARCA', 'testing', 'wsfe');
+    });
+
+    it('leaves an authorization 600 UNTOUCHED on a non-delegated call (never a delegation error)', async () => {
+        const thrown = tokenError('Usuario no autorizado a realizar esta operación');
+        requestAuthorization.mockRejectedValue(thrown);
+
+        // ENTITY has no `delegated` flag → the classifier does not run.
+        await expect(provider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
+    });
+
+    it('leaves a 601 UNTOUCHED on a non-delegated call (classifier does not run)', async () => {
+        const thrown = arcaError('601', 'CUIT representada no incluida en token');
+        requestAuthorization.mockRejectedValue(thrown);
+
+        await expect(provider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
+    });
+
+    it('leaves an ambiguous 600 as the original authority error (does not guess "delegation")', async () => {
+        const thrown = tokenError('ValidacionDeToken: error interno del servicio');
+        requestAuthorization.mockRejectedValue(thrown);
+
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toBe(thrown);
+    });
+
+    it('names our configured delegate CUIT — the CUIT the user must grant the service to', async () => {
+        requestAuthorization.mockRejectedValue(arcaError('601', 'CUIT representada no incluida en token'));
+
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toMatchObject({
+            delegateTaxId: DELEGATE_CUIT,
+            issuerTaxId: '20111111112',
+        });
+    });
+
+    it('classifies the 10016 RECOVERY query too, instead of reporting it as the original conflict', async () => {
+        // Authorize hits ARCA's already-authorized conflict, so recovery queries the voucher...
+        requestAuthorization.mockRejectedValue(arcaError('10016', 'El numero o fecha del comprobante no se corresponde'));
+        // ...and the query reveals the real cause: our delegation for this representado is missing.
+        queryVoucher.mockRejectedValue(arcaError('601', 'CUIT representada no incluida en token'));
+
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toBeInstanceOf(
+            DelegationNotAuthorizedError,
+        );
     });
 });
 

@@ -40,6 +40,16 @@ export interface EntityAuthBlock {
     readonly issuerTaxId: string;
     readonly environment: GenericEnvironment;
     readonly credentials?: IssuerCredentials;
+    /**
+     * Delegated authorization (AR: ARCA *representación*). When `true`, `issuerTaxId` is the
+     * **representado** — the taxpayer the invoice is issued for — and this service signs with its **own**
+     * platform certificate (configured per environment on the service), NOT a certificate for
+     * `issuerTaxId`. `credentials` is ignored on a delegated request, and a delegated request never
+     * triggers the `CREDENTIALS_REQUIRED` handshake. Omitted/`false` ⇒ the tenant-certificate flow
+     * (certificate owner == `issuerTaxId`). The represented taxpayer must have delegated the web service
+     * to our CUIT out of band; this service keeps no allow-list of who has.
+     */
+    readonly delegated?: boolean;
 }
 
 /** ARCA `Concepto` analogue: 1 = goods, 2 = services, 3 = both. Kept in the neutral invoice. */
@@ -154,6 +164,45 @@ export class UnknownEntityError extends Error {
     constructor(readonly entityCode: string) {
         super(`Unknown entity code: "${entityCode}"`);
         this.name = 'UnknownEntityError';
+    }
+}
+
+/**
+ * Raised on a `delegated` request when the authority reports that our delegate identity is not
+ * authorized to act for `issuerTaxId` — i.e. the represented taxpayer has not delegated the web service
+ * to our CUIT (AR: not linked in ARCA's *Administrador de Relaciones*). A deterministic, user-actionable
+ * outcome (the user must grant the delegation), so it maps to a distinct `403 DELEGATION_NOT_AUTHORIZED`
+ * rather than a generic authority failure (`502`) — mirroring why {@link VoucherNotFoundError} is a `404`.
+ * The raw authority code + message ride in `details` so a genuine token fault is never masked as this.
+ */
+export class DelegationNotAuthorizedError extends Error {
+    constructor(
+        readonly delegateTaxId: string,
+        readonly issuerTaxId: string,
+        readonly authorityCode: string,
+        readonly authorityMessage: string,
+    ) {
+        super(
+            `Delegate ${delegateTaxId} is not authorized to issue for ${issuerTaxId}: grant the web ` +
+                `service to ${delegateTaxId} (AR: ARCA "Administrador de Relaciones"). ` +
+                `[authority ${authorityCode}] ${authorityMessage}`,
+        );
+        this.name = 'DelegationNotAuthorizedError';
+    }
+}
+
+/**
+ * Raised when a request sets `delegated: true` but this service has no valid delegate certificate
+ * configured for that `environment` — a **server misconfiguration**, not a caller error. Maps to `500
+ * DELEGATION_NOT_CONFIGURED`. `reason` distinguishes "none configured" from "configured but invalid".
+ */
+export class DelegationNotConfiguredError extends Error {
+    constructor(
+        readonly environment: GenericEnvironment,
+        readonly reason: string,
+    ) {
+        super(`Delegation is not available for environment "${environment}": ${reason}`);
+        this.name = 'DelegationNotConfiguredError';
     }
 }
 
