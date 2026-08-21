@@ -46,6 +46,16 @@ export function normalizeResultCode(value: string | undefined): 'A' | 'R' | 'P' 
     return value === 'A' || value === 'P' ? value : 'R';
 }
 
+/**
+ * An observation's `Code`/`Msg` as text, with an absent child rendered as `''` rather than the literal
+ * string `"undefined"`. Core persists observations verbatim on every outcome (`docs/CONTRACT.md`,
+ * `/invoices/authorize`), so a half-formed `Obs` must not write the word "undefined" onto an authorized
+ * sale — blank is "the authority sent nothing", the same reading {@link cleanCode} gives everywhere else.
+ */
+function observationText(value: unknown): string {
+    return value === undefined || value === null ? '' : String(value).trim();
+}
+
 export function extractObservations(node: unknown): Array<ArcaObservation> {
     const obs = (node as { Obs?: unknown } | undefined)?.Obs;
     if (!obs) {
@@ -53,7 +63,7 @@ export function extractObservations(node: unknown): Array<ArcaObservation> {
     }
     const list = Array.isArray(obs) ? obs : [obs];
     return list.map((o: { Code?: unknown; Msg?: unknown }) => ({
-        code: String(o.Code),
-        message: String(o.Msg),
+        code: observationText(o.Code),
+        message: observationText(o.Msg),
     }));
 }

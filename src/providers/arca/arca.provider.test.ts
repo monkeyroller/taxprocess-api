@@ -148,6 +148,48 @@ describe('ArcaProvider.authorizeInvoice', () => {
         expect(result.authorizedNumber).toBe(17);
     });
 
+    /**
+     * ARCA routinely authorizes a voucher AND observes it. The observations must reach core on the approved
+     * path, since nothing in this service logs or otherwise retains them (`docs/CONTRACT.md`,
+     * `/invoices/authorize`) — dropped here they are recoverable only by re-querying ARCA.
+     */
+    it('returns observations on an APPROVED voucher, with the CAE and QR intact', async () => {
+        requestAuthorization.mockResolvedValue({
+            ...approved,
+            observations: [{code: '10063', message: 'El comprobante fue autorizado con observaciones'}],
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, invoice());
+
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.authorizationCode).toBe('75123456789012');
+        expect(result.qr).toBeDefined();
+        expect(result.observations).toEqual([
+            {code: '10063', message: 'El comprobante fue autorizado con observaciones'},
+        ]);
+        // Observations are informational on an approval — never a reason to reconcile.
+        expect(queryVoucher).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The idempotent-recovery trigger is a `10016` *rejection*. ARCA attaching `10016` to an APPROVED voucher
+     * must not send us reconciling: the CAE in hand is the authoritative one, and querying instead would risk
+     * replacing a fresh approval with the mismatch guard's refusal.
+     */
+    it('does not reconcile an approved voucher that merely carries a 10016 observation', async () => {
+        requestAuthorization.mockResolvedValue({
+            ...approved,
+            observations: [{code: '10016', message: 'El numero o fecha del comprobante no se corresponde…'}],
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, invoice());
+
+        expect(queryVoucher).not.toHaveBeenCalled();
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.authorizationCode).toBe('75123456789012');
+        expect(result.observations).toHaveLength(1);
+    });
+
     it('recovers the existing CAE when core re-sends an already-authorized number (idempotent)', async () => {
         // ARCA rejects the re-send with 10016; the stored voucher is genuinely authorized.
         requestAuthorization.mockResolvedValue(rejected10016);
@@ -162,6 +204,24 @@ describe('ArcaProvider.authorizeInvoice', () => {
         expect(result.authorizationCode).toBe('75123456789012');
         expect(result.authorizedNumber).toBe(17);
         expect(result.qr).toBeDefined();
+    });
+
+    /**
+     * A recovered result is built from the *queried* voucher, so it carries the observations ARCA stored
+     * against it — not the `10016` from the rejected re-send. That is what makes `/invoices/query` a usable
+     * recovery path for observations core failed to persist the first time.
+     */
+    it('returns the stored voucher’s observations on a recovered CAE, not the 10016 re-send rejection', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({
+            ...queriedAuthorized,
+            observations: [{code: '10063', message: 'autorizado con observaciones'}],
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, invoice());
+
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.observations).toEqual([{code: '10063', message: 'autorizado con observaciones'}]);
     });
 
     it('keeps a 10016 rejection REJECTED when the voucher is not actually authorized (number ahead of sequence)', async () => {
@@ -443,9 +503,32 @@ describe('ArcaProvider.queryVoucher', () => {
 
         const result = await new ArcaProvider().queryVoucher(ENTITY, 3, 1, 17);
 
-        expect(queryVoucher).toHaveBeenCalledWith(expect.anything(), 3, expect.any(Number), 17);
+        // Pinned positionally: point of sale 3, CbteTipo 1 (canonical code 1 → ARCA 1), number 17. Loosening
+        // the CbteTipo slot would hide a PtoVta/CbteTipo transposition, which reads as a missing voucher.
+        expect(queryVoucher).toHaveBeenCalledWith(expect.anything(), 3, 1, 17);
         expect(result.status).toBe('AUTHORIZED');
         expect(result.authorizationCode).toBe('75123456789012');
+        // No QR: rebuilding it needs the invoice body, which /query does not receive (docs/CONTRACT.md).
+        expect(result.qr).toBeUndefined();
+    });
+
+    /**
+     * `docs/CONTRACT.md` makes this endpoint the ONLY recovery path for observations core failed to persist off
+     * the authorize response, so the pass-through is contractual, not incidental — a `/query` that answered with
+     * `observations: []` for an observed voucher would leave them unrecoverable for good.
+     */
+    it('returns the observations ARCA stored against the voucher', async () => {
+        queryVoucher.mockResolvedValue({
+            ...queriedAuthorized,
+            observations: [{code: '10063', message: 'El comprobante fue autorizado con observaciones'}],
+        });
+
+        const result = await new ArcaProvider().queryVoucher(ENTITY, 3, 1, 17);
+
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.observations).toEqual([
+            {code: '10063', message: 'El comprobante fue autorizado con observaciones'},
+        ]);
     });
 
     it('translates ARCA 602 not-found to VoucherNotFoundError (→ 404, not a 502)', async () => {

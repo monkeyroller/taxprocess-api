@@ -152,6 +152,32 @@ describe('toNeutralResult', () => {
         expect(r.providerMetadata).toEqual({});
     });
 
+    /**
+     * ARCA authorizes with observations more often than it rejects with them. The mapper must forward them on
+     * the AUTHORIZED path unchanged — a status-conditional `observations` here would strip the authority's
+     * only notice about an accepted voucher before core ever sees it (`docs/CONTRACT.md`, `/invoices/authorize`).
+     */
+    it('keeps observations on an approved result, alongside the CAE and QR', () => {
+        const r = toNeutralResult(
+            {
+                ...approved,
+                observations: [
+                    {code: '10063', message: 'El comprobante fue autorizado con observaciones'},
+                    {code: '10192', message: 'segunda observacion'},
+                ],
+            },
+            'qr-url',
+        );
+
+        expect(r.status).toBe('AUTHORIZED');
+        expect(r.authorizationCode).toBe('75123456789012');
+        expect(r.qr).toBe('qr-url');
+        expect(r.observations).toEqual([
+            {code: '10063', message: 'El comprobante fue autorizado con observaciones'},
+            {code: '10192', message: 'segunda observacion'},
+        ]);
+    });
+
     it('maps a rejected result with observations and no CAE', () => {
         const r = toNeutralResult({
             ...approved,

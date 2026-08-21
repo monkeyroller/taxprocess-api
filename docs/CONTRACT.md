@@ -183,8 +183,26 @@ Responses:
     "authorizedNumber":42, "qr":"https://www.arca.gob.ar/fe/qr/?p=...",
     "status":"AUTHORIZED", "observations":[], "providerMetadata":{} }
   ```
-- `422` (rejected/partial): same shape, `status:"REJECTED"|"PARTIAL"`, empty `authorizationCode`, populated
-  `observations`.
+- `422` (rejected/partial): same shape, `status:"REJECTED"|"PARTIAL"`, populated `observations`. A `REJECTED`
+  voucher carries an empty `authorizationCode`/`expiration` — the authority issued none. A `PARTIAL` may still
+  carry a real `authorizationCode`, so **decide success on `status`, never on "is `authorizationCode` empty"**:
+  the split is `status:"AUTHORIZED"` (plus a non-empty code and expiration) → `200`, anything else → `422`. (AR
+  reports `PARTIAL` only for multi-record batches, which the single-voucher flow never sends, so today it is
+  unreachable — but it is part of the shape.)
+
+**`observations` is NOT limited to the `422` branch.** The authority routinely authorizes a voucher *with*
+observations — a valid CAE plus one or more `{code, message}` notices about the voucher it just accepted (AR:
+`Observaciones.Obs` under a `Resultado: "A"`). That arrives as a normal `200`: real `authorizationCode`,
+`expiration` and `qr`, `status:"AUTHORIZED"`, and a **non-empty** `observations` array. The example above shows
+`[]` only because that is the common case, not because approval implies an empty array.
+
+Core must therefore persist `observations` on **every** outcome, not just on rejection. They are the authority's
+only record of *why* it flagged an accepted voucher (and the sole notice for conditions the authority chose not
+to reject over), this service does not log or otherwise retain them, and `providerMetadata` never carries them.
+Dropped on the `200` path they are unrecoverable except by re-querying the authority via
+`POST /invoices/query` — which returns the stored voucher's observations for exactly this reason. Treat a
+non-empty `observations` on an approved sale as informational, not as a failure: the CAE is valid and the sale
+is filed.
 
 **Voucher number:** core owns the number and sends it as `voucherNumberFrom`/`voucherNumberTo` (single-voucher
 flow: equal). This service authorizes exactly that number — it never asks the authority for the last-authorized
@@ -256,7 +274,9 @@ never a silent omission. Keeps the "next" semantics on this service so core stay
 
 ### `POST /api/invoices/query`
 Body `{ "entity": {...}, "pointOfSaleNumber": 1, "documentTypeCode": 1, "voucherNumber": 42 }` → same shape as
-`authorize`'s result.
+`authorize`'s result, including the `observations` the authority stored against the voucher. That makes this the
+recovery path for observations lost on the `authorize` response (see `/invoices/authorize`); no QR is returned,
+since rebuilding it needs the invoice body.
 
 **Not-found is a `404`, never a `502`.** When the authority has no record of the queried voucher — it was
 never issued — this endpoint returns `404 { "error": { "code": "VOUCHER_NOT_FOUND", "details": {
