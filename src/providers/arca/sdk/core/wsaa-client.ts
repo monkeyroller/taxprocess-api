@@ -137,16 +137,64 @@ export class WsaaClient {
         }
     }
 
-    /** Clears cached tickets (all, or just one owner). Useful for tests and forced re-auth. */
-    clearCache(ticketOwnerKey?: string): void {
+    /**
+     * Clears cached tickets from memory AND the persisted file, so a ticket evicted after ARCA rejected it
+     * cannot resurrect from disk on the next {@link peekAccessTicket}. Scope widens as arguments are
+     * omitted: `(owner, serviceId)` clears exactly that ticket, `(owner)` every service under that owner,
+     * `()` the whole cache.
+     *
+     * Prefer the two-argument form for a rejection: ARCA binds a ticket to `(certificate, service)` and
+     * refuses to re-issue one while a prior ticket is still valid (`coe.alreadyAuthenticated`), so dropping
+     * the *other* services' still-good tickets would leave them unmintable — and unrecoverable, the file
+     * copy being purged too — until they expire (~12h).
+     */
+    clearCache(ticketOwnerKey?: string, serviceId?: string): void {
         if (ticketOwnerKey === undefined) {
             this.cache.clear();
+        } else if (serviceId !== undefined) {
+            this.cache.delete(`${ticketOwnerKey}:${serviceId}`);
+        } else {
+            for (const key of this.cache.keys()) {
+                if (key.startsWith(`${ticketOwnerKey}:`)) {
+                    this.cache.delete(key);
+                }
+            }
+        }
+        this.removeFromFile(ticketOwnerKey, serviceId);
+    }
+
+    /**
+     * Best-effort removal of persisted tickets, matching {@link clearCache}'s scope. Mirrors
+     * {@link saveToFile}'s atomic temp-file + rename so a concurrent reader or a shared cache file never
+     * observes a torn write. A missing/unreadable file is a no-op.
+     */
+    private removeFromFile(ticketOwnerKey?: string, serviceId?: string): void {
+        if (!this.cachePath) {
             return;
         }
-        for (const key of this.cache.keys()) {
-            if (key.startsWith(`${ticketOwnerKey}:`)) {
-                this.cache.delete(key);
+        const matches = (key: string): boolean => {
+            if (ticketOwnerKey === undefined) {
+                return true;
             }
+            return serviceId === undefined ? key.startsWith(`${ticketOwnerKey}:`) : key === `${ticketOwnerKey}:${serviceId}`;
+        };
+        try {
+            const all = JSON.parse(fs.readFileSync(this.cachePath, 'utf8')) as Record<string, StoredTicket>;
+            let changed = false;
+            for (const key of Object.keys(all)) {
+                if (matches(key)) {
+                    delete all[key];
+                    changed = true;
+                }
+            }
+            if (!changed) {
+                return;
+            }
+            const tmpPath = `${this.cachePath}.${process.pid}.tmp`;
+            fs.writeFileSync(tmpPath, JSON.stringify(all, null, 2));
+            fs.renameSync(tmpPath, this.cachePath);
+        } catch {
+            // best-effort: no file yet, or unreadable — nothing to purge
         }
     }
 

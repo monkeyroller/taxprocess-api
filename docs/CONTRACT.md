@@ -61,7 +61,10 @@ store for horizontal scale is **deferred**.
   "credentials": {                // OMITTED on first send; ATTACHED by core on a CREDENTIALS_REQUIRED re-send
     "certPem": "-----BEGIN CERTIFICATE----- …",
     "keyPem":  "-----BEGIN PRIVATE KEY----- …"  // already-decrypted; used in-memory only, never persisted
-  }
+  },
+  "delegated": true               // OPTIONAL. true ⇒ issuerTaxId is the represented taxpayer and this
+                                  //   service signs with its OWN platform certificate (credentials ignored,
+                                  //   no CREDENTIALS_REQUIRED). Omit/false ⇒ the tenant-certificate flow. See §10.
 }
 ```
 
@@ -87,7 +90,7 @@ The ARCA-specific codes/terms live only inside the provider; the wire never carr
 | `invoice.receiver.fiscalConditionCode` | receiver's VAT/fiscal condition (canonical code) | **CondicionIVAReceptorId** (RG 5616: 1=RI, 5=CF, 6=Monotributo…) |
 | `invoice.currencyIso` | ISO-4217 currency | **MonId** (ARS→PES, USD→DOL, EUR→060) |
 | `invoice.currencyRate` | exchange rate to the local currency | **MonCotiz** |
-| `invoice.issueDate` | ISO-8601 issue date | **CbteFch** (±5-day clamp for concept 1) |
+| `invoice.issueDate` | ISO-8601 issue date | **CbteFch** (must be within ±5 days of the request time for concept 1 — see §3) |
 | `invoice.lines[].netAmount` | taxed line net (base) | part of **Iva[]** subtotal grouping |
 | `invoice.lines[].taxRatePercent` | tax rate % for the line (21, 10.5, 0…) | VAT alícuota → **Iva[].Id** |
 | `invoice.lines[].taxAmount` | tax amount for the line | **Iva[].Importe** |
@@ -161,7 +164,7 @@ Request:
     },
     "currencyIso": "ARS",             // ISO-4217 → mapped to MonId by this service
     "currencyRate": 1,                // exchange rate to the local currency
-    "issueDate": "2026-08-05",        // ISO date; clamped to ±5 days for concept 1
+    "issueDate": "2026-08-05",        // ISO date; concept 1 must be within ±5 AR calendar days of today (else 400 ARCA_VALIDATION)
     "lines": [
       { "netAmount": 100, "taxRatePercent": 21, "taxAmount": 21 }
     ],
@@ -180,8 +183,26 @@ Responses:
     "authorizedNumber":42, "qr":"https://www.arca.gob.ar/fe/qr/?p=...",
     "status":"AUTHORIZED", "observations":[], "providerMetadata":{} }
   ```
-- `422` (rejected/partial): same shape, `status:"REJECTED"|"PARTIAL"`, empty `authorizationCode`, populated
-  `observations`.
+- `422` (rejected/partial): same shape, `status:"REJECTED"|"PARTIAL"`, populated `observations`. A `REJECTED`
+  voucher carries an empty `authorizationCode`/`expiration` — the authority issued none. A `PARTIAL` may still
+  carry a real `authorizationCode`, so **decide success on `status`, never on "is `authorizationCode` empty"**:
+  the split is `status:"AUTHORIZED"` (plus a non-empty code and expiration) → `200`, anything else → `422`. (AR
+  reports `PARTIAL` only for multi-record batches, which the single-voucher flow never sends, so today it is
+  unreachable — but it is part of the shape.)
+
+**`observations` is NOT limited to the `422` branch.** The authority routinely authorizes a voucher *with*
+observations — a valid CAE plus one or more `{code, message}` notices about the voucher it just accepted (AR:
+`Observaciones.Obs` under a `Resultado: "A"`). That arrives as a normal `200`: real `authorizationCode`,
+`expiration` and `qr`, `status:"AUTHORIZED"`, and a **non-empty** `observations` array. The example above shows
+`[]` only because that is the common case, not because approval implies an empty array.
+
+Core must therefore persist `observations` on **every** outcome, not just on rejection. They are the authority's
+only record of *why* it flagged an accepted voucher (and the sole notice for conditions the authority chose not
+to reject over), this service does not log or otherwise retain them, and `providerMetadata` never carries them.
+Dropped on the `200` path they are unrecoverable except by re-querying the authority via
+`POST /invoices/query` — which returns the stored voucher's observations for exactly this reason. Treat a
+non-empty `observations` on an approved sale as informational, not as a failure: the CAE is valid and the sale
+is filed.
 
 **Voucher number:** core owns the number and sends it as `voucherNumberFrom`/`voucherNumberTo` (single-voucher
 flow: equal). This service authorizes exactly that number — it never asks the authority for the last-authorized
@@ -190,10 +211,35 @@ number and adds `+1`. Use `POST /invoices/last-authorized` to fetch the next num
 **Idempotency:** `authorize` is idempotent on the voucher number. If the authority authorizes but core's
 persistence then fails, the number is consumed on the authority's side; **re-sending the same invoice with the
 same number returns the already-issued CAE** (a full `200` result, QR included) instead of a rejection — this
-service reconciles internally via the authority's voucher query. Re-sending the *same number* with a *different
-amount* is refused (`400 ARCA_VALIDATION`, `details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than
-returning a CAE for the wrong invoice. `POST /invoices/query` remains available for explicit, caller-driven
-recovery.
+service reconciles internally via the authority's voucher query. Re-sending the *same number* for what the
+authority's stored voucher shows was a **different sale** is refused (`400 ARCA_VALIDATION`,
+`details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than returning a CAE for the wrong invoice. The
+check compares the stored voucher against the resend on: total amount, receiver id type/number, concept,
+currency, voucher date, and receiver IVA condition — any confirmed mismatch on one of these is refused; a
+field the authority didn't return (absent, `null`, or an empty element) is never treated as a mismatch.
+`POST /invoices/query` remains available for explicit, caller-driven recovery.
+
+> **A retry must carry the ORIGINAL `issueDate`.** `issueDate` is one of the compared fields, so re-stamping
+> it with the current date makes the retry look like a different sale and it is refused with
+> `VOUCHER_ALREADY_AUTHORIZED_MISMATCH` — permanently, since the stored voucher never changes. This matters
+> most for a retry that crosses midnight. Persist `issueDate` with the voucher number and replay it verbatim.
+
+**Concept-1 date window (contract change 2026-08-20):** an out-of-±5-day `issueDate` for a goods (concept 1)
+invoice is now **refused** (`400 ARCA_VALIDATION`, `details.code: "VOUCHER_DATE_OUT_OF_WINDOW"`) instead of
+being silently substituted with the request time. Previously this service clamped the date so the authority
+would always accept it; that meant a caller could receive a CAE for a *different* `CbteFch` than the one it
+sent. Core must send an `issueDate` within the window for concept 1, or expect this rejection. The window is
+measured in **Argentina calendar days**, so a date exactly 5 days out is accepted at any hour of the day.
+
+Idempotent recovery takes precedence over this rejection: a resend whose `issueDate` has aged out of the
+window is still reconciled against the authority first, and returns the already-issued CAE if the voucher
+number is authorized and matches. A delayed replay of a lost CAE therefore still recovers; only a genuinely
+new invoice gets `VOUCHER_DATE_OUT_OF_WINDOW`.
+
+An `issueDate` (or `serviceDateFrom`/`serviceDateTo`/`paymentDueDate`) that passes `@IsISO8601` but is not a
+date this service can parse — week (`2026-W01-1`), ordinal (`2026-366`), basic (`20260231`) or
+space-separated (`2026-08-05 12:00:00`) forms — is refused with `400 ARCA_VALIDATION`,
+`details.code: "INVALID_ISSUE_DATE"`. Send calendar dates as `YYYY-MM-DD` or a full ISO timestamp.
 
 **Single-voucher only:** `voucherNumberFrom` and `voucherNumberTo` must be equal (§5). A range
 (`voucherNumberTo > voucherNumberFrom`) is refused (`400 ARCA_VALIDATION`,
@@ -228,7 +274,9 @@ never a silent omission. Keeps the "next" semantics on this service so core stay
 
 ### `POST /api/invoices/query`
 Body `{ "entity": {...}, "pointOfSaleNumber": 1, "documentTypeCode": 1, "voucherNumber": 42 }` → same shape as
-`authorize`'s result.
+`authorize`'s result, including the `observations` the authority stored against the voucher. That makes this the
+recovery path for observations lost on the `authorize` response (see `/invoices/authorize`); no QR is returned,
+since rebuilding it needs the invoice body.
 
 **Not-found is a `404`, never a `502`.** When the authority has no record of the queried voucher — it was
 never issued — this endpoint returns `404 { "error": { "code": "VOUCHER_NOT_FOUND", "details": {
@@ -292,8 +340,20 @@ token rejection. Formatting (dashes, a `CUIT ` prefix) is not significant; both 
 digits. Core should send the CUIT that owns the certificate.
 
 `service` values (in `details`, ARCA): `wsfe` (invoicing) and `ws_sr_padron_a4|a5|a10|a13` (lookups). This
-service caches tickets keyed by `(entityCode, environment, issuerTaxId, service)`, shared across core
-instances — so after a refresh, most requests are served identity-only for ~12h.
+service caches tickets keyed by the **signing certificate's identity**, shared across core instances, so after
+a refresh most requests are served identity-only for ~12h. Tenant and delegate signers occupy **separate
+partitions**:
+
+| signer | partition |
+| --- | --- |
+| tenant certificate (§4) | `(entityCode, environment, issuerTaxId, service)` — unchanged from earlier releases |
+| our delegate certificate (§10) | `(entityCode, environment, delegate, delegateCuit, service)` |
+
+A credential-less request is only ever served from **its own issuer's** tenant partition: the delegate ticket
+is never lent to a request that has not presented a certificate for the CUIT it names, even when that CUIT is
+our own. So if core also self-issues non-delegated for our own CUIT, that flow keeps its normal
+`CREDENTIALS_REQUIRED` handshake (§4). The two partitions merge only when the credentials core sends *are* our
+delegate certificate — provably the same physical certificate, hence the same authority ticket.
 
 ---
 
@@ -399,17 +459,71 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | --- | --- | --- |
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 400 | `RECEIVER_MATCHES_ISSUER` | the authority rejected the voucher because the receiver's identification number equals the issuer's own (ARCA `10069`). Stable and caller-fixable, so it is a `400` — **not** the `502 ARCA_SERVICE` an unclassified rejection gets; `details: { arcaCode, arcaErrors }` |
+| 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
-| 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4) |
+| 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |
-| 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure |
+| 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure. `ARCA_SERVICE` now carries `details.arcaErrors` — the authority's full `[{ code, message }]` list, previously dropped — so core can log or branch on the underlying rejection |
+| 500 | `DELEGATION_NOT_CONFIGURED` | `delegated:true` but this service has no valid delegate certificate configured for that `environment` (server misconfiguration); `details: { environment, reason }` |
 | 500 | `ARCA_ERROR` / `INTERNAL` | unexpected |
 
 ---
 
 ## 9. What stays inside the ARCA provider (do NOT leak into the contract)
-CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day clamp,
+CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day window,
 WSAA/CMS signing, `homologacion`/`produccion` — all inside `src/providers/arca/`. The neutral result already
 abstracts CAE → `authorizationCode`.
+
+---
+
+## 10. Delegated authorization (this service's own certificate)
+
+ARCA lets a taxpayer (the *representado*) delegate a web service (WSFEv1) to another CUIT (the
+*computador/delegate*) via **Administrador de Relaciones**. This service can act as that delegate using
+**its own certificate** (our organization's CUIT), so core can authorize a sale for a taxpayer whose
+certificate it does not hold.
+
+- **How to invoke:** set `entity.delegated = true` and `entity.issuerTaxId` = the represented taxpayer's
+  CUIT. Do **not** send `credentials` — this service uses its own delegate certificate (configured per
+  environment via `ARCA_DELEGATE_*`, see `.env.example`). A delegated request therefore **never** returns
+  `409 CREDENTIALS_REQUIRED`; the tenant-credential handshake (§4) does not apply.
+- **On the wire to ARCA:** `Auth.Cuit` = `issuerTaxId` (the representado); the WSAA ticket is signed with
+  our delegate certificate and shared across all represented CUITs (keyed by the delegate identity, in its
+  own cache partition — see the table in §4).
+- **Prerequisite (user-side, out of band):** the represented taxpayer must delegate the WSFEv1 web service
+  to our delegate CUIT in ARCA's *Administrador de Relaciones*. **This service keeps no allow-list** of who
+  has delegated — it does not pre-validate the issuer.
+- **If the delegation is missing:** the call returns **`403 DELEGATION_NOT_AUTHORIZED`** — including when the
+  rejection surfaces on the internal `10016` recovery query rather than on the authorize itself,
+  `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` — surface it to the user as "grant WSFEv1
+  to CUIT `<delegateTaxId>` in Administrador de Relaciones." A missing/insufficient delegation surfaces at the
+  **WSFEv1 business call** (WSAA login only authenticates our certificate and never sees `Auth.Cuit`, so it
+  cannot check the representación): either as the representación-specific **`601` (`CUIT representada no
+  incluida en token`)** — unambiguous — or as an authorization-flavored **`600 ValidacionDeToken`** (e.g.
+  `Usuario no autorizado a realizar esta operación`). A genuine token fault (bad signature, clock skew,
+  expired ticket) is **also** reported under the overloaded `600` but is **not** a delegation problem: it
+  stays a `502` token error, so a service-side cert/clock issue is never mislabeled as the user's missing
+  delegation. (Note: WSAA's own login-time `computador no autorizado a acceder al servicio` is a *different*
+  failure — our certificate isn't enrolled to the `wsfe` service — and surfaces before this classification as
+  a `502`.)
+- **Server misconfiguration:** `delegated:true` for an environment with no valid delegate certificate returns
+  **`500 DELEGATION_NOT_CONFIGURED`**. A misconfigured (present-but-invalid) delegate certificate fails at
+  **boot**, not per request.
+- **Non-delegated (tenant-certificate) requests are unchanged:** omit `delegated` (or send `false`) and the
+  `CREDENTIALS_REQUIRED` handshake behaves exactly as in §4.
+
+**Deployment note (ticket cache).** ARCA binds a ticket to the `(certificate, service)` that minted it and
+refuses to issue a second one while the first is valid, so the delegate identity gets its **own** cache
+partition (§4) rather than sharing the tenant partition of the same CUIT: a taxpayer may hold several ARCA
+certificates, and a *representación* is granted to one specific computador, so a ticket minted by a different
+certificate of our CUIT would be rejected (`601`) as if the delegation were missing. If our own organization
+*also* issues for itself non-delegated with the very certificate we delegate with, the two roles converge on
+the one cached ticket automatically. Otherwise each certificate holds its own, and the single-node / shared
+`ARCA_TICKET_CACHE_PATH` guidance in §1 still holds.
+
+When ARCA rejects a delegate ticket with a genuine token fault, only that **service's** delegate ticket is
+dropped — the delegate identity's other tickets (e.g. padrón) are still valid and ARCA would not re-issue them
+for ~12h.

@@ -4,6 +4,7 @@ import express, {type NextFunction, type Request, type Response} from 'express';
 import cors from 'cors';
 import {useExpressServer} from 'routing-controllers';
 import {env} from './config/env.js';
+import {delegateCredentialStore} from './providers/arca/delegate-credentials.js';
 import {StatusController} from './http/controllers/status.controller.js';
 import {InvoicesController} from './http/controllers/invoices.controller.js';
 import {PointsOfSaleController} from './http/controllers/points-of-sale.controller.js';
@@ -26,6 +27,10 @@ function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunc
 }
 
 function bootstrap(): void {
+    // Fail fast if a delegate certificate is configured but unusable, rather than on the first
+    // delegated request. A no-op when no delegate cert is configured (delegation stays disabled).
+    delegateCredentialStore.validateConfigured();
+
     const app = express();
     app.use(cors({origin: env.corsOrigin, credentials: true}));
 

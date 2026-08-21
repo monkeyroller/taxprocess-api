@@ -87,7 +87,11 @@ export interface CommonInvoiceRequest {
     optionals?: Array<InvoiceOptional>;
 }
 
-/** An ARCA observation (`Observaciones.Obs`) attached to a partial/rejected result. */
+/**
+ * An ARCA observation (`Observaciones.Obs`). Attached to ANY result, not only a partial/rejected one: ARCA
+ * routinely approves a voucher (`Resultado: "A"`, real CAE) while still reporting observations about it. The
+ * parse is deliberately independent of `Resultado` so an approved-with-observations voucher keeps them.
+ */
 export interface ArcaObservation {
     code: string;
     message: string;

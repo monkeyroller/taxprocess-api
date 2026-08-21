@@ -1,5 +1,5 @@
 import {Type} from 'class-transformer';
-import {IsIn, IsOptional, IsString, MinLength, ValidateNested} from 'class-validator';
+import {IsBoolean, IsIn, IsOptional, IsString, MinLength, ValidateNested} from 'class-validator';
 import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider.js';
 
 /**
@@ -41,6 +41,15 @@ export class EntityAuthDto {
     @ValidateNested()
     @Type(() => IssuerCredentialsDto)
     credentials?: IssuerCredentialsDto;
+
+    /**
+     * Delegated authorization. When `true`, `issuerTaxId` is the represented taxpayer and this service
+     * signs with its own platform certificate — `credentials` is ignored and no `CREDENTIALS_REQUIRED`
+     * handshake occurs. Omit (or `false`) for the tenant-certificate flow.
+     */
+    @IsOptional()
+    @IsBoolean()
+    delegated?: boolean;
 }
 
 /** Body for `POST /authority/status` — dispatches by `entityCode`; needs only the environment (no ticket). */
