@@ -78,7 +78,14 @@ const rejected10016: CommonInvoiceResult = {
     observations: [{code: '10016', message: 'El numero o fecha del comprobante no se corresponde…'}],
 };
 
-/** What `queryVoucher` returns for an already-authorized voucher 17 (stored total matches the invoice's 121). */
+/**
+ * What `queryVoucher` returns for an already-authorized voucher 17 — every field
+ * `assertRecoveredVoucherMatches` checks matches the default `invoice()`: total 121, CUIT 20111111112/
+ * DocTipo 80, concept 1, currency PES, voucher date 20260805, CondicionIVAReceptorId 1.
+ *
+ * Values are STRINGS on purpose: the SOAP client parses with `parseTagValue: false`, so this is the shape
+ * the guard actually sees in production. Stubbing numbers here would hide how a blank element behaves.
+ */
 const queriedAuthorized: CommonInvoiceResult = {
     result: 'A',
     cae: '75123456789012',
@@ -86,13 +93,36 @@ const queriedAuthorized: CommonInvoiceResult = {
     voucherNumberFrom: 17,
     voucherNumberTo: 17,
     observations: [],
-    raw: {ImpTotal: 121},
+    raw: {
+        ImpTotal: '121',
+        DocTipo: '80',
+        DocNro: '20111111112',
+        Concepto: '1',
+        MonId: 'PES',
+        CbteFch: '20260805',
+        CondicionIVAReceptorId: '1',
+    },
 };
 
 /** ARCA's not-found response for a voucher that was never authorized (FECompConsultar ~602). */
 const notFoundError = new ArcaServiceError('[602] No existe el comprobante', [
     {code: '602', message: 'No existe el comprobante'},
 ]);
+
+/**
+ * `authorizeInvoice` builds its request against the real clock (`new Date()`), and concept-1 vouchers
+ * now reject an out-of-window `issueDate` instead of clamping it (contract 2026-08-20). Pinning the clock
+ * to the default `invoice()`'s issue date keeps every authorize test deterministic regardless of when the
+ * suite actually runs, rather than going stale the moment real "now" drifts more than 5 days past 2026-08-05.
+ */
+beforeEach(() => {
+    jest.useFakeTimers({advanceTimers: false});
+    jest.setSystemTime(new Date('2026-08-05T12:00:00-03:00'));
+});
+
+afterEach(() => {
+    jest.useRealTimers();
+});
 
 describe('ArcaProvider.authorizeInvoice', () => {
     beforeEach(() => {
@@ -152,6 +182,94 @@ describe('ArcaProvider.authorizeInvoice', () => {
         queryVoucher.mockResolvedValue({...queriedAuthorized, raw: {ImpTotal: 999}});
 
         await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(/different amount/);
+    });
+
+    it('refuses to return a recovered CAE when the stored receiver doc type differs (mismatch guard)', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({...queriedAuthorized, raw: {...queriedAuthorized.raw, DocTipo: 96}});
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(/different receiver doc type/);
+    });
+
+    it('refuses to return a recovered CAE when the stored receiver doc number differs (mismatch guard)', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({...queriedAuthorized, raw: {...queriedAuthorized.raw, DocNro: 20222222223}});
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(/different receiver/);
+    });
+
+    it('refuses to return a recovered CAE when the stored concept differs (mismatch guard)', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({...queriedAuthorized, raw: {...queriedAuthorized.raw, Concepto: 2}});
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(/different concept/);
+    });
+
+    it('refuses to return a recovered CAE when the stored currency differs (mismatch guard)', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({...queriedAuthorized, raw: {...queriedAuthorized.raw, MonId: 'DOL'}});
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(/different currency/);
+    });
+
+    it('refuses to return a recovered CAE when the stored voucher date differs (mismatch guard)', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({...queriedAuthorized, raw: {...queriedAuthorized.raw, CbteFch: '20260101'}});
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(/different voucher date/);
+    });
+
+    it('refuses to return a recovered CAE when the stored receiver IVA condition differs (mismatch guard)', async () => {
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({
+            ...queriedAuthorized,
+            raw: {...queriedAuthorized.raw, CondicionIVAReceptorId: 5},
+        });
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(
+            /different receiver IVA condition/,
+        );
+    });
+
+    it('treats an EMPTY stored element as "not returned", not as a zero that mismatches', async () => {
+        // `<CondicionIVAReceptorId/>` on a voucher predating RG 5616 parses to ''. `Number('')` is a
+        // perfectly finite 0, so coercing first would report a confirmed mismatch against the sent 1 and
+        // wedge a legitimate retry forever. Same trap for every numeric field, and for a blank MonId.
+        requestAuthorization.mockResolvedValue(rejected10016);
+        queryVoucher.mockResolvedValue({
+            ...queriedAuthorized,
+            raw: {ImpTotal: '', DocTipo: '', DocNro: '', Concepto: '', MonId: '', CondicionIVAReceptorId: ''},
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, invoice());
+
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.authorizationCode).toBe('75123456789012');
+    });
+
+    it('recovers a delayed resend whose issueDate has aged out of the ±5-day window', async () => {
+        // Core lost the CAE to a persistence failure and replays the identical invoice a week later.
+        // Judging the date first would 400 it before recovery ever ran, orphaning a voucher number ARCA
+        // has already consumed — the exact case the idempotency guarantee exists for.
+        jest.setSystemTime(new Date('2026-08-19T12:00:00-03:00'));
+        queryVoucher.mockResolvedValue(queriedAuthorized);
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, invoice());
+
+        // Recovered without ever attempting a fresh authorization.
+        expect(requestAuthorization).not.toHaveBeenCalled();
+        expect(result.status).toBe('AUTHORIZED');
+        expect(result.authorizationCode).toBe('75123456789012');
+    });
+
+    it('rejects an out-of-window issueDate once recovery confirms the voucher is NOT already authorized', async () => {
+        jest.setSystemTime(new Date('2026-08-19T12:00:00-03:00'));
+        queryVoucher.mockRejectedValue(notFoundError);
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toThrow(
+            /outside ARCA's ±5-day window/,
+        );
+        expect(requestAuthorization).not.toHaveBeenCalled();
     });
 
     it('recovers via query when ARCA throws the conflict instead of soft-rejecting it', async () => {
@@ -242,6 +360,20 @@ describe('ArcaProvider delegated token/representación classification', () => {
             DelegationNotAuthorizedError,
         );
         // The delegate ticket is valid — only the delegation is missing — so it must NOT be evicted.
+        expect(invalidateDelegated).not.toHaveBeenCalled();
+    });
+
+    it('maps a LAPSED representación (worded as an expiry) to a delegation error, not a token fault', async () => {
+        // The message matches both classifiers. Reading it as a token fault would return a retryable 502
+        // instead of the actionable 403 AND evict the delegate ticket every representado shares — for a
+        // permanent condition, so every retry re-evicts and delegated invoicing stays wedged.
+        requestAuthorization.mockRejectedValue(
+            tokenError('La relación de representación se encuentra vencida; usuario no autorizado'),
+        );
+
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toBeInstanceOf(
+            DelegationNotAuthorizedError,
+        );
         expect(invalidateDelegated).not.toHaveBeenCalled();
     });
 

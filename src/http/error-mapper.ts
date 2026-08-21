@@ -15,6 +15,19 @@ import {
     VoucherNotFoundError,
 } from '../providers/provider.js';
 
+/**
+ * ARCA business-rejection codes (`Errors.Err[].Code`) that are stable and caller-actionable —
+ * given the same input, ARCA rejects the same way every time, so these get their own category
+ * and a `400` (never the generic `502 ARCA_SERVICE`, which reads as "retry me"). Add an entry
+ * here once a code is confirmed to recur and worth a dedicated, translated message downstream.
+ *
+ * - `10069` — "Campo DocNro no puede ser igual al del emisor.": the receiver's identification
+ *   number is the same as the issuing company's own — never transient, always caller-fixable.
+ */
+const KNOWN_ARCA_SERVICE_ERROR_CODES: Record<string, {readonly status: number; readonly code: string}> = {
+    '10069': {status: 400, code: 'RECEIVER_MATCHES_ISSUER'},
+};
+
 export interface HttpErrorResult {
     readonly status: number;
     readonly body: {
@@ -141,7 +154,20 @@ export function toHttpError(err: unknown): HttpErrorResult {
         return make(502, 'ARCA_AUTH', err.message);
     }
     if (err instanceof ArcaServiceError) {
-        return make(502, 'ARCA_SERVICE', err.message);
+        // A known, recurring rejection gets its own stable category + `400` so the caller can branch on
+        // `code` without parsing the (Spanish, ARCA-authored) message. `arcaErrors` still rides along so
+        // an unmapped sibling code in the same response isn't silently dropped.
+        // `Object.hasOwn`, not `in`: codes come straight off ARCA's XML with no validation, and `in` would
+        // also match inherited keys (`constructor`, `toString`), yielding an undefined status downstream.
+        const known = err.errors.find((e) => Object.hasOwn(KNOWN_ARCA_SERVICE_ERROR_CODES, e.code));
+        if (known) {
+            const {status, code} = KNOWN_ARCA_SERVICE_ERROR_CODES[known.code];
+            return make(status, code, known.message, {arcaCode: known.code, arcaErrors: err.errors});
+        }
+        // Unclassified business rejection: keep the transport-agnostic 502, but expose the full
+        // `{code, message}` list — previously dropped entirely — so a caller can branch on it, and so a
+        // future recurring code can be promoted into `KNOWN_ARCA_SERVICE_ERROR_CODES` above.
+        return make(502, 'ARCA_SERVICE', err.message, {arcaErrors: err.errors});
     }
     if (err instanceof ArcaSoapError) {
         return make(502, 'ARCA_SOAP', err.message);

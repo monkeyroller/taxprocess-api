@@ -1,6 +1,11 @@
-import {ArcaValidationError, formatArcaDate, type CommonInvoiceResult} from './sdk/index.js';
+import {ArcaValidationError, type CommonInvoiceResult} from './sdk/index.js';
 import type {NeutralInvoice} from '../provider.js';
-import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult} from './ar-invoice.mapper.js';
+import {
+    buildCommonInvoiceRequest,
+    buildQrUrl,
+    concept1DateWindowError,
+    toNeutralResult,
+} from './ar-invoice.mapper.js';
 
 function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
     return {
@@ -22,7 +27,7 @@ const NOW = new Date('2026-08-05T15:00:00-03:00');
 
 describe('buildCommonInvoiceRequest', () => {
     it('rolls up totals and defaults currency to PES', () => {
-        const req = buildCommonInvoiceRequest(invoice(), 10, NOW);
+        const req = buildCommonInvoiceRequest(invoice(), 10);
         expect(req.netTaxed).toBe(100);
         expect(req.vatAmount).toBe(21);
         expect(req.totalAmount).toBe(121);
@@ -37,7 +42,7 @@ describe('buildCommonInvoiceRequest', () => {
     });
 
     it('resolves canonical codes to ARCA codes', () => {
-        const req = buildCommonInvoiceRequest(invoice(), 1, NOW);
+        const req = buildCommonInvoiceRequest(invoice(), 1);
         expect(req.voucherType).toBe(1); // documentTypeCode 1 → CbteTipo 1
         expect(req.docType).toBe(80); // identificationTypeCode 80 → DocTipo 80 (CUIT)
         expect(req.docNumber).toBe(20_111_111_112); // identificationNumber string → number
@@ -45,7 +50,7 @@ describe('buildCommonInvoiceRequest', () => {
     });
 
     it('maps perceptions to a single Otros (99) tribute', () => {
-        const req = buildCommonInvoiceRequest(invoice({totals: {perceptions: 50}}), 1, NOW);
+        const req = buildCommonInvoiceRequest(invoice({totals: {perceptions: 50}}), 1);
         expect(req.tributesAmount).toBe(50);
         expect(req.totalAmount).toBe(171);
         expect(req.tributes).toHaveLength(1);
@@ -53,25 +58,68 @@ describe('buildCommonInvoiceRequest', () => {
     });
 
     it('maps ISO currency to ARCA MonId and rejects an unmapped currency', () => {
-        expect(buildCommonInvoiceRequest(invoice({currencyIso: 'USD'}), 1, NOW).currencyId).toBe('DOL');
-        expect(() => buildCommonInvoiceRequest(invoice({currencyIso: 'xyz'}), 1, NOW)).toThrow(ArcaValidationError);
+        expect(buildCommonInvoiceRequest(invoice({currencyIso: 'USD'}), 1).currencyId).toBe('DOL');
+        expect(() => buildCommonInvoiceRequest(invoice({currencyIso: 'xyz'}), 1)).toThrow(ArcaValidationError);
     });
 
     it('rejects a non-numeric receiver identification number instead of sending NaN', () => {
         expect(() =>
-            buildCommonInvoiceRequest(invoice({receiver: {identificationTypeCode: 80, identificationNumber: '20-1111111-2', fiscalConditionCode: 1}}), 1, NOW),
+            buildCommonInvoiceRequest(invoice({receiver: {identificationTypeCode: 80, identificationNumber: '20-1111111-2', fiscalConditionCode: 1}}), 1),
         ).toThrow(ArcaValidationError);
     });
 
-    it('clamps an out-of-window concept-1 date to now', () => {
-        const req = buildCommonInvoiceRequest(invoice({issueDate: '2020-01-01'}), 1, NOW);
-        expect(req.voucherDate).toBe(formatArcaDate(NOW));
+    it("sends an out-of-window concept-1 date as-is — the window is the caller's check, not the builder's", () => {
+        // The builder stays clock-free so idempotent recovery can still reconcile a stale resend against
+        // the stored voucher; rejecting the date is `concept1DateWindowError`'s job.
+        expect(buildCommonInvoiceRequest(invoice({issueDate: '2020-01-01'}), 1).voucherDate).toBe('20200101');
+    });
+
+    it('rejects an ISO-8601 form the Date parser cannot read instead of crashing in formatArcaDate', () => {
+        // `@IsISO8601` is non-strict, so week/ordinal/basic forms reach the mapper. Left unchecked they
+        // yield an Invalid Date that survives every comparison and throws RangeError → an opaque 500.
+        for (const issueDate of ['2026-W01-1', '2026-366', '20260231', '2026-08-05 12:00:00']) {
+            expect(() => buildCommonInvoiceRequest(invoice({issueDate}), 1)).toThrow(ArcaValidationError);
+            expect(() => buildCommonInvoiceRequest(invoice({issueDate}), 1)).toThrow(/not a usable ISO-8601 date/);
+        }
+    });
+});
+
+describe('concept1DateWindowError', () => {
+    it('rejects an out-of-window concept-1 date instead of silently substituting now', () => {
+        const err = concept1DateWindowError(invoice({issueDate: '2020-01-01'}), NOW);
+        expect(err).toBeInstanceOf(ArcaValidationError);
+        expect(err?.message).toMatch(/outside ARCA's ±5-day window/);
+        expect(err?.code).toBe('VOUCHER_DATE_OUT_OF_WINDOW');
+    });
+
+    it('accepts a date exactly 5 calendar days out regardless of the hour of the request', () => {
+        // Measured in AR calendar days, not raw milliseconds: a noon-anchored issueDate 5 days back is
+        // 5.25 raw days away at 18:00 AR, and must NOT flip to a rejection just because of the clock.
+        for (const hour of ['00:01', '11:59', '18:00', '23:59']) {
+            const now = new Date(`2026-08-10T${hour}:00-03:00`);
+            expect(concept1DateWindowError(invoice({issueDate: '2026-08-05'}), now)).toBeUndefined();
+            expect(concept1DateWindowError(invoice({issueDate: '2026-08-15'}), now)).toBeUndefined();
+            expect(concept1DateWindowError(invoice({issueDate: '2026-08-04'}), now)).toBeInstanceOf(
+                ArcaValidationError,
+            );
+        }
+    });
+
+    it('does not enforce the ±5-day window for concept 2/3 (services)', () => {
+        const services = invoice({
+            concept: 2,
+            issueDate: '2020-01-01',
+            serviceDateFrom: '2020-01-01',
+            serviceDateTo: '2020-01-31',
+        });
+        expect(concept1DateWindowError(services, NOW)).toBeUndefined();
+        expect(buildCommonInvoiceRequest(services, 1).voucherDate).toBe('20200101');
     });
 });
 
 describe('buildQrUrl', () => {
     it('encodes the RG-4892 payload with the CAE', () => {
-        const req = buildCommonInvoiceRequest(invoice(), 10, NOW);
+        const req = buildCommonInvoiceRequest(invoice(), 10);
         const url = buildQrUrl('20999999993', req, '75123456789012');
         expect(url.startsWith('https://www.arca.gob.ar/fe/qr/?p=')).toBe(true);
         const encoded = url.split('?p=')[1] ?? '';

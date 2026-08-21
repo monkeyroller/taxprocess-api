@@ -14,7 +14,13 @@ import {ticketStore} from './ticket-store.js';
 import {delegateCredentialStore, type DelegateCredentialStore} from './delegate-credentials.js';
 import {toArcaEnvironment} from './environment.js';
 import {toCbteTipo} from './code-maps.js';
-import {buildCommonInvoiceRequest, buildQrUrl, toNeutralResult, toNeutralPointOfSale} from './ar-invoice.mapper.js';
+import {
+    buildCommonInvoiceRequest,
+    buildQrUrl,
+    concept1DateWindowError,
+    toNeutralResult,
+    toNeutralPointOfSale,
+} from './ar-invoice.mapper.js';
 import {validateArcaCredentials} from './credentials.js';
 import {canonicalCuit, parseArcaId} from './ar-identifiers.js';
 import {
@@ -74,19 +80,99 @@ function isAlreadyAuthorizedError(err: ArcaServiceError): boolean {
 }
 
 /**
- * Guards against core reusing a voucher number for a *different* sale: the amount stored against the
- * already-authorized voucher must match the one we just tried to authorize, or returning its CAE would hand
- * back a fiscal document for the wrong invoice. `ImpTotal` is the strongest single signal and avoids false
- * positives from date/rounding differences. A missing/non-numeric stored total is not treated as a mismatch.
+ * Guards against core reusing a voucher number for a *different* sale: several identifying fields stored
+ * against the already-authorized voucher must match what we just tried to authorize, or returning its CAE
+ * would hand back a fiscal document for the wrong invoice. `ImpTotal` is the strongest single amount
+ * signal and avoids false positives from rounding differences; `DocTipo`/`DocNro`/`Concepto`/`MonId`/
+ * `CbteFch`/`CondicionIVAReceptorId` are discrete values with no rounding ambiguity, so an exact mismatch on
+ * any of them is unambiguous. `CbteFch` compares the date core actually sent: the mapper no longer rewrites
+ * an out-of-window concept-1 date to `now`, so a resend of the same invoice carries the same `CbteFch` —
+ * which does mean core must resend the ORIGINAL `issueDate`, not a freshly stamped one (documented in
+ * `docs/CONTRACT.md` §3). Deliberately excludes the net/VAT/exempt breakdown (redundant with `ImpTotal`,
+ * same rounding-drift risk) and the associated-vouchers/tributes/optionals arrays (too fragile to compare
+ * against ARCA's own wire representation). A missing stored value, or one that doesn't parse as expected, is
+ * never treated as a mismatch — this guard only rejects a *confirmed* difference.
  */
 function assertRecoveredVoucherMatches(request: CommonInvoiceRequest, queried: CommonInvoiceResult): void {
-    const storedTotal = Number((queried.raw as {ImpTotal?: unknown}).ImpTotal);
-    if (Number.isFinite(storedTotal) && Math.abs(storedTotal - request.totalAmount) > 0.01) {
+    const raw = queried.raw as {
+        ImpTotal?: unknown;
+        DocTipo?: unknown;
+        DocNro?: unknown;
+        Concepto?: unknown;
+        MonId?: unknown;
+        CbteFch?: unknown;
+        CondicionIVAReceptorId?: unknown;
+    };
+
+    const mismatch = (label: string, sent: string | number, stored: string | number): never => {
         throw new ArcaValidationError(
-            `Voucher ${request.voucherNumberFrom} is already authorized for a different amount ` +
-                `(sent ${request.totalAmount}, stored ${storedTotal}); refusing to return its CAE.`,
+            `Voucher ${request.voucherNumberFrom} is already authorized for a different ${label} ` +
+                `(sent ${sent}, stored ${stored}); refusing to return its CAE.`,
             'VOUCHER_ALREADY_AUTHORIZED_MISMATCH',
         );
+    };
+
+    /**
+     * The stored value, or `undefined` when the authority returned nothing usable. The SOAP parser runs with
+     * `parseTagValue: false`, so every field arrives as a string and an EMPTY element (`<CbteFch/>`, common
+     * for fields a voucher predates) reads as `''` — which `Number('')` would silently turn into a perfectly
+     * finite `0` and report as a confirmed mismatch. Blank is "not returned", never a difference.
+     */
+    const present = (value: unknown): string | undefined => {
+        if (typeof value === 'number') {
+            return Number.isFinite(value) ? String(value) : undefined;
+        }
+        if (typeof value !== 'string' || value.trim() === '') {
+            return undefined;
+        }
+        return value.trim();
+    };
+    const storedNumber = (value: unknown): number | undefined => {
+        const text = present(value);
+        if (text === undefined) {
+            return undefined;
+        }
+        const parsed = Number(text);
+        return Number.isFinite(parsed) ? parsed : undefined;
+    };
+
+    const storedTotal = storedNumber(raw.ImpTotal);
+    if (storedTotal !== undefined && Math.abs(storedTotal - request.totalAmount) > 0.01) {
+        mismatch('amount', request.totalAmount, storedTotal);
+    }
+
+    const storedDocType = storedNumber(raw.DocTipo);
+    if (storedDocType !== undefined && storedDocType !== request.docType) {
+        mismatch('receiver doc type', request.docType, storedDocType);
+    }
+
+    const storedDocNumber = storedNumber(raw.DocNro);
+    if (storedDocNumber !== undefined && storedDocNumber !== request.docNumber) {
+        mismatch('receiver doc number', request.docNumber, storedDocNumber);
+    }
+
+    const storedConcept = storedNumber(raw.Concepto);
+    if (storedConcept !== undefined && storedConcept !== request.concept) {
+        mismatch('concept', request.concept, storedConcept);
+    }
+
+    const storedCurrency = present(raw.MonId);
+    if (storedCurrency !== undefined && storedCurrency !== request.currencyId) {
+        mismatch('currency', request.currencyId, storedCurrency);
+    }
+
+    const storedVoucherDate = present(raw.CbteFch);
+    if (storedVoucherDate !== undefined && storedVoucherDate !== request.voucherDate) {
+        mismatch('voucher date', request.voucherDate, storedVoucherDate);
+    }
+
+    const storedIvaCondition = storedNumber(raw.CondicionIVAReceptorId);
+    if (
+        request.receiverIvaConditionId !== undefined &&
+        storedIvaCondition !== undefined &&
+        storedIvaCondition !== request.receiverIvaConditionId
+    ) {
+        mismatch('receiver IVA condition', request.receiverIvaConditionId, storedIvaCondition);
     }
 }
 
@@ -113,6 +199,12 @@ const REPRESENTADO_NOT_IN_TOKEN_CODE = '601';
  * phrasing ARCA uses (`firma digital`, `VerificacionDeHash`, `no validó`, expiry) rather than the bare word
  * `firma`, because authorization rejections also mention it (e.g. `No se corresponden token y firma. Usuario
  * no autorizado…`) and must NOT be misrouted here.
+ *
+ * Tested only AFTER {@link AUTHORIZATION_MESSAGE}: the expiry alternatives are deliberately broad, and a
+ * *delegation* can expire too (`la relación de representación se encuentra vencida; usuario no autorizado`).
+ * Matching that first would both hide the actionable `403` behind a retryable `502` and — via
+ * {@link ArcaProvider.delegationAware}'s eviction — purge the delegate ticket every representado shares, for
+ * a condition re-minting cannot fix.
  */
 const TOKEN_FAULT_MESSAGE = /firma digital|no valid[óo]|hash|expir|caduc|vencid/i;
 
@@ -121,6 +213,10 @@ const TOKEN_FAULT_MESSAGE = /firma digital|no valid[óo]|hash|expir|caduc|vencid
  * this operation (e.g. `Usuario no autorizado a realizar esta operación`, `CUIT representada no incluida`).
  * On a delegated request that means the represented taxpayer has not delegated the web service to our CUIT —
  * the actionable {@link DelegationNotAuthorizedError}.
+ *
+ * Tested BEFORE {@link TOKEN_FAULT_MESSAGE}: these phrases name *who* is refused, which no cryptographic
+ * fault message mentions, so they are the more specific signal even when the text also says the permission
+ * expired.
  */
 const AUTHORIZATION_MESSAGE = /no autoriz|computador|relaci[oó]n|represent/i;
 
@@ -190,11 +286,13 @@ export class ArcaProvider extends TaxEntityProvider {
             return err;
         }
         const message = entry.message;
-        if (TOKEN_FAULT_MESSAGE.test(message)) {
-            return new ArcaAuthError(`WSFEv1 token validation failed (ARCA ${TOKEN_VALIDATION_CODE}): ${message}`);
-        }
+        // Authorization first: a lapsed *delegation* is worded as an expiry too, and treating it as a token
+        // fault would evict the shared delegate ticket on every retry without ever fixing the cause.
         if (AUTHORIZATION_MESSAGE.test(message)) {
             return this.delegationNotAuthorized(entity, TOKEN_VALIDATION_CODE, message);
+        }
+        if (TOKEN_FAULT_MESSAGE.test(message)) {
+            return new ArcaAuthError(`WSFEv1 token validation failed (ARCA ${TOKEN_VALIDATION_CODE}): ${message}`);
         }
         return err; // ambiguous 600 → leave as the original authority error (502)
     }
@@ -248,7 +346,21 @@ export class ArcaProvider extends TaxEntityProvider {
 
         // Core is the source of truth for the voucher number (contract 2026-08-10): authorize exactly the
         // number it sent. The service never computes the next correlative for authorize anymore.
-        const request = buildCommonInvoiceRequest(invoice, invoice.voucherNumberFrom, new Date());
+        const request = buildCommonInvoiceRequest(invoice, invoice.voucherNumberFrom);
+
+        // Concept-1 `CbteFch` window (contract 2026-08-20). ARCA would refuse an out-of-window date anyway,
+        // so we refuse it ourselves with an actionable code — but only AFTER giving idempotent recovery its
+        // chance: a resend of a voucher ARCA already authorized (core's CAE lost to a persistence failure,
+        // replayed days later) must still get that CAE back, not a date rejection for a sale that is
+        // already filed. Recovery reconciles against the stored voucher, which the date never affects.
+        const dateWindowError = concept1DateWindowError(invoice, new Date());
+        if (dateWindowError !== undefined) {
+            const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
+            if (recovered !== undefined) {
+                return recovered;
+            }
+            throw dateWindowError;
+        }
 
         let result: CommonInvoiceResult;
         try {

@@ -90,7 +90,7 @@ The ARCA-specific codes/terms live only inside the provider; the wire never carr
 | `invoice.receiver.fiscalConditionCode` | receiver's VAT/fiscal condition (canonical code) | **CondicionIVAReceptorId** (RG 5616: 1=RI, 5=CF, 6=Monotributo…) |
 | `invoice.currencyIso` | ISO-4217 currency | **MonId** (ARS→PES, USD→DOL, EUR→060) |
 | `invoice.currencyRate` | exchange rate to the local currency | **MonCotiz** |
-| `invoice.issueDate` | ISO-8601 issue date | **CbteFch** (±5-day clamp for concept 1) |
+| `invoice.issueDate` | ISO-8601 issue date | **CbteFch** (must be within ±5 days of the request time for concept 1 — see §3) |
 | `invoice.lines[].netAmount` | taxed line net (base) | part of **Iva[]** subtotal grouping |
 | `invoice.lines[].taxRatePercent` | tax rate % for the line (21, 10.5, 0…) | VAT alícuota → **Iva[].Id** |
 | `invoice.lines[].taxAmount` | tax amount for the line | **Iva[].Importe** |
@@ -164,7 +164,7 @@ Request:
     },
     "currencyIso": "ARS",             // ISO-4217 → mapped to MonId by this service
     "currencyRate": 1,                // exchange rate to the local currency
-    "issueDate": "2026-08-05",        // ISO date; clamped to ±5 days for concept 1
+    "issueDate": "2026-08-05",        // ISO date; concept 1 must be within ±5 AR calendar days of today (else 400 ARCA_VALIDATION)
     "lines": [
       { "netAmount": 100, "taxRatePercent": 21, "taxAmount": 21 }
     ],
@@ -193,10 +193,35 @@ number and adds `+1`. Use `POST /invoices/last-authorized` to fetch the next num
 **Idempotency:** `authorize` is idempotent on the voucher number. If the authority authorizes but core's
 persistence then fails, the number is consumed on the authority's side; **re-sending the same invoice with the
 same number returns the already-issued CAE** (a full `200` result, QR included) instead of a rejection — this
-service reconciles internally via the authority's voucher query. Re-sending the *same number* with a *different
-amount* is refused (`400 ARCA_VALIDATION`, `details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than
-returning a CAE for the wrong invoice. `POST /invoices/query` remains available for explicit, caller-driven
-recovery.
+service reconciles internally via the authority's voucher query. Re-sending the *same number* for what the
+authority's stored voucher shows was a **different sale** is refused (`400 ARCA_VALIDATION`,
+`details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than returning a CAE for the wrong invoice. The
+check compares the stored voucher against the resend on: total amount, receiver id type/number, concept,
+currency, voucher date, and receiver IVA condition — any confirmed mismatch on one of these is refused; a
+field the authority didn't return (absent, `null`, or an empty element) is never treated as a mismatch.
+`POST /invoices/query` remains available for explicit, caller-driven recovery.
+
+> **A retry must carry the ORIGINAL `issueDate`.** `issueDate` is one of the compared fields, so re-stamping
+> it with the current date makes the retry look like a different sale and it is refused with
+> `VOUCHER_ALREADY_AUTHORIZED_MISMATCH` — permanently, since the stored voucher never changes. This matters
+> most for a retry that crosses midnight. Persist `issueDate` with the voucher number and replay it verbatim.
+
+**Concept-1 date window (contract change 2026-08-20):** an out-of-±5-day `issueDate` for a goods (concept 1)
+invoice is now **refused** (`400 ARCA_VALIDATION`, `details.code: "VOUCHER_DATE_OUT_OF_WINDOW"`) instead of
+being silently substituted with the request time. Previously this service clamped the date so the authority
+would always accept it; that meant a caller could receive a CAE for a *different* `CbteFch` than the one it
+sent. Core must send an `issueDate` within the window for concept 1, or expect this rejection. The window is
+measured in **Argentina calendar days**, so a date exactly 5 days out is accepted at any hour of the day.
+
+Idempotent recovery takes precedence over this rejection: a resend whose `issueDate` has aged out of the
+window is still reconciled against the authority first, and returns the already-issued CAE if the voucher
+number is authorized and matches. A delayed replay of a lost CAE therefore still recovers; only a genuinely
+new invoice gets `VOUCHER_DATE_OUT_OF_WINDOW`.
+
+An `issueDate` (or `serviceDateFrom`/`serviceDateTo`/`paymentDueDate`) that passes `@IsISO8601` but is not a
+date this service can parse — week (`2026-W01-1`), ordinal (`2026-366`), basic (`20260231`) or
+space-separated (`2026-08-05 12:00:00`) forms — is refused with `400 ARCA_VALIDATION`,
+`details.code: "INVALID_ISSUE_DATE"`. Send calendar dates as `YYYY-MM-DD` or a full ISO timestamp.
 
 **Single-voucher only:** `voucherNumberFrom` and `voucherNumberTo` must be equal (§5). A range
 (`voucherNumberTo > voucherNumberFrom`) is refused (`400 ARCA_VALIDATION`,
@@ -414,20 +439,21 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | --- | --- | --- |
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 400 | `RECEIVER_MATCHES_ISSUER` | the authority rejected the voucher because the receiver's identification number equals the issuer's own (ARCA `10069`). Stable and caller-fixable, so it is a `400` — **not** the `502 ARCA_SERVICE` an unclassified rejection gets; `details: { arcaCode, arcaErrors }` |
 | 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
 | 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |
-| 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure |
+| 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure. `ARCA_SERVICE` now carries `details.arcaErrors` — the authority's full `[{ code, message }]` list, previously dropped — so core can log or branch on the underlying rejection |
 | 500 | `DELEGATION_NOT_CONFIGURED` | `delegated:true` but this service has no valid delegate certificate configured for that `environment` (server misconfiguration); `details: { environment, reason }` |
 | 500 | `ARCA_ERROR` / `INTERNAL` | unexpected |
 
 ---
 
 ## 9. What stays inside the ARCA provider (do NOT leak into the contract)
-CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day clamp,
+CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day window,
 WSAA/CMS signing, `homologacion`/`produccion` — all inside `src/providers/arca/`. The neutral result already
 abstracts CAE → `authorizationCode`.
 
