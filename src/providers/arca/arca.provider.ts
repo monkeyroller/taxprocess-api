@@ -1,19 +1,21 @@
 import {
     ArcaAuthError,
+    ArcaError,
     ArcaServiceError,
+    ArcaTaxpayerNotFoundError,
     ArcaValidationError,
     ServiceId,
     type ArcaAuth,
     type CommonInvoiceRequest,
     type CommonInvoiceResult,
-    type RegistryLevel,
     type ServiceIdValue,
+    type TaxpayerData,
 } from './sdk/index.js';
-import {commonInvoiceService, padronService, padronServiceId} from './clients.js';
+import {commonInvoiceService, constanciaService, taxpayerIdentityService} from './clients.js';
 import {ticketStore} from './ticket-store.js';
 import {delegateCredentialStore, type DelegateCredentialStore} from './delegate-credentials.js';
 import {toArcaEnvironment} from './environment.js';
-import {toCbteTipo} from './code-maps.js';
+import {toCbteTipo, toPadronService} from './code-maps.js';
 import {
     buildCommonInvoiceRequest,
     buildQrUrl,
@@ -21,10 +23,12 @@ import {
     toNeutralResult,
     toNeutralPointOfSale,
 } from './ar-invoice.mapper.js';
+import {toNeutralTaxpayerResult} from './ar-taxpayer.mapper.js';
 import {validateArcaCredentials} from './credentials.js';
 import {canonicalCuit, parseArcaId} from './ar-identifiers.js';
 import {
     DelegationNotAuthorizedError,
+    DelegationNotConfiguredError,
     TaxEntityProvider,
     type AuthorityStatusResult,
     type CredentialValidationResult,
@@ -34,6 +38,7 @@ import {
     type NextNumbersResult,
     type PointsOfSaleResult,
     type TaxAuthorizationResult,
+    TaxpayerNotFoundError,
     type TaxpayerResult,
     type ValidateCredentialsInput,
     VoucherNotFoundError,
@@ -182,6 +187,13 @@ function assertRecoveredVoucherMatches(request: CommonInvoiceRequest, queried: C
  * Returned inside the response `Errors` block, so it surfaces as an {@link ArcaServiceError}.
  */
 const TOKEN_VALIDATION_CODE = '600';
+
+/**
+ * The entity code this provider is registered under. Requests that carry an issuer block take it from
+ * there; the padron lookups have no issuer at all, yet still need it as the ticket-cache partition
+ * segment - it is the same constant either way, since this provider only ever serves `ARCA`.
+ */
+const ENTITY_CODE = 'ARCA';
 
 /**
  * WSFEv1 `CUIT representada no incluida en token` — the representación-SPECIFIC rejection: the delegate's
@@ -563,27 +575,161 @@ export class ArcaProvider extends TaxEntityProvider {
         }
     }
 
-    async lookupTaxpayer(
-        entity: EntityAuthBlock,
-        taxpayerId: string,
-        level?: string,
+    async lookupTaxpayers(
+        environment: GenericEnvironment,
+        identificationTypeCode: number,
+        identificationNumber: string,
     ): Promise<TaxpayerResult> {
-        const lvl = (level ?? 'A5') as RegistryLevel;
-        const serviceId = padronServiceId(lvl);
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            serviceId,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
+        // Route first: an identification type no padrón service can answer for is a `400` the caller can
+        // fix, and discovering that must not cost a WSAA login.
+        const route = toPadronService(identificationTypeCode);
+        const number = parseArcaId(identificationNumber, 'identificationNumber');
+        const notFound = (message?: string): TaxpayerNotFoundError =>
+            new TaxpayerNotFoundError(ENTITY_CODE, identificationTypeCode, identificationNumber, message);
+
+        try {
+            const found =
+                route === 'CONSTANCIA'
+                    ? [await this.constanciaFor(environment, number)]
+                    : await this.identitiesForDocument(environment, number);
+            if (found.length === 0) {
+                throw notFound();
+            }
+            return toNeutralTaxpayerResult(ENTITY_CODE, found);
+        } catch (err) {
+            // The SDK raises its own not-found so each service can recognize its authority's wording; the
+            // neutral error is what carries the caller's identification pair into the `404` body.
+            if (err instanceof ArcaTaxpayerNotFoundError) {
+                throw notFound(err.message);
+            }
+            throw err;
+        }
+    }
+
+    /** The registration picture for one clave (CUIT/CUIL/CDI), from the constancia service. */
+    private async constanciaFor(environment: GenericEnvironment, taxpayerId: number): Promise<TaxpayerData> {
+        const service = constanciaService(toArcaEnvironment(environment));
+        const auth = await this.padronAuth(environment, service.service);
+        return padronCall(environment, service.service, () => service.getTaxpayer(auth, taxpayerId));
+    }
+
+    /**
+     * Everyone A13 has registered under an identity-document number. The document is not a clave, so it is
+     * resolved to the claves ARCA issued for it (commonly two — a CUIL and a CUIT) and each is then read.
+     * All of it runs on the one A13 ticket, and the per-clave reads are independent, so they go out
+     * concurrently. Returns an empty list when the document matches nothing, which the caller turns into
+     * the `404`.
+     */
+    private async identitiesForDocument(
+        environment: GenericEnvironment,
+        documentNumber: number,
+    ): Promise<Array<TaxpayerData>> {
+        const service = taxpayerIdentityService(toArcaEnvironment(environment));
+        const auth = await this.padronAuth(environment, service.service);
+
+        const claves = await padronCall(environment, service.service, () =>
+            service.getIdPersonaList(auth, documentNumber),
         );
-        const data = await this.delegationAware(entity, serviceId, () =>
-            padronService(toArcaEnvironment(entity.environment), lvl).getTaxpayer(
-                auth,
-                parseArcaId(taxpayerId, 'taxpayerId'),
+        if (claves.length === 0) {
+            return [];
+        }
+
+        const people = await padronCall(environment, service.service, () =>
+            Promise.all(
+                claves.map(async (clave) => {
+                    try {
+                        return await service.getTaxpayer(auth, parseArcaId(clave, 'taxpayerId'));
+                    } catch (err) {
+                        // A clave the document search just returned but the person lookup cannot read is
+                        // dropped rather than fatal: the remaining matches are still a truthful answer.
+                        // Only an all-empty outcome becomes a `404`.
+                        if (err instanceof ArcaTaxpayerNotFoundError) {
+                            return undefined;
+                        }
+                        throw err;
+                    }
+                }),
             ),
         );
-        return {idPersona: data.idPersona, taxId: data.taxId, name: data.name};
+        return people.filter((person): person is TaxpayerData => person !== undefined);
     }
+
+    /**
+     * The delegate ticket a padrón lookup signs with. `Auth.Cuit` is our OWN delegate CUIT — the service acts
+     * as itself, representing nobody (CONTRACT §10) — so there is no issuer to name and no represented
+     * taxpayer to classify a rejection against.
+     */
+    private async padronAuth(environment: GenericEnvironment, service: ServiceIdValue): Promise<ArcaAuth> {
+        const delegate = this.delegate.get(environment);
+        if (delegate === undefined) {
+            throw new DelegationNotConfiguredError(environment, 'no delegate certificate is configured');
+        }
+        try {
+            return await ticketStore.resolve(ENTITY_CODE, delegate.delegateCuit, service, environment, undefined, true);
+        } catch (err) {
+            throw notEnrolledError(err, environment, service);
+        }
+    }
+}
+
+/**
+ * A fault naming the CREDENTIAL itself — the ticket, its signature, or the certificate behind it. Kept
+ * deliberately narrow: only words that name the credential, never ARCA's authorization vocabulary. A missing
+ * enrolment (`computador no autorizado`) or a lapsed relationship (`la relación … se encuentra vencida`) must
+ * NOT match, because the cached ticket is valid in both cases and evicting it would purge a good ticket ARCA
+ * will not re-issue for ~12h. `token` is what separates the two where ARCA mixes them, as in its
+ * `No autorizado, par token/sign invalido`.
+ */
+const PADRON_TICKET_FAULT = /token|ticket|firma|\bsign\b|certificad|hash/i;
+
+/**
+ * Runs a padrón SDK call under our delegate ticket.
+ *
+ * Deliberately NOT {@link ArcaProvider.delegationAware}. A registry lookup represents nobody (CONTRACT §10):
+ * `Auth.Cuit` is our own delegate CUIT, so a {@link DelegationNotAuthorizedError} raised here would name the
+ * same CUIT as both delegate and issuer and ask the caller to grant itself a delegation — an error the
+ * contract promises this endpoint never returns. That classifier is inert on this path in any case: it keys
+ * on `ArcaServiceError` (WSFEv1's in-payload `Errors` list), which the padrón services never produce — they
+ * report every failure as an `ArcaSoapError` fault.
+ *
+ * What it keeps from that path is the eviction, which is the half that actually mattered here. One delegate
+ * ticket serves every lookup, so a ticket ARCA has started rejecting would otherwise fail every lookup until
+ * local expiry; dropping it lets the next request re-mint. Reported as an {@link ArcaAuthError} (`502`, our
+ * credential) rather than the raw transport error, matching how the invoicing path names the same condition.
+ */
+async function padronCall<T>(
+    environment: GenericEnvironment,
+    service: ServiceIdValue,
+    op: () => Promise<T>,
+): Promise<T> {
+    try {
+        return await op();
+    } catch (err) {
+        if (err instanceof ArcaError && PADRON_TICKET_FAULT.test(err.message)) {
+            ticketStore.invalidateDelegated(ENTITY_CODE, environment, service);
+            throw new ArcaAuthError(`ARCA rejected the delegate ticket for "${service}": ${err.message}`);
+        }
+        throw err;
+    }
+}
+
+/**
+ * WSAA refuses a login for a service the signing certificate is not enrolled in with `coe.notAuthorized`
+ * / "Computador no autorizado a acceder al servicio". On the padrón path that is unambiguous and
+ * permanent: OUR delegate certificate has not been adhered to that web service at the authority (AR:
+ * WSASS in homologación, Administrador de Relaciones in production). Reported as
+ * `DELEGATION_NOT_CONFIGURED` (500) rather than the transport error it arrives as, because a `502` reads
+ * as "retry me" and no amount of retrying enrols a certificate.
+ *
+ * Deliberately scoped to this path: on an issuing call the same fault can mean a tenant's own certificate
+ * is not enrolled, which is not our misconfiguration, so that path keeps reporting it verbatim.
+ */
+function notEnrolledError(err: unknown, environment: GenericEnvironment, service: ServiceIdValue): unknown {
+    if (err instanceof ArcaError && /computador no autorizado|coe\.notAuthorized/i.test(err.message)) {
+        return new DelegationNotConfiguredError(
+            environment,
+            `the delegate certificate is not enrolled in the "${service}" web service at the authority`,
+        );
+    }
+    return err;
 }

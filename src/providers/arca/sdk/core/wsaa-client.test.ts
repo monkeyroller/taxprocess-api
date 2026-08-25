@@ -138,17 +138,17 @@ describe('WsaaClient', () => {
             const owner = config.ticketOwnerKey;
 
             await client.getAccessTicket(config, 'wsfe');
-            await client.getAccessTicket(config, 'ws_sr_padron_a5');
+            await client.getAccessTicket(config, 'ws_sr_constancia_inscripcion');
 
             client.clearCache(owner, 'wsfe');
 
             // ARCA won't re-issue a ticket while a prior one lives, so the service ARCA never rejected must
             // keep both its in-memory and its persisted copy.
             expect(client.peekAccessTicket(owner, 'wsfe')).toBeUndefined();
-            expect(client.peekAccessTicket(owner, 'ws_sr_padron_a5')).toBeDefined();
+            expect(client.peekAccessTicket(owner, 'ws_sr_constancia_inscripcion')).toBeDefined();
             const persisted = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
             expect(persisted).not.toHaveProperty(`${owner}:wsfe`);
-            expect(persisted).toHaveProperty(`${owner}:ws_sr_padron_a5`);
+            expect(persisted).toHaveProperty(`${owner}:ws_sr_constancia_inscripcion`);
         } finally {
             fs.rmSync(dir, {recursive: true, force: true});
         }

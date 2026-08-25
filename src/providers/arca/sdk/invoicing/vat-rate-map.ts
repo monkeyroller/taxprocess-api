@@ -19,7 +19,10 @@ const PERCENT_TO_ID = new Map<number, number>(VAT_RATE_IDS.map(({percent, id}) =
 export function vatRateIdForPercent(percent: number): number {
     const id = PERCENT_TO_ID.get(percent);
     if (id === undefined) {
-        throw new ArcaValidationError(`Unknown VAT rate ${percent}% — no ARCA alícuota id`);
+        throw new ArcaValidationError(
+            `Unknown VAT rate ${percent}% — no ARCA alícuota id. Valid rates: ${VAT_RATE_IDS.map((r) => r.percent).join(', ')}.`,
+            'UNKNOWN_VAT_RATE',
+        );
     }
     return id;
 }

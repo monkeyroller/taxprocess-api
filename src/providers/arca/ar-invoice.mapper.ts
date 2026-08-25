@@ -8,9 +8,10 @@ import {
     type CommonInvoiceRequest,
     type CommonInvoiceResult,
     type InvoiceLineTax,
+    type InvoiceTotals,
     type PointOfSaleInfo,
 } from './sdk/index.js';
-import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
+import {isNonVatDiscriminating, toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
 import {parseArcaId} from './ar-identifiers.js';
 import type {NeutralInvoice} from '../provider.js';
 import type {
@@ -104,26 +105,74 @@ export function concept1DateWindowError(invoice: NeutralInvoice, now: Date): Arc
 }
 
 /**
+ * Totals for a voucher that may not discriminate VAT (letter C).
+ *
+ * Every line's net AND its VAT fold into `ImpNeto`, together with the untaxed and exempt amounts the caller
+ * reported — for a type C those two must also be zero, so there is nowhere else for them to go. `ImpIVA` is
+ * zero and the `Iva` array is empty, which is what makes `common-invoice.service` omit the element entirely.
+ *
+ * The result satisfies ARCA's `ImpTotal = ImpNeto + ImpTrib` (10048) once the caller adds the tributes.
+ *
+ * NOTE this is deliberately NOT the legacy `ImpNeto = ImpTotal` (webprocess-api's old cae.service). That
+ * form is only correct when there are no perceptions; with `ImpTrib > 0` it overstates the net by exactly
+ * the tributes and re-triggers 10048.
+ *
+ * A side benefit: the fold happens before any alícuota lookup, so a rate ARCA has no id for (a coefficient
+ * can produce 13.5% or 5.25%) never reaches `vatRateIdForPercent` on a type C.
+ */
+function collapsedTotals(
+    lines: ReadonlyArray<InvoiceLineTax>,
+    untaxed: number,
+    exempt: number,
+): InvoiceTotals {
+    const netTaxed = roundToTwo(
+        lines.reduce((sum, line) => sum + line.netAmount + line.vatAmount, 0) + untaxed + exempt,
+    );
+
+    return {netTaxed, vat: 0, subtotals: []};
+}
+
+/**
  * Builds the WSFEv1 authorization request for `voucherNumber`. Pure and clock-free — the one
  * time-dependent rule (the concept-1 `CbteFch` window) lives in {@link concept1DateWindowError}, which the
  * caller applies separately. The canonical taxprocess codes are translated to ARCA codes here via
  * {@link file://./code-maps.ts}.
  */
 export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber: number): CommonInvoiceRequest {
+    const voucherType = toCbteTipo(invoice.documentTypeCode);
+
     const lines: Array<InvoiceLineTax> = invoice.lines.map((l) => ({
         vatRatePercent: l.taxRatePercent,
         netAmount: l.netAmount,
         vatAmount: l.taxAmount,
     }));
-    const totals = calculateTotals(lines);
 
-    const netUntaxed = invoice.totals?.untaxed ?? 0;
-    const exempt = invoice.totals?.exempt ?? 0;
+    const requestedUntaxed = invoice.totals?.untaxed ?? 0;
+    const requestedExempt = invoice.totals?.exempt ?? 0;
     const perceptions = invoice.totals?.perceptions ?? 0;
+
+    // A letter-C voucher reports no VAT at all: its issuer (Monotributo / Exento) has no débito fiscal, so
+    // there is nothing to separate out and ARCA refuses any attempt to (10047 / 10048 / 10071). Everything
+    // except the tributes folds into ImpNeto — including untaxed and exempt, which must themselves be zero.
+    //
+    // The caller's own breakdown is left untouched: core legitimately tracks a net/VAT split internally for
+    // costing, and whether it is REPORTABLE is an ARCA rule, which is ours to apply, not core's to know.
+    const collapseVat = isNonVatDiscriminating(voucherType);
+
+    const totals = collapseVat ? collapsedTotals(lines, requestedUntaxed, requestedExempt) : calculateTotals(lines);
+    const netUntaxed = collapseVat ? 0 : requestedUntaxed;
+    const exempt = collapseVat ? 0 : requestedExempt;
+
     const totalAmount = roundToTwo(totals.netTaxed + totals.vat + netUntaxed + exempt + perceptions);
 
     // Perceptions collapse into a single "Otros" (id 99) tribute over the taxed net, matching the
     // core API's current behaviour (no per-perception breakdown available).
+    //
+    // On a letter C that net is the collapsed one, so the base carries the VAT the caller reported. That is
+    // the right base, not a rounding artefact of the collapse: a type-C issuer has no débito fiscal, so the
+    // net/VAT split is core's internal costing and the amount the perception was actually levied on is the
+    // whole sale. `BaseImp`/`Alic` are informational — ARCA reconciles `ImpTrib` against the tribute amounts
+    // alone — but they are what gets printed, so they should describe the real sale.
     const tributes: CommonInvoiceRequest['tributes'] =
         perceptions > 0
             ? [
@@ -144,7 +193,7 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
 
     const request: CommonInvoiceRequest = {
         pointOfSaleNumber: invoice.pointOfSaleNumber,
-        voucherType: toCbteTipo(invoice.documentTypeCode),
+        voucherType,
         concept: invoice.concept,
         docType: toDocTipo(invoice.receiver.identificationTypeCode),
         docNumber: parseArcaId(invoice.receiver.identificationNumber, 'receiver.identificationNumber'),

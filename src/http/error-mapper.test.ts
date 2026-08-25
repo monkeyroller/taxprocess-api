@@ -1,6 +1,6 @@
 import {describe, expect, it} from '@jest/globals';
 import {ArcaServiceError, ArcaValidationError} from '../providers/arca/sdk/index.js';
-import {VoucherNotFoundError} from '../providers/provider.js';
+import {TaxpayerNotFoundError, VoucherNotFoundError} from '../providers/provider.js';
 import {toHttpError} from './error-mapper.js';
 
 describe('toHttpError — ArcaValidationError', () => {
@@ -122,5 +122,25 @@ describe('toHttpError — framework validation (400) details', () => {
     it('leaves details undefined when the 400 carries no errors array', () => {
         const result = toHttpError({httpCode: 400, name: 'BadRequestError', message: 'nope'});
         expect(result.body.error.details).toBeUndefined();
+    });
+});
+
+describe('toHttpError — TaxpayerNotFoundError', () => {
+    it('maps an unregistered identifier to 404 TAXPAYER_NOT_FOUND with the identification pair', () => {
+        const result = toHttpError(new TaxpayerNotFoundError('ARCA', 80, '20111111112'));
+        expect(result.status).toBe(404);
+        expect(result.body.error.code).toBe('TAXPAYER_NOT_FOUND');
+        expect(result.body.error.details).toEqual({
+            entityCode: 'ARCA',
+            identificationTypeCode: 80,
+            identificationNumber: '20111111112',
+        });
+    });
+
+    it("keeps the authority's own wording in the message, for support to recognize", () => {
+        const result = toHttpError(
+            new TaxpayerNotFoundError('ARCA', 80, '12345678901', 'No existe persona con ese Id'),
+        );
+        expect(result.body.error.message).toContain('No existe persona con ese Id');
     });
 });

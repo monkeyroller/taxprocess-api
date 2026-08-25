@@ -16,6 +16,7 @@ export {
     ArcaSoapError,
     ArcaServiceError,
     ArcaValidationError,
+    ArcaTaxpayerNotFoundError,
     NotImplementedError,
     type ArcaErrorEntry,
 } from './core/errors.js';
@@ -48,6 +49,14 @@ export type {
     ArcaObservation,
 } from './invoicing/common/common-invoice.types.js';
 export {InvoiceWebService} from './invoicing/invoice-web-service.base.js';
-export {
-    TaxpayerRegistryService, type RegistryLevel, type TaxpayerData
-} from './taxpayer-registry/taxpayer-registry.service.base.js';
+export {TaxpayerRegistryService} from './taxpayer-registry/taxpayer-registry.service.base.js';
+export type {
+    PadronService,
+    PadronDetail,
+    PadronAddress,
+    PadronActivity,
+    PadronTax,
+    PersonType,
+    RegistrationStatus,
+    TaxpayerData,
+} from './taxpayer-registry/padron.types.js';

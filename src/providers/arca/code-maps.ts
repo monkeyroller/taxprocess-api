@@ -143,3 +143,84 @@ export function toCondicionIvaReceptorId(fiscalConditionCode: number): number {
 export function toDocTipo(identificationTypeCode: number): number {
     return assertKnownCode(TaxProcessIdentificationTypeCode, identificationTypeCode, 'DocTipo (identificationType)');
 }
+
+/**
+ * Voucher types that must NOT discriminate VAT — the "letter C" class, issued by Monotributo and Exento
+ * taxpayers, who have no débito fiscal to report.
+ *
+ * For these ARCA requires `ImpIVA = 0`, `ImpTotConc = 0`, `ImpOpEx = 0`, no `Iva` element at all, and
+ * `ImpTotal = ImpNeto + ImpTrib` — i.e. the whole pre-tributes amount is reported as net, because for a
+ * type C there is no VAT to separate out. Sending a breakdown anyway is rejected with observations 10047
+ * (ImpIVA must be zero), 10048 (ImpTotal must equal ImpNeto + ImpTrib) and 10071 (the Iva object must not
+ * be reported).
+ *
+ * Derived from the letter-C members of {@link TaxProcessDocumentTypeCode}. Letter M is deliberately absent:
+ * an M voucher discriminates VAT exactly like an A. Letter B is absent too — a Factura B does not PRINT the
+ * VAT but still reports it.
+ */
+export const NON_VAT_DISCRIMINATING_CBTE_TIPOS: ReadonlySet<number> = new Set<number>([
+    TaxProcessDocumentTypeCode.FACTURA_C,
+    TaxProcessDocumentTypeCode.NOTA_DEBITO_C,
+    TaxProcessDocumentTypeCode.NOTA_CREDITO_C,
+    TaxProcessDocumentTypeCode.RECIBO_C,
+    TaxProcessDocumentTypeCode.NOTA_VENTA_CONTADO_C,
+    TaxProcessDocumentTypeCode.COMPROBANTE_C_3419,
+    TaxProcessDocumentTypeCode.OTROS_C_3419,
+    TaxProcessDocumentTypeCode.CUENTA_VENTA_LIQUIDO_C,
+    TaxProcessDocumentTypeCode.LIQUIDACION_C,
+    TaxProcessDocumentTypeCode.FCE_FACTURA_C,
+    TaxProcessDocumentTypeCode.FCE_NOTA_DEBITO_C,
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_C,
+]);
+
+/** Whether `cbteTipo` is a letter-C voucher, which must report no VAT breakdown at all. */
+export function isNonVatDiscriminating(cbteTipo: number): boolean {
+    return NON_VAT_DISCRIMINATING_CBTE_TIPOS.has(cbteTipo);
+}
+
+/**
+ * Routes a canonical `identificationTypeCode` to the ARCA padrón service that can answer for it — the
+ * padrón analogue of the code translations above, and the reason `/taxpayers/lookup` needs no explicit
+ * "which service" knob on the wire.
+ *
+ * A **clave tributaria** (CUIT/CUIL/CDI) is looked up directly in the constancia service, which returns
+ * the registration picture. An **identity document** (DNI/LE/LC) is not a clave at all, so it goes to
+ * A13, the only padrón service that can resolve a document number to the claves issued for it.
+ *
+ * Passport, foreign CI and "sin identificar" are refused: ARCA's `getIdPersonaListByDocumento` takes a
+ * bare number with no document type, so there is no way to ask it about a passport — and code 99 names
+ * no person at all. That is a caller-fixable `400`, not an authority failure.
+ */
+export function toPadronService(identificationTypeCode: number): 'CONSTANCIA' | 'A13' {
+    // Validate first, so an entirely unknown code keeps the shared `UNKNOWN_CODE` reason rather than being
+    // reported as an identification type ARCA merely cannot look up.
+    const code = toDocTipo(identificationTypeCode);
+    if (CLAVE_IDENTIFICATION_TYPES.has(code)) {
+        return 'CONSTANCIA';
+    }
+    if (DOCUMENT_IDENTIFICATION_TYPES.has(code)) {
+        return 'A13';
+    }
+    throw new ArcaValidationError(
+        `No ARCA padrón service can look up identification type ${code}`,
+        'UNSUPPORTED_IDENTIFICATION_TYPE',
+    );
+}
+
+/** Identification types that ARE a clave tributaria, so the constancia service can be asked directly. */
+const CLAVE_IDENTIFICATION_TYPES: ReadonlySet<number> = new Set([
+    TaxProcessIdentificationTypeCode.CUIT,
+    TaxProcessIdentificationTypeCode.CUIL,
+    TaxProcessIdentificationTypeCode.CDI,
+]);
+
+/**
+ * Identification types that are a plain numeric identity document, which A13 can resolve to the claves
+ * issued for it. Passport and foreign CI are deliberately absent: ARCA's document search takes a bare
+ * number with no document type, so there is no way to ask it about them.
+ */
+const DOCUMENT_IDENTIFICATION_TYPES: ReadonlySet<number> = new Set([
+    TaxProcessIdentificationTypeCode.DNI,
+    TaxProcessIdentificationTypeCode.LE,
+    TaxProcessIdentificationTypeCode.LC,
+]);

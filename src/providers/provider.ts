@@ -106,6 +106,9 @@ export type TaxAuthorizationResult = NeutralAuthorizationResultDto;
 /** Neutral taxpayer-registry lookup result (reuses the country-agnostic result DTO). */
 export type TaxpayerResult = TaxpayerResultDto;
 
+/** Which registry answered a taxpayer lookup, and therefore which fields the entries can carry. */
+export type {TaxpayerDetail} from '../http/dto/neutral-result.dto.js';
+
 /** Neutral list of the entity's registered points of sale (reuses the country-agnostic result DTO). */
 export type PointsOfSaleResult = PointsOfSaleResultDto;
 
@@ -155,7 +158,22 @@ export abstract class TaxEntityProvider {
     abstract nextNumbers(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCodes: ReadonlyArray<number>): Promise<NextNumbersResult>;
     abstract queryVoucher(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number, voucherNumber: number): Promise<TaxAuthorizationResult>;
     abstract authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult>;
-    abstract lookupTaxpayer(entity: EntityAuthBlock, taxpayerId: string, level?: string): Promise<TaxpayerResult>;
+    /**
+     * Looks up whoever the authority's registry holds under `identificationNumber`, interpreting it
+     * according to `identificationTypeCode` (the same canonical code an invoice receiver carries). The
+     * provider decides which of the authority's registries can answer for that identification type, and
+     * reports it back as the result's `detail`.
+     *
+     * Takes no issuer block: registry lookups are made under this service's own delegated identity, not a
+     * tenant's certificate, so there is no `CREDENTIALS_REQUIRED` handshake. Returns a non-empty list —
+     * an identity document can legitimately match several taxpayers — and raises
+     * {@link TaxpayerNotFoundError} rather than an empty one.
+     */
+    abstract lookupTaxpayers(
+        environment: GenericEnvironment,
+        identificationTypeCode: number,
+        identificationNumber: string,
+    ): Promise<TaxpayerResult>;
     abstract pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult>;
 }
 
@@ -230,5 +248,30 @@ export class VoucherNotFoundError extends Error {
                 `${documentTypeCode} (entity "${entityCode}")`,
         );
         this.name = 'VoucherNotFoundError';
+    }
+}
+
+/**
+ * Raised by {@link TaxEntityProvider.lookupTaxpayers} when the authority's registry holds nobody under the
+ * identifier — an unregistered tax id, or an identity document that matches no clave. Deliberately distinct
+ * from an authority transport/business failure (which stays a `502`): like {@link VoucherNotFoundError},
+ * this is a stable, deterministic outcome the caller can act on, so it maps to `404 TAXPAYER_NOT_FOUND`.
+ *
+ * Reported for both lookup routes so callers have one signal, which is also why a successful lookup never
+ * returns an empty taxpayer list.
+ */
+export class TaxpayerNotFoundError extends Error {
+    constructor(
+        readonly entityCode: string,
+        readonly identificationTypeCode: number,
+        readonly identificationNumber: string,
+        readonly authorityMessage?: string,
+    ) {
+        super(
+            `No taxpayer registered under identification type ${identificationTypeCode} number ` +
+                `${identificationNumber} (entity "${entityCode}")` +
+                (authorityMessage === undefined ? '' : `: ${authorityMessage}`),
+        );
+        this.name = 'TaxpayerNotFoundError';
     }
 }

@@ -1,5 +1,5 @@
 import {ArcaValidationError} from './sdk/index.js';
-import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
+import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo, toPadronService} from './code-maps.js';
 
 describe('code-maps (canonical code → ARCA code)', () => {
     describe('toCbteTipo (documentTypeCode → CbteTipo)', () => {
@@ -46,6 +46,38 @@ describe('code-maps (canonical code → ARCA code)', () => {
             expect(toDocTipo(80)).toBe(80); // CUIT
             expect(toDocTipo(96)).toBe(96); // DNI
             expect(toDocTipo(99)).toBe(99); // SIN IDENTIFICAR (consumidor final)
+        });
+    });
+
+    describe('toPadronService', () => {
+        it('sends a clave tributaria to the constancia service', () => {
+            for (const code of [80, 86, 87]) {
+                expect(toPadronService(code)).toBe('CONSTANCIA');
+            }
+        });
+
+        it('sends an identity document to A13, the only service that can resolve one', () => {
+            for (const code of [96, 89, 90]) {
+                expect(toPadronService(code)).toBe('A13');
+            }
+        });
+
+        it('refuses the identification types no padrón service can answer for', () => {
+            // ARCA's document search takes a bare number with no type, so a passport or foreign CI cannot
+            // be routed; 99 names no person at all. Caller-fixable, hence its own reason code.
+            for (const code of [91, 94, 99]) {
+                expect(() => toPadronService(code)).toThrow(ArcaValidationError);
+                expect(() => toPadronService(code)).toThrow(/padrón service/);
+            }
+        });
+
+        it('reports an entirely unknown code as UNKNOWN_CODE, not as an unroutable type', () => {
+            try {
+                toPadronService(1234);
+                throw new Error('expected a validation error');
+            } catch (err) {
+                expect((err as {code?: string}).code).toBe('UNKNOWN_CODE');
+            }
         });
     });
 

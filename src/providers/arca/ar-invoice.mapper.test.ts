@@ -193,3 +193,152 @@ describe('toNeutralResult', () => {
         expect(r.providerMetadata).toEqual({});
     });
 });
+
+describe('buildCommonInvoiceRequest — letter-C vouchers report no VAT', () => {
+    /** Sale 409's shape: a FACTURA C whose lines still carry a 21% breakdown, plus perceptions. */
+    function facturaC(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
+        return invoice({
+            documentTypeCode: 11,
+            receiver: {identificationTypeCode: 80, identificationNumber: '20273896520', fiscalConditionCode: 5},
+            lines: [
+                {netAmount: 6564.44, taxRatePercent: 21, taxAmount: 1378.53},
+                {netAmount: 17000.06, taxRatePercent: 21, taxAmount: 3570.01},
+            ],
+            totals: {untaxed: 0, exempt: 0, perceptions: 871.29},
+            ...overrides,
+        });
+    }
+
+    it('folds the VAT into ImpNeto and reports no Iva array (ARCA 10047 / 10071)', () => {
+        const req = buildCommonInvoiceRequest(facturaC(), 1);
+
+        expect(req.vatAmount).toBe(0);
+        expect(req.vatSubtotals).toEqual([]);
+        // 6564.44 + 1378.53 + 17000.06 + 3570.01
+        expect(req.netTaxed).toBe(28513.04);
+    });
+
+    it('levies the perception over the collapsed net, which is the real sale amount', () => {
+        const req = buildCommonInvoiceRequest(facturaC(), 1);
+
+        // Not the 23564.50 an A/B would report: a type-C issuer has no débito fiscal, so the net/VAT split is
+        // core's internal costing and the perception was levied on the whole 28513.04.
+        expect(req.tributes?.[0]).toMatchObject({id: 99, baseAmount: 28513.04, amount: 871.29});
+        expect(req.tributes?.[0]?.rate).toBe(3.06);
+    });
+
+    it('satisfies ImpTotal = ImpNeto + ImpTrib even with perceptions (ARCA 10048)', () => {
+        const req = buildCommonInvoiceRequest(facturaC(), 1);
+
+        expect(req.totalAmount).toBe(roundTwo(req.netTaxed + req.tributesAmount));
+        // The legacy implementation set ImpNeto = ImpTotal, which overstates the net by exactly the
+        // tributes and re-triggers 10048 the moment perceptions exist.
+        expect(req.netTaxed).not.toBe(req.totalAmount);
+        expect(req.totalAmount).toBe(29384.33);
+    });
+
+    it('zeroes ImpTotConc and ImpOpEx, folding them into the net', () => {
+        const req = buildCommonInvoiceRequest(
+            facturaC({totals: {untaxed: 50, exempt: 25, perceptions: 0}}),
+            1,
+        );
+
+        expect(req.netUntaxed).toBe(0);
+        expect(req.exempt).toBe(0);
+        expect(req.netTaxed).toBe(28588.04);
+        expect(req.totalAmount).toBe(28588.04);
+    });
+
+    it('never reaches the alícuota map, so a coefficient-derived rate cannot fail here', () => {
+        // 13.5% has no ARCA id; on an A/B voucher this throws UNKNOWN_VAT_RATE. On a C it is irrelevant,
+        // because the collapse happens before any lookup.
+        const req = buildCommonInvoiceRequest(
+            facturaC({lines: [{netAmount: 100, taxRatePercent: 13.5, taxAmount: 13.5}]}),
+            1,
+        );
+
+        expect(req.vatSubtotals).toEqual([]);
+        expect(req.netTaxed).toBe(113.5);
+    });
+
+    it('handles an already-zero-rated C sale, which is the normal case after the coefficient', () => {
+        const req = buildCommonInvoiceRequest(
+            facturaC({
+                lines: [{netAmount: 23564.5, taxRatePercent: 0, taxAmount: 0}],
+                totals: {untaxed: 0, exempt: 0, perceptions: 871.29},
+            }),
+            1,
+        );
+
+        expect(req.vatAmount).toBe(0);
+        expect(req.vatSubtotals).toEqual([]);
+        expect(req.netTaxed).toBe(23564.5);
+        expect(req.totalAmount).toBe(24435.79);
+    });
+
+    it.each([
+        ['NOTA DE DEBITO C', 12],
+        ['NOTA DE CREDITO C', 13],
+        ['RECIBO C', 15],
+        ['FCE FACTURA C', 211],
+    ])('applies to %s (code %i) as well as the factura', (_name, documentTypeCode) => {
+        const req = buildCommonInvoiceRequest(facturaC({documentTypeCode}), 1);
+
+        expect(req.vatAmount).toBe(0);
+        expect(req.vatSubtotals).toEqual([]);
+    });
+
+    it.each([
+        ['FACTURA A', 1],
+        ['FACTURA B', 6],
+        ['FACTURA M', 51],
+    ])('leaves %s (code %i) discriminating VAT exactly as before', (_name, documentTypeCode) => {
+        // B does not PRINT the VAT but still reports it; M discriminates like an A.
+        const req = buildCommonInvoiceRequest(facturaC({documentTypeCode}), 1);
+
+        expect(req.vatAmount).toBe(4948.54);
+        expect(req.netTaxed).toBe(23564.5);
+        expect(req.vatSubtotals).toHaveLength(1);
+        expect(req.vatSubtotals[0]?.Id).toBe(5);
+    });
+});
+
+/** Local 2-dp rounding, mirroring the SDK's, so the assertions do not depend on float noise. */
+function roundTwo(value: number): number {
+    return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+describe('buildCommonInvoiceRequest — an invoice with no taxed lines', () => {
+    it('accepts an empty lines array, carrying the money in the header totals', () => {
+        // Core sends TAXED lines only, so a sale whose every line is zero-rated arrives with none at all.
+        // This is the normal shape for a Monotributo issuer once the line-tax coefficient zeroes each rate.
+        const req = buildCommonInvoiceRequest(
+            invoice({
+                documentTypeCode: 11,
+                lines: [],
+                totals: {untaxed: 23564.5, exempt: 0, perceptions: 871.29},
+            }),
+            1,
+        );
+
+        expect(req.vatAmount).toBe(0);
+        expect(req.vatSubtotals).toEqual([]);
+        // Letter C folds ImpTotConc into ImpNeto, so nothing is lost and nothing is counted twice.
+        expect(req.netTaxed).toBe(23564.5);
+        expect(req.netUntaxed).toBe(0);
+        expect(req.totalAmount).toBe(24435.79);
+    });
+
+    it('keeps an untaxed-only A/B voucher reporting ImpTotConc rather than ImpNeto', () => {
+        const req = buildCommonInvoiceRequest(
+            invoice({documentTypeCode: 6, lines: [], totals: {untaxed: 500, exempt: 100, perceptions: 0}}),
+            1,
+        );
+
+        expect(req.netTaxed).toBe(0);
+        expect(req.netUntaxed).toBe(500);
+        expect(req.exempt).toBe(100);
+        expect(req.vatAmount).toBe(0);
+        expect(req.totalAmount).toBe(600);
+    });
+});

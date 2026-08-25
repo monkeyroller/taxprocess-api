@@ -364,7 +364,7 @@ describe('TicketStore (mint-on-credentials)', () => {
             const delegate = new FakeDelegate();
             delegate.creds[ENV] = delegateCreds();
             const store = makeStore(fake, delegate);
-            const padron: ServiceIdValue = ServiceId.PADRON_A5;
+            const padron: ServiceIdValue = ServiceId.CONSTANCIA_INSCRIPCION;
 
             await store.resolve(ENTITY, ISSUER, SVC, ENV, undefined, true);
             await store.resolve(ENTITY, ISSUER, padron, ENV, undefined, true);

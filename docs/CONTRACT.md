@@ -309,9 +309,78 @@ while active the key is omitted. An issuer with no registered points returns `{ 
 this as a `602 "Sin Resultados"` error, which the provider normalizes to the empty list — never a `502`).
 
 ### `POST /api/taxpayers/lookup`
-Body `{ "entity": {...}, "taxpayerId": "20111111112", "level": "A5" }` → `200 { "idPersona":…, "taxId":…,
-"name":… }`. `level` ∈ `A4|A5|A10|A13` (default `A5`). NOTE: the ARCA SDK's padrón `parseTaxpayer` is still a
-seed, so this currently returns `501` after the SOAP call until the SDK level is implemented.
+Looks up whoever the authority's registry holds under an identifier. **No `entity` block and no credentials:**
+registry lookups are made under this service's own delegated identity, so this endpoint never returns
+`409 CREDENTIALS_REQUIRED` and no taxpayer has to delegate anything to us (§10).
+
+```jsonc
+{ "entityCode": "ARCA",
+  "environment": "testing",
+  "identificationTypeCode": 80,            // canonical code — the same one invoice.receiver carries
+  "identificationNumber": "20111111112" }  // digits as a string
+```
+
+**The identification type picks the registry**, which is why there is no "which service / how much detail"
+knob on the wire. For ARCA:
+
+| `identificationTypeCode` | what happens | resulting `detail` |
+| --- | --- | --- |
+| 80 CUIT, 86 CUIL, 87 CDI | the identifier **is** a clave — looked up directly | `REGISTRATION` |
+| 96 DNI, 89 LE, 90 LC | the document is resolved to the claves issued for it, then each is read | `IDENTITY` |
+| 91 CI extranjera, 94 pasaporte, 99 sin identificar | refused — no registry can answer for these | — |
+
+Response:
+
+```jsonc
+{ "entityCode": "ARCA",
+  "detail": "REGISTRATION",     // which registry answered — see the field table below
+  "taxpayers": [ { "taxId": "20111111112", … } ] }
+```
+
+`taxpayers` is **always a list and never empty on a `200`**: a document lookup can legitimately match several
+taxpayers (one DNI commonly carries both a CUIL and a CUIT), and no match at all is a `404 TAXPAYER_NOT_FOUND`.
+A tax-id lookup returns exactly one entry.
+
+#### Which fields you get, per `detail`
+
+The two registries are **complementary, not nested** — one knows the tax picture, the other knows the person —
+so `detail` is what tells you the possible key set. ✔ = always present, ○ = present when the authority returns
+it, — = never present for that detail.
+
+| field | `REGISTRATION` | `IDENTITY` | notes |
+| --- | :---: | :---: | --- |
+| `taxId` | ✔ | ✔ | the taxpayer's tax id (AR: CUIT/CUIL/CDI) |
+| `addresses[]` | ✔ | ✔ | `{street, city, postalCode, region, regionCode, kind, status}` |
+| `activities[]` | ✔ | ✔ | `{code, description, period, primary}`; `period` is an ISO year-month (`"2014-09"`) |
+| `providerMetadata` | ✔ | ✔ | entity-specific extras, opaque to core; always an object |
+| `taxes[]` | ✔ | — | `{code, description, period, status, reason}` |
+| `simplifiedRegimeCategory` | ○ | — | small-taxpayer regime category (AR: monotributo) |
+| `taxIdType` | ○ | ○ | AR: `"CUIT"` / `"CUIL"` / `"CDI"` |
+| `personType` | ○ | ○ | `"INDIVIDUAL"` \| `"LEGAL_ENTITY"` |
+| `name`, `firstName`, `lastName` | ○ | ○ | `name` is the legal name for an entity, the full name for a person |
+| `registrationStatus` | ○ | ○ | `"ACTIVE"` \| `"INACTIVE"` |
+| `fiscalAddress` | ○ | ○ | the address the authority holds as fiscal; also present in `addresses[]` |
+| `fiscalYearEndMonth`, `incorporationDate` | ○ | ○ | month 1–12; ISO date |
+| `documentType`, `documentNumber` | — | ○ | the identity document behind the clave |
+| `birthDate`, `registrationDate`, `legalForm` | — | ○ | ISO dates; `legalForm` is free text |
+
+**Absence rule.** Optional scalars are **omitted, never `null`** — the same convention as `qr` /
+`dischargeDate` elsewhere in this contract. The arrays a detail covers are **always present**, `[]` when the
+authority reports none, so "none registered" is distinguishable from "this detail cannot report it". That is
+why `taxes` is `[]` on a `REGISTRATION` result with no registered taxes, and **absent entirely** on every
+`IDENTITY` result. Given `detail`, the key set is fully predictable from the table above.
+
+`providerMetadata` is the escape hatch for data with no cross-country meaning; core should persist it opaquely
+and never branch on it. For ARCA it names the padrón service that answered and may carry `caracterizaciones`
+(including the 2026 *ganancias simplificada* flag), `esSucesion`, `deceasedDate`, `dependencia`, `regimenes`,
+`categoriasAutonomo`, and the authority's own per-block constancia errors.
+
+**Errors:** `404 TAXPAYER_NOT_FOUND` (nobody registered under the identifier), `400 ARCA_VALIDATION` with
+`details.code: "UNSUPPORTED_IDENTIFICATION_TYPE"` (an identification type no registry can answer for) or
+`"UNKNOWN_CODE"` / `"INVALID_ID"` (unknown canonical code / non-numeric identifier),
+`500 DELEGATION_NOT_CONFIGURED` (this service has no usable delegate certificate for the environment, **or it
+is not enrolled in the registry web service** — see §10).
+
 
 ---
 
@@ -339,7 +408,9 @@ fails fast here instead of minting a ticket under the wrong identity and surfaci
 token rejection. Formatting (dashes, a `CUIT ` prefix) is not significant; both sides are canonicalized to 11
 digits. Core should send the CUIT that owns the certificate.
 
-`service` values (in `details`, ARCA): `wsfe` (invoicing) and `ws_sr_padron_a4|a5|a10|a13` (lookups). This
+`service` values (in `details`, ARCA): `wsfe` (invoicing); the registry services
+(`ws_sr_constancia_inscripcion`, `ws_sr_padron_a13`) never appear here, since lookups use this service's own
+delegated identity and so never raise `CREDENTIALS_REQUIRED`. This
 service caches tickets keyed by the **signing certificate's identity**, shared across core instances, so after
 a refresh most requests are served identity-only for ~12h. Tenant and delegate signers occupy **separate
 partitions**:
@@ -459,22 +530,25 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | --- | --- | --- |
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`, `UNSUPPORTED_IDENTIFICATION_TYPE`, `UNKNOWN_CODE`, `INVALID_ID`) when known |
 | 400 | `RECEIVER_MATCHES_ISSUER` | the authority rejected the voucher because the receiver's identification number equals the issuer's own (ARCA `10069`). Stable and caller-fixable, so it is a `400` — **not** the `502 ARCA_SERVICE` an unclassified rejection gets; `details: { arcaCode, arcaErrors }` |
 | 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
+| 404 | `TAXPAYER_NOT_FOUND` | `taxpayers/lookup` only — the authority's registry holds nobody under the identifier (an unregistered tax id, or a document matching no clave); `details: { entityCode, identificationTypeCode, identificationNumber }`. Stable outcome, **never** a `502`, and the reason a successful lookup never returns an empty list |
 | 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
-| 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |
+| 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented |
 | 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure. `ARCA_SERVICE` now carries `details.arcaErrors` — the authority's full `[{ code, message }]` list, previously dropped — so core can log or branch on the underlying rejection |
-| 500 | `DELEGATION_NOT_CONFIGURED` | `delegated:true` but this service has no valid delegate certificate configured for that `environment` (server misconfiguration); `details: { environment, reason }` |
+| 500 | `DELEGATION_NOT_CONFIGURED` | this service has no valid delegate certificate for that `environment`, or (registry lookups) its certificate is not enrolled in the web service at the authority — a server misconfiguration either way; `details: { environment, reason }` |
 | 500 | `ARCA_ERROR` / `INTERNAL` | unexpected |
 
 ---
 
 ## 9. What stays inside the ARCA provider (do NOT leak into the contract)
 CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day window,
-WSAA/CMS signing, `homologacion`/`produccion` — all inside `src/providers/arca/`. The neutral result already
+WSAA/CMS signing, `homologacion`/`produccion`, the padrón service ids (`ws_sr_constancia_inscripcion`,
+`ws_sr_padron_a13`) and their `personaReturn`/`datosGenerales`/monotributo vocabulary — all inside
+`src/providers/arca/`. The neutral result already
 abstracts CAE → `authorizationCode`.
 
 ---
@@ -527,3 +601,26 @@ the one cached ticket automatically. Otherwise each certificate holds its own, a
 When ARCA rejects a delegate ticket with a genuine token fault, only that **service's** delegate ticket is
 dropped — the delegate identity's other tickets (e.g. padrón) are still valid and ARCA would not re-issue them
 for ~12h.
+
+### Registry lookups use our delegate *identity*, not a representación
+
+`POST /api/taxpayers/lookup` (§3) also signs with our delegate certificate, but it is **not** a delegated call
+in the sense above and none of this section's rules apply to it. ARCA's padrón services only require that
+`cuitRepresentada` appear in the token's `relations` — which, for a login we signed ourselves, is our own
+CUIT. So the service acts as **itself**: no `issuerTaxId`, no represented taxpayer, no
+`DELEGATION_NOT_AUTHORIZED`, and nobody has to grant us anything in *Administrador de Relaciones*.
+
+The one prerequisite is on **our** side: our delegate certificate must be adhered to each registry web
+service — `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` — in ARCA's WSASS (homologación) or
+Administrador de Relaciones (production). Until it is, WSAA refuses the login with `coe.notAuthorized` /
+"Computador no autorizado a acceder al servicio". On this path that is deterministic and permanent, so it is
+reported as `500 DELEGATION_NOT_CONFIGURED` naming the missing service in `details.reason` — deliberately not
+the `502` the raw transport error would suggest, because retrying cannot enrol a certificate. **Core action:
+none** — it is a deployment task on this service.
+
+Because no representación is involved, a lookup can never answer `403 DELEGATION_NOT_AUTHORIZED` — there is no
+second party to have failed to authorize us. If ARCA rejects the delegate *ticket* itself (token, signature or
+certificate), that lookup returns `502 ARCA_AUTH` and the cached ticket for that registry service is dropped so
+the next lookup re-mints; one ticket serves every lookup, so a bad one left cached would fail all of them until
+it expired. A refusal that names the *enrolment* rather than the ticket leaves the cached ticket alone — it is
+valid, and ARCA would not re-issue it for ~12h. **Core action: none** — retry as with any `502`.

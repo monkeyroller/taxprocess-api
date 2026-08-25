@@ -6,17 +6,28 @@
  * the SOAP namespaces, these are ARCA's actual server addresses, not app naming. This is the single
  * place to switch hosts — if a call unexpectedly returns 404, verify against the live WSDL
  * (`<endpoint>?WSDL`) and update it here. Nothing else in the SDK hardcodes a URL.
+ *
+ * Re-verified 2026-08-21 against the padrón manuals: the constancia manual v4.1 rewrote its documented
+ * URLs from `afip.gov.ar` to `arca.gob.ar`, but `awshomo.arca.gob.ar` does not resolve at all, while
+ * `awshomo.afip.gov.ar` (testing) and `aws.arca.gob.ar` (production) both answer. The A13 manual v1.4
+ * still documents `afip.gov.ar` for both environments. So the `afip.gov.ar` spellings below stay —
+ * do NOT "modernize" them to match the constancia manual.
  */
 
 export type ArcaEnvironment = 'homologacion' | 'produccion';
 
-/** ARCA service identifiers used to request a per-service WSAA access ticket. */
+/**
+ * ARCA service identifiers used to request a per-service WSAA access ticket.
+ *
+ * `CONSTANCIA_INSCRIPCION` is the padrón service formerly registered as `ws_sr_padron_a5`: ARCA renamed
+ * it and marks the old alcance-5 id as deprecated in its service catalog. The endpoint and namespace are
+ * unchanged by the rename (still `personaServiceA5` / `a5.soap.ws.server.puc.sr`) — only the WSAA service
+ * id moved, and the certificate must be enrolled under the NEW id.
+ */
 export const ServiceId = {
     WSFEV1: 'wsfe',
     WSFEXV1: 'wsfex',
-    PADRON_A4: 'ws_sr_padron_a4',
-    PADRON_A5: 'ws_sr_padron_a5',
-    PADRON_A10: 'ws_sr_padron_a10',
+    CONSTANCIA_INSCRIPCION: 'ws_sr_constancia_inscripcion',
     PADRON_A13: 'ws_sr_padron_a13',
 } as const;
 
@@ -27,9 +38,8 @@ export const Namespaces = {
     WSAA: 'http://wsaa.view.sua.dvadac.desein.afip.gov',
     WSFEV1: 'http://ar.gov.afip.dif.FEV1/',
     WSFEXV1: 'http://ar.gov.afip.dif.fexv1/',
-    PADRON_A4: 'http://a4.soap.ws.server.puc.sr/',
-    PADRON_A5: 'http://a5.soap.ws.server.puc.sr/',
-    PADRON_A10: 'http://a10.soap.ws.server.puc.sr/',
+    /** Constancia de inscripción — still the alcance-5 namespace after the service rename. */
+    CONSTANCIA: 'http://a5.soap.ws.server.puc.sr/',
     PADRON_A13: 'http://a13.soap.ws.server.puc.sr/',
 } as const;
 
@@ -37,9 +47,8 @@ export interface ServiceEndpoints {
     readonly wsaa: string;
     readonly wsfev1: string;
     readonly wsfexv1: string;
-    readonly padronA4: string;
-    readonly padronA5: string;
-    readonly padronA10: string;
+    /** Constancia de inscripción — still the `personaServiceA5` path after the service rename. */
+    readonly constanciaInscripcion: string;
     readonly padronA13: string;
 }
 
@@ -48,18 +57,14 @@ export const ENDPOINTS: Record<ArcaEnvironment, ServiceEndpoints> = {
         wsaa: 'https://wsaahomo.afip.gov.ar/ws/services/LoginCms',
         wsfev1: 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx',
         wsfexv1: 'https://wswhomo.afip.gov.ar/wsfexv1/service.asmx',
-        padronA4: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA4',
-        padronA5: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5',
-        padronA10: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA10',
+        constanciaInscripcion: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5',
         padronA13: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13',
     },
     produccion: {
         wsaa: 'https://wsaa.afip.gov.ar/ws/services/LoginCms',
         wsfev1: 'https://servicios1.afip.gov.ar/wsfev1/service.asmx',
         wsfexv1: 'https://servicios1.afip.gov.ar/wsfexv1/service.asmx',
-        padronA4: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA4',
-        padronA5: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5',
-        padronA10: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA10',
+        constanciaInscripcion: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5',
         padronA13: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13',
     },
 };

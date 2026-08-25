@@ -11,6 +11,7 @@ import {CredentialsRequiredError} from '../providers/arca/ticket-store.js';
 import {
     DelegationNotAuthorizedError,
     DelegationNotConfiguredError,
+    TaxpayerNotFoundError,
     UnknownEntityError,
     VoucherNotFoundError,
 } from '../providers/provider.js';
@@ -139,6 +140,15 @@ export function toHttpError(err: unknown): HttpErrorResult {
             pointOfSaleNumber: err.pointOfSaleNumber,
             documentTypeCode: err.documentTypeCode,
             voucherNumber: err.voucherNumber,
+        });
+    }
+    if (err instanceof TaxpayerNotFoundError) {
+        // The registry holds nobody under this identifier — a stable outcome the caller can act on (fix the
+        // number, or fall back to asking the customer), never the retryable `502` an authority failure means.
+        return make(404, 'TAXPAYER_NOT_FOUND', err.message, {
+            entityCode: err.entityCode,
+            identificationTypeCode: err.identificationTypeCode,
+            identificationNumber: err.identificationNumber,
         });
     }
     if (err instanceof ArcaValidationError) {

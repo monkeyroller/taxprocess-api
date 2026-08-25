@@ -77,10 +77,12 @@ see the **Neutral field glossary** in [docs/CONTRACT.md](docs/CONTRACT.md) for w
 | `POST /invoices/authorize` | ✅ wired | neutral invoice (core ids) → authorization code (+ RG-4892 QR) |
 | `POST /invoices/last-authorized` | ✅ wired | last authorized voucher number |
 | `POST /invoices/query` | ✅ wired | idempotency backstop |
-| `POST /taxpayers/lookup` | 🚧 501 | plumbing wired; ARCA SDK padrón parser is a seed |
+| `POST /taxpayers/lookup` | ✅ wired | registry lookup by identification type; uses this service's own delegated identity (no `entity` block) |
 
 Authenticated endpoints reply `409 CREDENTIALS_REQUIRED` on a ticket-cache miss; core re-sends with
-`entity.credentials` attached (see the contract doc).
+`entity.credentials` attached (see the contract doc). `POST /taxpayers/lookup` is the exception: it signs with
+this service's own delegate certificate, so it carries no issuer and never asks for credentials — it does
+require that certificate to be enrolled in `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` at ARCA.
 
 ## Layout
 

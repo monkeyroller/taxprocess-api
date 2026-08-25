@@ -1,37 +1,37 @@
 import {SoapClient} from '../core/soap-client.js';
 import {NotImplementedError} from '../core/errors.js';
-import type {ArcaEnvironment} from '../core/constants.js';
+import {translatePadronFault} from './padron-faults.js';
+import type {ArcaEnvironment, ServiceIdValue} from '../core/constants.js';
 import type {ArcaAuth} from '../core/types.js';
+import type {PadronService, TaxpayerData} from './padron.types.js';
 
 /**
- * Shared base for the ARCA padrón "consulta de persona" web services (levels A4/A5/A10/A13).
+ * Shared base for the ARCA padrón "consulta de persona" web services.
  *
- * All four expose the same SOAP operation shape — `getPersona(token, sign, cuitRepresentada,
- * idPersona)` — and differ only in how much taxpayer data they return, which is exactly why they
- * belong under one base parameterized by {@link RegistryLevel}. The base owns the SOAP call; each
- * level fills its identity (`level`, `serviceId`, `namespace`, `endpoint`) and its `parseTaxpayer`.
+ * All of them take the same SOAP inputs — `(token, sign, cuitRepresentada, idPersona)` — and differ in
+ * their operation name, their endpoint/namespace, and how much taxpayer data they return, which is why
+ * they belong under one base parameterized by {@link PadronService}. The base owns the SOAP call; each
+ * service fills its identity (`padron`, `serviceId`, `namespace`, `operation`, `endpoint`) and its
+ * `parseTaxpayer`.
  *
- * Each level also requires its own delegated permission on the certificate in ARCA's Administrador
- * de Relaciones, and its own WSAA ticket (keyed by `serviceId`).
+ * Fault classification is the base's too, via {@link invoke} — the services share ARCA's `sr-padron` webapp
+ * and therefore its fault vocabulary, so an unknown clave has to mean `404` whichever alcance was asked.
+ *
+ * Each service also requires its own enrolment of the calling certificate at ARCA and its own WSAA
+ * ticket (keyed by `serviceId`).
  */
-
-export type RegistryLevel = 'A4' | 'A5' | 'A10' | 'A13';
-
-/** Normalized taxpayer data. `raw` carries the full level-specific response for callers that need more. */
-export interface TaxpayerData {
-    idPersona: number;
-    /** CUIT/CUIL as returned by the service. */
-    taxId?: string;
-    /** Legal or full name, when the level returns it. */
-    name?: string;
-    raw: Record<string, unknown>;
-}
-
 export abstract class TaxpayerRegistryService {
-    protected abstract readonly level: RegistryLevel;
-    /** ARCA service id, e.g. `"ws_sr_padron_a5"`. */
-    protected abstract readonly serviceId: string;
+    /** Which padrón service this is, in SDK vocabulary. */
+    protected abstract readonly padron: PadronService;
+    /** ARCA service id, e.g. `"ws_sr_constancia_inscripcion"` — the WSAA ticket key. */
+    protected abstract readonly serviceId: ServiceIdValue;
     protected abstract readonly namespace: string;
+    /**
+     * SOAP operation name. Deliberately per-service: the two live services spell their v2 lookup
+     * differently (`getPersona_v2` for constancia, `getPersonaV2` for A13), and the v1 `getPersona` both
+     * still expose is the one to avoid — it refuses to answer for an INACTIVA key.
+     */
+    protected abstract readonly operation: string;
 
     constructor(
         protected readonly soap: SoapClient,
@@ -41,22 +41,50 @@ export abstract class TaxpayerRegistryService {
     protected abstract endpoint(): string;
 
     /** ARCA service id this instance authenticates against — used to request the WSAA ticket. */
-    get service(): string {
+    get service(): ServiceIdValue {
         return this.serviceId;
     }
 
-    /** Looks up a taxpayer by CUIT/CUIL. All levels use the SOAP `getPersona` operation. */
-    async getTaxpayer(auth: ArcaAuth, taxpayerId: number): Promise<TaxpayerData> {
-        const response = await this.soap.call(this.endpoint(), this.namespace, 'getPersona', {
-            token: auth.token,
-            sign: auth.sign,
-            cuitRepresentada: auth.cuit,
-            idPersona: taxpayerId,
-        });
-        return this.parseTaxpayer(response);
+    /**
+     * Sends one padrón SOAP operation, translating the authority's documented fault conditions into the SDK's
+     * own errors ({@link translatePadronFault}). Every padrón operation goes through here, including the
+     * subclass-specific ones, so no service can accidentally return a `502` for a condition its sibling
+     * reports as a `404`.
+     *
+     * `subject` is the identifier the call is about, echoed into a not-found so the error names what was asked
+     * for even when the authority's own wording does not.
+     */
+    protected async invoke(
+        operation: string,
+        payload: Record<string, unknown>,
+        subject: number,
+    ): Promise<Record<string, unknown>> {
+        try {
+            return await this.soap.call(this.endpoint(), this.namespace, operation, payload);
+        } catch (err) {
+            throw translatePadronFault(err, String(subject));
+        }
     }
 
-    protected parseTaxpayer(_result: Record<string, unknown>): TaxpayerData {
+    /**
+     * Looks up one taxpayer by their clave (CUIT/CUIL/CDI). `taxpayerId` is echoed into the parsed
+     * result so `taxId` is always populated even when the service omits `idPersona`.
+     */
+    async getTaxpayer(auth: ArcaAuth, taxpayerId: number): Promise<TaxpayerData> {
+        const response = await this.invoke(
+            this.operation,
+            {
+                token: auth.token,
+                sign: auth.sign,
+                cuitRepresentada: auth.cuit,
+                idPersona: taxpayerId,
+            },
+            taxpayerId,
+        );
+        return this.parseTaxpayer(response, taxpayerId);
+    }
+
+    protected parseTaxpayer(_result: Record<string, unknown>, _taxpayerId: number): TaxpayerData {
         throw new NotImplementedError(`${this.constructor.name}.getTaxpayer`);
     }
 }

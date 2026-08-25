@@ -6,6 +6,99 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-08-21 — `invoice.lines` may be empty, but an invoice must still carry an amount
+
+Branch `feature/padron`, alongside the letter-C fix below. Not breaking: every invoice core sends today keeps
+authorizing unchanged.
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| `lines` no longer has a minimum length — a zero-rated sale legitimately has no VAT bases to declare and carries its money in `totals`. | §3 invoices | None. Send `[]` rather than padding it with zero-rated entries, which double-counted against `totals.untaxed`. |
+| An invoice with **no amount in either channel** is now `400` (`details` names `lines`). | §3, §8 | None unless you were sending empty vouchers, which the authority rejected anyway — this just says so without the round-trip. |
+
+A rate of `0` in `lines` is still valid and still means something distinct from `totals.untaxed`: it is a base
+the entity **taxes at zero** and wants declared as such (AR: its own alícuota id, not `ImpTotConc`). Money
+outside the tax system altogether belongs in `totals`.
+
+### Letter-C vouchers no longer report a VAT breakdown
+
+A voucher whose type is letter C (AR: Monotributo / Exento issuers — `FACTURA_C` and its siblings) now folds
+the whole pre-tributes amount into the net and reports no VAT element at all, because its issuer has no débito
+fiscal to declare and ARCA rejects any attempt to declare one (observations `10047` / `10048` / `10071`).
+**Core action: none** — keep sending the net/VAT split you already send. Whether it is *reportable* is an
+authority rule, and applying it is this service's job, not core's.
+
+One visible consequence: on a letter C the perception's printed `BaseImp` is now the whole sale rather than
+the pre-VAT net, since for a type-C issuer the net/VAT split is core's internal costing and the perception was
+levied on the full amount. The `ImpTrib` the authority reconciles against is unchanged.
+
+---
+
+## 2026-08-21 — Taxpayer lookup: real registry data, new request/response shape, no `entity` block
+
+Branch `feature/padron`. `POST /api/taxpayers/lookup` returns real data for the first time — it previously
+made the authority call and then answered `501`, because the ARCA padrón parsers were seeds. Getting there
+changed both the request and the response, so **this endpoint is a breaking change**. `/points-of-sale`,
+`/authority/status` and `/entities` are untouched; `/invoices/authorize` moved too, but separately and
+non-breakingly — see the entry above.
+
+### The request no longer carries an issuer
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| Body is now `{ entityCode, environment, identificationTypeCode, identificationNumber }`. The `entity` block, `taxpayerId` and `level` are gone. | §3 taxpayers | **Required.** Send the identification pair you already send on `invoice.receiver` — the same canonical `identificationTypeCode` (80=CUIT, 86=CUIL, 87=CDI, 96=DNI, 89=LE, 90=LC). Drop `entity` and `level`. |
+| Lookups no longer use the issuer's certificate, so this endpoint **never** returns `409 CREDENTIALS_REQUIRED`. | §3, §10 | You can drop the credential-retry path for this endpoint (it stays exactly as-is for every other one). |
+
+Why the `entity` block went away: a registry lookup is not issued *for* anybody. This service now asks the
+authority under **its own** delegated identity, so there is no issuer to name, no credentials to fetch and
+decrypt, and no per-taxpayer delegation to arrange. It also means the endpoint works for a taxpayer you hold
+no certificate for.
+
+**`level` is gone and is not coming back.** `A4|A5|A10|A13` were ARCA service tiers leaking onto a
+deliberately entity-neutral wire (§9). The identification type now selects the registry, because that is the
+same decision: a tax id can be looked up directly, an identity document has to be resolved to the tax ids
+issued for it first.
+
+### The response is a list, and says which registry answered
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| `200` is now `{ entityCode, detail, taxpayers: [ … ] }` instead of a bare `{ idPersona, taxId, name }`. | §3 taxpayers | **Required.** Read `taxpayers[0]` for a tax-id lookup; iterate for a document lookup. `idPersona` is gone — the neutral field is `taxId`. |
+| `detail` is `"REGISTRATION"` or `"IDENTITY"` and tells you which fields can be populated. | §3 field table | Branch on it if you need fields only one of them carries. |
+
+A document lookup can legitimately match **several** taxpayers — one DNI commonly carries both a CUIL and a
+CUIT — which is why the result is always a list. It is never empty on a `200`: no match is a `404`.
+
+The two registries are complementary, not "more or less detail". `REGISTRATION` (AR: constancia de
+inscripción) carries registered taxes, activities, the simplified-regime category and the fiscal address, but
+no identity document. `IDENTITY` (AR: padrón A13) carries the document, birth date, legal form and every
+declared address, but no taxes. The per-detail ✔/○/— field table in §3 is authoritative.
+
+### Absence: keys are omitted, never `null`
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| Optional scalars are **omitted** when the authority did not return them. Arrays a detail covers are **always present**, `[]` when empty. `taxes` is absent entirely on an `IDENTITY` result. | §3 taxpayers | None if you already treat a missing key as "not reported" — that is the existing convention for `qr` and `dischargeDate`. Do not expect `null`; this service never sends it. |
+
+The distinction is deliberate: `"taxes": []` means *asked, none registered*; no `taxes` key means *this
+registry cannot report taxes at all*. Given `detail`, the key set is fully predictable.
+
+### New errors
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| `404 TAXPAYER_NOT_FOUND` — nobody registered under the identifier; `details: { entityCode, identificationTypeCode, identificationNumber }`. | §8 | Handle as a normal negative answer (show "not found"), not as an outage. Never a `502`. |
+| `400 ARCA_VALIDATION` with `details.code: "UNSUPPORTED_IDENTIFICATION_TYPE"` — passport (94), foreign CI (91) and "sin identificar" (99) cannot be looked up. | §3, §8 | Do not offer registry lookup for those identification types. ARCA's document search takes a bare number with no document type, so there is no way to ask it about a passport. |
+| `500 DELEGATION_NOT_CONFIGURED` now also covers "our certificate is not enrolled in the registry web service", naming the service in `details.reason`. | §8, §10 | None — a deployment task on this service, not a caller error. Surface it as an outage, not as "taxpayer not found". |
+
+> **Deployment prerequisite (this service, not core).** The delegate certificate must be adhered to
+> `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` in ARCA's WSASS (homologación) or Administrador de
+> Relaciones (production). Verified against homologación on 2026-08-21: until it is, every lookup returns the
+> `500` above. Note that `ws_sr_padron_a5` is **deprecated** — ARCA's catalog replaces it with
+> `ws_sr_constancia_inscripcion`, and that is the id to enrol.
+
+---
+
 ## 2026-08-20 — Stronger idempotent-recovery match, concept-1 date window now rejects instead of clamping
 
 Branch `feature/delegated-certificates`. Two related tightenings of `POST /invoices/authorize`'s existing

@@ -2,13 +2,25 @@ import 'reflect-metadata';
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {plainToInstance} from 'class-transformer';
 import {validate} from 'class-validator';
-import {ArcaAuthError, ArcaServiceError, type CommonInvoiceResult, type PointOfSaleInfo} from './sdk/index.js';
+import {
+    ArcaAuthError,
+    ArcaServiceError,
+    ArcaSoapError,
+    ArcaTaxpayerNotFoundError,
+    ArcaValidationError,
+    type CommonInvoiceResult,
+    type PointOfSaleInfo,
+    type TaxpayerData,
+} from './sdk/index.js';
 import {
     DelegationNotAuthorizedError,
+    DelegationNotConfiguredError,
+    TaxpayerNotFoundError,
     VoucherNotFoundError,
     type EntityAuthBlock,
     type NeutralInvoice,
 } from '../provider.js';
+import type {DelegateCredentialStore} from './delegate-credentials.js';
 import {NeutralInvoiceDto, NextNumbersRequestDto, PointsOfSaleRequestDto} from '../../http/dto/invoice.dto.js';
 
 /**
@@ -23,16 +35,37 @@ const getLastAuthorizedNumber = jest.fn<() => Promise<number>>();
 const requestAuthorization = jest.fn<(auth: unknown, req: any) => Promise<CommonInvoiceResult>>();
 const queryVoucher = jest.fn<(auth: unknown, sp: number, vt: number, n: number) => Promise<CommonInvoiceResult>>();
 const getPointsOfSale = jest.fn<() => Promise<Array<PointOfSaleInfo>>>();
-const resolve = jest.fn<() => Promise<{token: string; sign: string; cuit: number}>>();
+const resolve = jest.fn<
+    (
+        entityCode: string,
+        issuerTaxId: string,
+        service: string,
+        environment: string,
+        credentials?: unknown,
+        delegated?: boolean,
+    ) => Promise<{token: string; sign: string; cuit: number}>
+>();
+const constanciaGetTaxpayer = jest.fn<(auth: unknown, id: number) => Promise<TaxpayerData>>();
+const identityGetTaxpayer = jest.fn<(auth: unknown, id: number) => Promise<TaxpayerData>>();
+const getIdPersonaList = jest.fn<(auth: unknown, documentNumber: number) => Promise<Array<string>>>();
 const invalidateDelegated = jest.fn<(entityCode: string, environment: string, service: string) => void>();
 
 jest.unstable_mockModule('./clients.js', () => ({
     commonInvoiceService: () => ({getLastAuthorizedNumber, requestAuthorization, queryVoucher, getPointsOfSale}),
-    // Unused by authorizeInvoice but part of the module's surface — provide inert stubs.
-    padronService: () => ({}),
-    padronServiceId: () => '',
+    // The padrón factories return their concrete services, each carrying the WSAA service id the provider
+    // keys the ticket on — so the fakes must expose `service` too, not just the operations.
+    constanciaService: () => ({service: CONSTANCIA_SERVICE, getTaxpayer: constanciaGetTaxpayer}),
+    taxpayerIdentityService: () => ({
+        service: A13_SERVICE,
+        getTaxpayer: identityGetTaxpayer,
+        getIdPersonaList,
+    }),
     soap: {},
 }));
+
+const CONSTANCIA_SERVICE = 'ws_sr_constancia_inscripcion';
+const A13_SERVICE = 'ws_sr_padron_a13';
+const DELEGATE_CUIT = '30999999997';
 
 jest.unstable_mockModule('./ticket-store.js', () => ({
     ticketStore: {resolve, invalidateDelegated},
@@ -711,5 +744,285 @@ describe('NeutralInvoiceDto voucher-number validation', () => {
         const failed = errors.map((e) => e.property);
         expect(failed).toContain('voucherNumberFrom');
         expect(failed).toContain('voucherNumberTo');
+    });
+});
+
+describe('NeutralInvoiceDto — an invoice must carry an amount', () => {
+    function base(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+        return {
+            documentTypeCode: 11,
+            concept: 1,
+            pointOfSaleNumber: 3,
+            voucherNumberFrom: 17,
+            voucherNumberTo: 17,
+            receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
+            currencyIso: 'ARS',
+            currencyRate: 1,
+            issueDate: '2026-08-05',
+            lines: [],
+            ...overrides,
+        };
+    }
+
+    it('rejects an invoice with neither lines nor totals, without a round-trip to the authority', async () => {
+        // `@ArrayMinSize(1)` used to catch this as a side effect; once an empty `lines` became legitimate it
+        // stopped being caught anywhere, and an ImpTotal of 0 went out to ARCA to be rejected there.
+        const errors = await validate(plainToInstance(NeutralInvoiceDto, base()));
+        expect(errors.map((e) => e.property)).toContain('lines');
+    });
+
+    it('rejects an invoice whose only amounts are zeroes', async () => {
+        const errors = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                base({
+                    lines: [{netAmount: 0, taxRatePercent: 21, taxAmount: 0}],
+                    totals: {untaxed: 0, exempt: 0, perceptions: 0},
+                }),
+            ),
+        );
+        expect(errors.map((e) => e.property)).toContain('lines');
+    });
+
+    it.each([
+        ['taxed lines alone', {lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}]}],
+        ['header totals alone', {totals: {untaxed: 23564.5}}],
+        ['a zero-rated declared base', {lines: [{netAmount: 100, taxRatePercent: 0, taxAmount: 0}]}],
+        ['perceptions alone', {totals: {perceptions: 871.29}}],
+    ])('accepts an invoice carrying %s', async (_name, overrides) => {
+        const errors = await validate(plainToInstance(NeutralInvoiceDto, base(overrides)));
+        expect(errors).toHaveLength(0);
+    });
+});
+
+/**
+ * Padrón lookups. These never carry an issuer: the provider looks up under this service's OWN delegated
+ * identity, so what the tests pin is (a) that the ticket is resolved delegated, for our delegate CUIT and
+ * the right padrón service, and (b) that the identification type — not a wire flag — picks the service.
+ */
+describe('ArcaProvider.lookupTaxpayers', () => {
+    /** A delegate store with our certificate configured for `testing` only. */
+    function delegateStore(configured = true): DelegateCredentialStore {
+        return {
+            get: (environment: string) =>
+                configured && environment === 'testing'
+                    ? {certPem: 'cert', keyPem: 'key', delegateCuit: DELEGATE_CUIT}
+                    : undefined,
+        } as unknown as DelegateCredentialStore;
+    }
+
+    function provider(configured = true) {
+        return new ArcaProvider(delegateStore(configured));
+    }
+
+    function registration(taxId: string): TaxpayerData {
+        return {
+            detail: 'REGISTRATION',
+            taxId,
+            taxIdType: 'CUIT',
+            personType: 'INDIVIDUAL',
+            name: 'PEREZ JUAN',
+            registrationStatus: 'ACTIVE',
+            addresses: [],
+            activities: [],
+            taxes: [],
+            providerMetadata: {service: CONSTANCIA_SERVICE},
+        };
+    }
+
+    function identity(taxId: string): TaxpayerData {
+        return {
+            detail: 'IDENTITY',
+            taxId,
+            documentNumber: '11709676',
+            addresses: [],
+            activities: [],
+            providerMetadata: {service: A13_SERVICE},
+        };
+    }
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 't', sign: 's', cuit: Number(DELEGATE_CUIT)});
+    });
+
+    it('routes a CUIT to the constancia service and signs with the delegate identity', async () => {
+        constanciaGetTaxpayer.mockResolvedValue(registration('20111111112'));
+
+        const result = await provider().lookupTaxpayers('testing', 80, '20111111112');
+
+        expect(result).toEqual({
+            entityCode: 'ARCA',
+            detail: 'REGISTRATION',
+            taxpayers: [expect.objectContaining({taxId: '20111111112', taxes: []})],
+        });
+        expect(constanciaGetTaxpayer).toHaveBeenCalledWith(expect.anything(), 20111111112);
+        // Auth.Cuit is OUR delegate CUIT — padrón asks only that cuitRepresentada be in the token's
+        // relations, so the service acts as itself rather than in representación of anyone.
+        expect(resolve).toHaveBeenCalledWith(
+            'ARCA',
+            DELEGATE_CUIT,
+            CONSTANCIA_SERVICE,
+            'testing',
+            undefined,
+            true,
+        );
+    });
+
+    it.each([
+        [86, 'CUIL'],
+        [87, 'CDI'],
+    ])('routes %s (%s) to the constancia service too', async (code) => {
+        constanciaGetTaxpayer.mockResolvedValue(registration('20111111112'));
+
+        await provider().lookupTaxpayers('testing', code, '20111111112');
+
+        expect(constanciaGetTaxpayer).toHaveBeenCalled();
+        expect(getIdPersonaList).not.toHaveBeenCalled();
+    });
+
+    it('resolves a DNI to every clave and returns one entry per match, on a single ticket', async () => {
+        getIdPersonaList.mockResolvedValue(['23117096769', '27117096764']);
+        identityGetTaxpayer.mockImplementation((_auth, id) => Promise.resolve(identity(String(id))));
+
+        const result = await provider().lookupTaxpayers('testing', 96, '11709676');
+
+        expect(result.detail).toBe('IDENTITY');
+        expect(result.taxpayers.map((t) => t.taxId)).toEqual(['23117096769', '27117096764']);
+        expect(getIdPersonaList).toHaveBeenCalledWith(expect.anything(), 11709676);
+        // One A13 ticket serves the search and both follow-up reads.
+        expect(resolve).toHaveBeenCalledTimes(1);
+        expect(resolve).toHaveBeenCalledWith('ARCA', DELEGATE_CUIT, A13_SERVICE, 'testing', undefined, true);
+    });
+
+    it('keeps the matches it can read when one clave turns out to be unreadable', async () => {
+        getIdPersonaList.mockResolvedValue(['23117096769', '27117096764']);
+        identityGetTaxpayer.mockImplementation((_auth, id) =>
+            id === 23117096769
+                ? Promise.reject(new ArcaTaxpayerNotFoundError('23117096769'))
+                : Promise.resolve(identity(String(id))),
+        );
+
+        const result = await provider().lookupTaxpayers('testing', 96, '11709676');
+
+        expect(result.taxpayers.map((t) => t.taxId)).toEqual(['27117096764']);
+    });
+
+    it('reports a document that matches no clave as a not-found, never an empty list', async () => {
+        getIdPersonaList.mockResolvedValue([]);
+
+        await expect(provider().lookupTaxpayers('testing', 96, '11709676')).rejects.toBeInstanceOf(
+            TaxpayerNotFoundError,
+        );
+    });
+
+    it('reports every clave being unreadable as a not-found', async () => {
+        getIdPersonaList.mockResolvedValue(['23117096769']);
+        identityGetTaxpayer.mockRejectedValue(new ArcaTaxpayerNotFoundError('23117096769'));
+
+        await expect(provider().lookupTaxpayers('testing', 96, '11709676')).rejects.toBeInstanceOf(
+            TaxpayerNotFoundError,
+        );
+    });
+
+    it("translates the SDK's not-found into the neutral one, carrying the caller's identification pair", async () => {
+        constanciaGetTaxpayer.mockRejectedValue(
+            new ArcaTaxpayerNotFoundError('20111111112', 'No existe persona con ese Id'),
+        );
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject({
+            name: 'TaxpayerNotFoundError',
+            entityCode: 'ARCA',
+            identificationTypeCode: 80,
+            identificationNumber: '20111111112',
+            authorityMessage: expect.stringContaining('No existe persona'),
+        });
+    });
+
+    it('refuses an identification type no padrón service can answer for, before any login', async () => {
+        await expect(provider().lookupTaxpayers('testing', 94, 'AAB123456')).rejects.toMatchObject({
+            name: 'ArcaValidationError',
+            code: 'UNSUPPORTED_IDENTIFICATION_TYPE',
+        });
+        expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('refuses an unknown identification type with the shared UNKNOWN_CODE reason', async () => {
+        await expect(provider().lookupTaxpayers('testing', 1234, '20111111112')).rejects.toMatchObject({
+            name: 'ArcaValidationError',
+            code: 'UNKNOWN_CODE',
+        });
+    });
+
+    it('rejects a non-numeric identification number before any login', async () => {
+        await expect(provider().lookupTaxpayers('testing', 80, '20-11111111-2')).rejects.toBeInstanceOf(
+            ArcaValidationError,
+        );
+        expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('reports a certificate not enrolled in the padrón service as a misconfiguration, not a 502', async () => {
+        // WSAA's coe.notAuthorized on this path is permanent and ours to fix (adherir the service to our
+        // certificate); surfacing the raw transport error would tell core to retry something retrying
+        // cannot fix. Verified against homologación 2026-08-21.
+        resolve.mockRejectedValue(
+            new ArcaSoapError('SOAP HTTP 500: <faultstring>Computador no autorizado a acceder al servicio</faultstring>'),
+        );
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject({
+            name: 'DelegationNotConfiguredError',
+            reason: expect.stringContaining('ws_sr_constancia_inscripcion'),
+        });
+    });
+
+    it('reports a missing delegate certificate as a server misconfiguration', async () => {
+        await expect(provider(false).lookupTaxpayers('testing', 80, '20111111112')).rejects.toBeInstanceOf(
+            DelegationNotConfiguredError,
+        );
+        expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('evicts the delegate ticket when ARCA rejects it, so the next lookup re-mints', async () => {
+        // One delegate ticket serves every lookup, so a ticket ARCA has started rejecting would otherwise
+        // fail all of them until local expiry. The invoicing path's classifier cannot do this here: it keys
+        // on ArcaServiceError (WSFEv1's in-payload `Errors`), which the padrón services never produce.
+        constanciaGetTaxpayer.mockRejectedValue(new ArcaSoapError('No autorizado, par token/sign invalido.'));
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toBeInstanceOf(
+            ArcaAuthError,
+        );
+        expect(invalidateDelegated).toHaveBeenCalledWith('ARCA', 'testing', CONSTANCIA_SERVICE);
+    });
+
+    it('evicts on the A13 leg too, keyed on the A13 ticket rather than the constancia one', async () => {
+        getIdPersonaList.mockRejectedValue(new ArcaSoapError('El ticket de acceso se encuentra vencido'));
+
+        await expect(provider().lookupTaxpayers('testing', 96, '11709676')).rejects.toBeInstanceOf(ArcaAuthError);
+        expect(invalidateDelegated).toHaveBeenCalledWith('ARCA', 'testing', A13_SERVICE);
+    });
+
+    it('keeps a valid ticket cached when the refusal is about enrolment, not the ticket', async () => {
+        // ARCA will not re-issue a ticket while a prior one lives, so evicting a GOOD ticket for a condition
+        // re-minting cannot fix would break every lookup for ~12h to no purpose.
+        const thrown = new ArcaSoapError('Computador no autorizado a acceder al servicio');
+        constanciaGetTaxpayer.mockRejectedValue(thrown);
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toBe(thrown);
+        expect(invalidateDelegated).not.toHaveBeenCalled();
+    });
+
+    it('never answers a lookup with a delegation error — it represents nobody', async () => {
+        // `Auth.Cuit` is our own delegate CUIT, so a 403 here would name the same CUIT as delegate AND issuer
+        // and ask the caller to grant itself a delegation. CONTRACT §10 promises this endpoint never does.
+        constanciaGetTaxpayer.mockRejectedValue(
+            new ArcaServiceError('ARCA rejected the request', [
+                {code: '600', message: 'Usuario no autorizado a realizar esta operación'},
+            ]),
+        );
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.not.toBeInstanceOf(
+            DelegationNotAuthorizedError,
+        );
+        expect(invalidateDelegated).not.toHaveBeenCalled();
     });
 });
