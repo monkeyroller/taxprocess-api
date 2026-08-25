@@ -1,3 +1,7 @@
+// Type-only: the enum is used here purely to constrain the address scheme fields, so nothing is imported
+// at runtime and `provider.ts` importing these DTOs back stays a compile-time-only relationship.
+import type {AddressCodeScheme} from '../../providers/provider.js';
+
 /** Neutral authorization status — country-agnostic. AR `Resultado` A/P/R maps onto these. */
 export type NeutralAuthorizationStatus = 'AUTHORIZED' | 'PARTIAL' | 'REJECTED';
 
@@ -89,15 +93,60 @@ export type TaxpayerPersonType = 'INDIVIDUAL' | 'LEGAL_ENTITY';
 
 export type TaxpayerRegistrationStatus = 'ACTIVE' | 'INACTIVE';
 
-/** A declared address. `kind`/`status` are the authority's own wording (AR: tipo/estado de domicilio). */
+/**
+ * A declared address. `kind`/`status` are the authority's own wording (AR: tipo/estado de domicilio).
+ *
+ * Every geographic level reads the same way — **a name from the authority, a code, and the standard that
+ * code belongs to**:
+ *
+ * | level | authority's name | code | standard |
+ * | --- | --- | --- | --- |
+ * | country | — | `countryCode` | `countryCodeScheme` |
+ * | region | `region` | `regionCode` | `regionCodeScheme` |
+ * | city | `city` | `cityCode` | `cityCodeScheme` |
+ *
+ * **Resolve a level by matching the pair, not the code alone.** A code means nothing without the scheme
+ * naming the catalog it was drawn from — `"AR"` is an ISO 3166-1 alpha-2 country here, but the same two
+ * letters index something else in another coding system. Scheme values come from a closed vocabulary
+ * (`AddressCodeScheme`) precisely so a caller can key on them.
+ *
+ * A scheme is present **exactly** when its code is, never alone. Each pair follows the absence rule
+ * independently, so a partially-coded address is normal rather than a fault: read the codes when present,
+ * and fall back to the authority's own name when a level did not resolve. The authority's names are also
+ * the only thing left for a place its national catalog does not code at all.
+ */
 export class TaxpayerAddressDto {
     street?: string;
-    city?: string;
     postalCode?: string;
-    /** Province/state name (AR: descripcionProvincia). */
+
+    /** Locality name as the authority holds it, free text (AR: localidad). */
+    city?: string;
+    /** Province/state name as the authority holds it (AR: descripcionProvincia). */
     region?: string;
-    /** Province/state code (AR: idProvincia). */
+
+    /** Country code (AR: `"AR"`) — every address an ARCA registry holds is Argentine. */
+    countryCode?: string;
+    countryCodeScheme?: AddressCodeScheme;
+
+    /**
+     * Province/state code (AR: `"AR-X"` for Córdoba). Resolved by the provider from whatever the authority
+     * states internally; the authority's own catalog id is **not** on the wire, since it is meaningless to
+     * anyone but that authority (CONTRACT §9).
+     */
     regionCode?: string;
+    regionCodeScheme?: AddressCodeScheme;
+
+    /**
+     * The locality as a code (AR: INDEC's 8-digit localidad censal code — provincia 2 + departamento 3 +
+     * localidad 3 — e.g. `"14014010"` for the city of Córdoba).
+     *
+     * Emitted only where the locality resolves unambiguously. It is **absent, with no substitute**, when
+     * the authority's free-text locality names a place the national catalog does not code — for AR, most
+     * notably a *barrio* of an interior city. `city` still carries the authority's text in that case.
+     */
+    cityCode?: string;
+    cityCodeScheme?: AddressCodeScheme;
+
     kind?: string;
     status?: string;
 }
@@ -140,6 +189,19 @@ export class TaxpayerDto {
     /** Kind of tax identifier the authority holds (AR: tipoClave — `"CUIT"`, `"CUIL"`, `"CDI"`). */
     taxIdType?: string;
 
+    /**
+     * The same identification pair a lookup request and an invoice receiver carry, echoed so each row is
+     * self-describing. This matters on a document lookup: one DNI commonly matches several taxpayers, and
+     * each is keyed by a **different** clave than the one searched by, so a customer built from a row must
+     * be identified by the row's own id rather than by the document the operator typed.
+     *
+     * `identificationNumber` repeats `taxId` and is always present. `identificationTypeCode` is the
+     * canonical code behind `taxIdType` (AR: 80 CUIT / 86 CUIL / 87 CDI) and is omitted when the authority
+     * did not state a kind — the pair never asserts a type the registry did not report.
+     */
+    identificationTypeCode?: number;
+    identificationNumber?: string;
+
     personType?: TaxpayerPersonType;
 
     /** Legal name for an entity, full name for an individual. */
@@ -178,6 +240,20 @@ export class TaxpayerDto {
 
     /** Small-taxpayer regime category (AR: categoría de monotributo). `REGISTRATION` results only. */
     simplifiedRegimeCategory?: string;
+
+    /**
+     * The taxpayer's VAT/fiscal condition, in the **same canonical code space** as
+     * `invoice.receiver.fiscalConditionCode` (AR: RG 5616 — 1 Responsable Inscripto, 4 Sujeto Exento,
+     * 6 Monotributo, 15 IVA no alcanzado) — so the condition a lookup reports is the one that will later
+     * ride the invoice for that customer.
+     *
+     * Derived by the provider from the registry's own tax vocabulary, and **omitted whenever the registry
+     * gives no basis to determine one**: on every `IDENTITY` result (which reports no taxes at all), for a
+     * taxpayer with no VAT-relevant registration, and where the registrations on file contradict each
+     * other. Absence means "not reported", never "Consumidor Final" — a caller should let the user choose
+     * rather than default.
+     */
+    fiscalConditionCode?: number;
 
     /**
      * Entity-specific extras with no cross-country meaning, passed through opaquely. **Always present**

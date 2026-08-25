@@ -179,6 +179,32 @@ export function isNonVatDiscriminating(cbteTipo: number): boolean {
 }
 
 /**
+ * ARCA's `tipoClave` wording → the canonical `identificationTypeCode`, so a taxpayer row can say which
+ * kind of identifier it is keyed by (core's CONTRACT-REQUESTS ask 5). This runs the **opposite** direction
+ * from {@link toDocTipo}: that one validates a code a caller sent us, this one interprets a string the
+ * registry sent back.
+ *
+ * It therefore never throws. An unrecognized or missing `tipoClave` yields `undefined` and the key is
+ * omitted — the row keeps its `identificationNumber`, and claiming a type ARCA did not state would be
+ * worse than leaving core to its existing fallback.
+ */
+const IDENTIFICATION_TYPE_BY_CLAVE_KIND: ReadonlyMap<string, TaxProcessIdentificationTypeCode> = new Map([
+    ['CUIT', TaxProcessIdentificationTypeCode.CUIT],
+    ['CUIL', TaxProcessIdentificationTypeCode.CUIL],
+    ['CDI', TaxProcessIdentificationTypeCode.CDI],
+]);
+
+/** The canonical identification type for an ARCA `tipoClave` (`"CUIT"`/`"CUIL"`/`"CDI"`), if it names one. */
+export function identificationTypeForClaveKind(
+    claveKind: string | undefined,
+): TaxProcessIdentificationTypeCode | undefined {
+    if (claveKind === undefined) {
+        return undefined;
+    }
+    return IDENTIFICATION_TYPE_BY_CLAVE_KIND.get(claveKind.trim().toUpperCase());
+}
+
+/**
  * Routes a canonical `identificationTypeCode` to the ARCA padrón service that can answer for it — the
  * padrón analogue of the code translations above, and the reason `/taxpayers/lookup` needs no explicit
  * "which service" knob on the wire.

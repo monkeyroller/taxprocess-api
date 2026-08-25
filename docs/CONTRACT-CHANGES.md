@@ -6,6 +6,88 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-08-25 — Taxpayer lookup: coded addresses, a fiscal condition, self-describing rows
+
+Branch `feature/padron`. Answers all five asks in [CONTRACT-REQUESTS.md](CONTRACT-REQUESTS.md) 2026-08-25.
+
+> ### ⚠️ One breaking change, and it is a silent one
+>
+> **`address.regionCode` has changed meaning.** It used to carry ARCA's own `idProvincia` (`"3"` = Córdoba);
+> it now carries the ISO 3166-2 subdivision code (`"AR-X"`). Same key, same JSON type, no error anywhere on
+> the wire — a reader that has not adapted gets a plausible-looking string that means something else.
+>
+> **Core action: required.** Read `regionCode` as ISO 3166-2, paired with `regionCodeScheme`, and join it
+> onto `common.state.iso_code`. ARCA's `idProvincia` is **gone from the wire** with nothing replacing it —
+> your own request says you could never interpret it, and §9 keeps that kind of authority-internal id inside
+> the provider. `region` (the province *name*) remains as the fallback when the code does not resolve.
+
+Everything else is new and optional. `region`, `city` and `taxIdType` are untouched, and a lookup that
+populated nothing new returns what it did yesterday.
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| **`address.regionCode` now ISO 3166-2** (`"AR-X"`), was ARCA's `idProvincia`. Paired with `regionCodeScheme`. | §3 addresses | **Required** — see the box above. |
+| `address.countryCode` + `countryCodeScheme` — `"AR"` / `"ISO-3166-1-ALPHA-2"` on every ARCA address. | §3 addresses | Optional. Stop inferring the country from `integration_entity.country_id`; read it. |
+| `address.cityCode` + `cityCodeScheme` — the locality as an INDEC 8-digit code / `"INDEC"`. | §3 addresses | Optional, and **you cannot consume it yet** — `common.city` has no INDEC column. The code is on the wire now so the backfill has something to build against. |
+| `TaxpayerDto.fiscalConditionCode` — the VAT condition, in the **same code space as `invoice.receiver.fiscalConditionCode`**. | §3 taxpayers | Optional. Narrow the tenant `contributor_type` candidates by it; preselect where exactly one matches. |
+| `TaxpayerDto.identificationTypeCode` / `identificationNumber` — the row's own identification pair. | §3 taxpayers | Optional. Replaces mapping `taxIdType` back to a code, and the fallback to the requested type. |
+
+### Match a level on the pair, not the code
+
+Every coded value on an address now travels with the standard it belongs to, and **resolution is a match on
+`(code, codeScheme)`** — a code alone does not identify a catalog. Read the level as: the authority's name
+(`region`, `city`), the code, and the scheme.
+
+The scheme values are a **closed vocabulary** — `ISO-3166-1-ALPHA-2`, `ISO-3166-2`, `INDEC` — now specified
+in CONTRACT §5. They are stable, unique across coding systems, and key-safe (uppercase, digits, hyphens; no
+spaces, no case variation), because you are storing and matching on them. **Seed them as constants rather
+than retyping them**: a scheme that differs by a space or a capital raises nothing at all, it just matches no
+row and leaves the field null. Treat an unrecognized scheme as "cannot resolve this level", not as an error,
+and a future entity's catalog (`IBGE`, `INSEE`) will not break you.
+
+If you built against an earlier build of this branch: `countryIso` and `regionIso` are gone. They never
+shipped outside `feature/padron` — they baked the standard into the key name, which no non-ISO country could
+ever answer, so they were replaced by the uniform pair before release rather than removed from anything live.
+
+### Read these three limits before building against the new keys
+
+**`cityCode` does not cover barrios of interior cities.** ARCA regularly reports a *barrio* as the locality —
+`BARRIO YAPEYU` for a real Córdoba fiscal address — and the national catalogs (INDEC localidades censales
+plus BAHRA asentamientos, vendored in `src/providers/arca/data/`) model settlements, not neighbourhoods.
+Those addresses arrive with a `regionCode` and **no** `cityCode`, keeping only `city` as the authority's free
+text. CABA is the exception: its 48 barrios are in
+the catalog and all resolve to the single CABA locality, so a `PALERMO` address does get a code. Closing the
+gap for the rest needs a postal-code index and there is no openly-licensed source for one — if the miss rate
+turns out to matter in practice, that is the next conversation, not a silent fix.
+
+**Resolution never guesses.** A locality is matched exactly, after case/accent/punctuation folding, scoped to
+the province — which is what keeps `MERLO` in Buenos Aires apart from `MERLO` in San Luis. Anything the
+catalog gives two codes for within one province resolves to nothing. There is no fuzzy or nearest-match
+fallback anywhere, by design: a code that puts a customer in the wrong city is worse for your users than an
+absent one. The `BARRIO`/`B°` prefix is read as part of that rule rather than as noise: it says the text
+names a neighbourhood, so outside CABA the address resolves to no code at all. Dropping the word instead
+would match the *locality* of the same name, and those exist — Córdoba capital has a Barrio General Paz and
+Córdoba province a localidad General Paz, two different places.
+
+**`fiscalConditionCode` is absent more often than you might expect, and absence is never Consumidor Final.**
+It is emitted only on positive evidence: an *active* IVA, monotributo, exento or no-alcanzado registration.
+A monotributo category, which ARCA sometimes reports without the impuesto, is secondary evidence — read only
+when no active impuesto names a condition, and never over an impuesto ARCA has since de-registered, since
+the category is a historical attribute that carries no state of its own. It is **omitted** on every
+`IDENTITY` result (no taxes are reported at all), for a taxpayer with no VAT-relevant registration, for a
+de-registered one, and where the registrations on file contradict each other. Treat a missing key as "not
+reported" and let the user choose — do not default it.
+
+### Still blocked on the same deployment prerequisite
+
+Every one of these was verified against recorded padrón responses, not live ones. The delegate certificate
+still has to be adhered to `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` in WSASS (homologación) or
+Administrador de Relaciones (production) before any lookup returns something other than
+`500 DELEGATION_NOT_CONFIGURED` — see the 2026-08-21 entry below. **Core action: none** — it is a deployment
+task on this service.
+
+---
+
 ## 2026-08-21 — `invoice.lines` may be empty, but an invoice must still carry an amount
 
 Branch `feature/padron`, alongside the letter-C fix below. Not breaking: every invoice core sends today keeps

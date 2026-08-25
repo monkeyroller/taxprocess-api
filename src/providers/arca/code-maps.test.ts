@@ -1,5 +1,11 @@
 import {ArcaValidationError} from './sdk/index.js';
-import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo, toPadronService} from './code-maps.js';
+import {
+    identificationTypeForClaveKind,
+    toCbteTipo,
+    toCondicionIvaReceptorId,
+    toDocTipo,
+    toPadronService,
+} from './code-maps.js';
 
 describe('code-maps (canonical code → ARCA code)', () => {
     describe('toCbteTipo (documentTypeCode → CbteTipo)', () => {
@@ -78,6 +84,26 @@ describe('code-maps (canonical code → ARCA code)', () => {
             } catch (err) {
                 expect((err as {code?: string}).code).toBe('UNKNOWN_CODE');
             }
+        });
+    });
+
+    describe('identificationTypeForClaveKind (tipoClave → identificationTypeCode)', () => {
+        it('maps the three clave kinds ARCA reports', () => {
+            expect(identificationTypeForClaveKind('CUIT')).toBe(80);
+            expect(identificationTypeForClaveKind('CUIL')).toBe(86);
+            expect(identificationTypeForClaveKind('CDI')).toBe(87);
+        });
+
+        it('tolerates the spacing and casing of a free-text field', () => {
+            expect(identificationTypeForClaveKind(' cuit ')).toBe(80);
+        });
+
+        it('reports nothing instead of throwing — this reads registry data, not caller input', () => {
+            // The mirror of toDocTipo: an unknown code from a CALLER is their error, but an unexpected
+            // string from ARCA must not fail a lookup that otherwise succeeded.
+            expect(identificationTypeForClaveKind(undefined)).toBeUndefined();
+            expect(identificationTypeForClaveKind('')).toBeUndefined();
+            expect(identificationTypeForClaveKind('DNI')).toBeUndefined();
         });
     });
 

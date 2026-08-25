@@ -22,6 +22,34 @@ export type GenericEnvironment = 'production' | 'testing';
 export const GENERIC_ENVIRONMENTS = ['production', 'testing'] as const;
 
 /**
+ * The coding systems an address on a neutral result may name — a **closed vocabulary shared by every
+ * provider**, which is why it lives here and not inside one.
+ *
+ * A caller resolves an address level by matching the pair `(code, codeScheme)` against its own catalogs,
+ * so these values are join keys rather than labels. Three rules follow from that and none of them are
+ * cosmetic:
+ *
+ * - **Member values are the contract; member names are not** — the same rule the canonical code enums in
+ *   `code-maps.ts` state. Adding a member is additive; changing an existing value is breaking.
+ * - **Key-safe spelling** (`/^[A-Z0-9-]+$/`). A scheme that differed only by a space or a capital would
+ *   not raise an error anywhere — it would match no row, and the caller's field would land `null`, which
+ *   is precisely the outcome coding the address was meant to remove.
+ * - **A token names one specific catalog, never a role.** `ISO-3166-1-ALPHA-2` and `ISO-3166-2` are
+ *   separate members because ISO 3166-1 defines three codes for the same country (alpha-2 `AR`, alpha-3
+ *   `ARG`, numeric `032`) and because a shared `ISO` would make country and region collide under
+ *   pair-matching. By the same rule, a future provider registers `IBGE` or `INSEE` — not
+ *   `NATIONAL-STATISTICS`, which two countries could both claim.
+ */
+export enum AddressCodeScheme {
+    /** ISO 3166-1 alpha-2 country code (`"AR"`). The alpha-3 and numeric forms are a different scheme. */
+    ISO_3166_1_ALPHA_2 = 'ISO-3166-1-ALPHA-2',
+    /** ISO 3166-2 principal-subdivision code (`"AR-X"` — Córdoba). One code form, so no variant is named. */
+    ISO_3166_2 = 'ISO-3166-2',
+    /** INDEC's 8-digit localidad censal code (AR): provincia 2 + departamento 3 + localidad 3. */
+    INDEC = 'INDEC',
+}
+
+/**
  * Issuer credentials — the certificate + already-decrypted private key. Attached by core ONLY when it
  * re-sends after a `CREDENTIALS_REQUIRED`; held in memory only to mint a ticket, never persisted.
  */

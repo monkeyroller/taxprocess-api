@@ -1,3 +1,13 @@
+import {
+    AR_CITY_CODE_SCHEME,
+    AR_COUNTRY_CODE,
+    AR_COUNTRY_CODE_SCHEME,
+    AR_REGION_CODE_SCHEME,
+    provinceByArcaId,
+    resolveIndecLocality,
+} from './ar-geography.js';
+import {deriveFiscalConditionCode} from './ar-fiscal-condition.js';
+import {identificationTypeForClaveKind} from './code-maps.js';
 import type {PadronAddress, TaxpayerData} from './sdk/index.js';
 import type {
     TaxpayerActivityDto,
@@ -19,13 +29,33 @@ import type {
  * arrays, and `taxes` is present exactly when the answering registry can report taxes at all.
  */
 
+/**
+ * ARCA's address, with each geographic level carrying a code and the standard that code belongs to.
+ *
+ * **`regionCode` means two different things either side of this function**, which is the one line here
+ * worth reading twice: on the SDK's `PadronAddress` it is ARCA's own `idProvincia` (`"3"` = Córdoba), and
+ * on the wire it is the ISO 3166-2 subdivision (`"AR-X"`). This is a translation, not a passthrough —
+ * ARCA's catalog id deliberately never reaches a caller (CONTRACT §9), so `province.iso` is what goes out.
+ *
+ * ARCA's `region`/`city` names DO travel, as the fallback for a level that did not resolve. Each scheme is
+ * set only alongside its own resolved code, never on its own: a scheme naming a code that is not there is
+ * noise a caller would have to defend against.
+ */
 function toNeutralAddress(address: PadronAddress): TaxpayerAddressDto {
+    const province = provinceByArcaId(address.regionCode);
+    const cityCode = resolveIndecLocality(province, address.city);
+
     return {
         street: address.street,
-        city: address.city,
         postalCode: address.postalCode,
+        city: address.city,
         region: address.region,
-        regionCode: address.regionCode,
+        countryCode: AR_COUNTRY_CODE,
+        countryCodeScheme: AR_COUNTRY_CODE_SCHEME,
+        regionCode: province?.iso,
+        regionCodeScheme: province === undefined ? undefined : AR_REGION_CODE_SCHEME,
+        cityCode,
+        cityCodeScheme: cityCode === undefined ? undefined : AR_CITY_CODE_SCHEME,
         kind: address.kind,
         status: address.status,
     };
@@ -49,6 +79,10 @@ export function toNeutralTaxpayer(data: TaxpayerData): TaxpayerDto {
     return {
         taxId: data.taxId,
         taxIdType: data.taxIdType,
+        // The row's own identification pair. The number always mirrors `taxId`; the type is omitted when
+        // ARCA reported no `tipoClave`, so the pair never names a kind the registry did not state.
+        identificationTypeCode: identificationTypeForClaveKind(data.taxIdType),
+        identificationNumber: data.taxId,
         personType: data.personType,
         name: data.name,
         firstName: data.firstName,
@@ -66,6 +100,7 @@ export function toNeutralTaxpayer(data: TaxpayerData): TaxpayerDto {
         activities,
         taxes,
         simplifiedRegimeCategory: data.simplifiedRegimeCategory,
+        fiscalConditionCode: deriveFiscalConditionCode(data),
         providerMetadata: data.providerMetadata,
     };
 }

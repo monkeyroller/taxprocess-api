@@ -350,11 +350,14 @@ it, — = never present for that detail.
 | field | `REGISTRATION` | `IDENTITY` | notes |
 | --- | :---: | :---: | --- |
 | `taxId` | ✔ | ✔ | the taxpayer's tax id (AR: CUIT/CUIL/CDI) |
-| `addresses[]` | ✔ | ✔ | `{street, city, postalCode, region, regionCode, kind, status}` |
+| `identificationNumber` | ✔ | ✔ | repeats `taxId`, so each row states the id it is keyed by |
+| `addresses[]` | ✔ | ✔ | see the address shape below |
 | `activities[]` | ✔ | ✔ | `{code, description, period, primary}`; `period` is an ISO year-month (`"2014-09"`) |
 | `providerMetadata` | ✔ | ✔ | entity-specific extras, opaque to core; always an object |
 | `taxes[]` | ✔ | — | `{code, description, period, status, reason}` |
 | `simplifiedRegimeCategory` | ○ | — | small-taxpayer regime category (AR: monotributo) |
+| `fiscalConditionCode` | ○ | — | the taxpayer's VAT condition, **in the same code space as `invoice.receiver.fiscalConditionCode`** (§5) |
+| `identificationTypeCode` | ○ | ○ | canonical code behind `taxIdType` (AR: 80 CUIT / 86 CUIL / 87 CDI) |
 | `taxIdType` | ○ | ○ | AR: `"CUIT"` / `"CUIL"` / `"CDI"` |
 | `personType` | ○ | ○ | `"INDIVIDUAL"` \| `"LEGAL_ENTITY"` |
 | `name`, `firstName`, `lastName` | ○ | ○ | `name` is the legal name for an entity, the full name for a person |
@@ -369,6 +372,45 @@ it, — = never present for that detail.
 authority reports none, so "none registered" is distinguishable from "this detail cannot report it". That is
 why `taxes` is `[]` on a `REGISTRATION` result with no registered taxes, and **absent entirely** on every
 `IDENTITY` result. Given `detail`, the key set is fully predictable from the table above.
+
+#### The address shape
+
+Every geographic level reads the same way — **a name from the authority, a code, and the standard that code
+belongs to**:
+
+| level | authority's name | code | standard |
+| --- | --- | --- | --- |
+| country | — | `countryCode` | `countryCodeScheme` |
+| region | `region` | `regionCode` | `regionCodeScheme` |
+| city | `city` | `cityCode` | `cityCodeScheme` |
+
+Plus `street`, `postalCode`, and `kind`/`status` in the authority's own wording (AR: tipo/estado de
+domicilio). A Córdoba fiscal address:
+
+```jsonc
+{ "street": "SANTA FE 7516", "postalCode": "5000",
+  "region": "CORDOBA",   "city": "CORDOBA",
+  "countryCode": "AR",         "countryCodeScheme": "ISO-3166-1-ALPHA-2",
+  "regionCode":  "AR-X",       "regionCodeScheme":  "ISO-3166-2",
+  "cityCode":    "14014010",   "cityCodeScheme":    "INDEC",
+  "kind": "FISCAL" }
+```
+
+**Resolve a level by matching the pair `(code, codeScheme)`, not the code alone.** A code means nothing
+without the catalog it was drawn from — `"AR"` is an ISO 3166-1 alpha-2 country here, and the same two
+letters index something else in another coding system. Scheme values come from the closed vocabulary in §5,
+so they are safe to store and match on directly.
+
+The authority's own catalog ids are **not** on the wire — AR's `idProvincia` is meaningless outside ARCA (§9)
+and does not appear. `region` and `city` are the authority's *names*, and they are the fallback for a level
+that did not resolve.
+
+A scheme is present **exactly** when its code is, never alone. Each pair follows the absence rule
+independently, so a partially-coded address is normal rather than a fault — and one specific gap is worth
+planning for: **AR locality codes do not cover barrios of interior cities.** ARCA regularly reports one as
+the locality (`BARRIO YAPEYU` for a Córdoba address), the national catalog does not code neighbourhoods, and
+that address therefore arrives with a `regionCode` and no `cityCode`, keeping only `city` as free text. CABA
+is the exception — its barrios all resolve to the single CABA locality.
 
 `providerMetadata` is the escape hatch for data with no cross-country meaning; core should persist it opaquely
 and never branch on it. For ARCA it names the padrón service that answered and may carry `caracterizaciones`
@@ -447,6 +489,35 @@ where the three translations are the identity — canonical code == ARCA code).
 
 This service owns the canonical-code→code translation plus the mechanical mapping: ISO→`MonId`, tax%→id +
 subtotal grouping, perceptions→`Tributos`, date formatting/clamping, and the RG-4892 QR.
+
+### Address code schemes (a closed vocabulary this service returns)
+
+The other direction: on a taxpayer lookup, every coded value on an address is returned **with the standard it
+belongs to**, so a caller resolves the level by matching the pair `(code, codeScheme)` against its own
+catalogs. These are the only values that can appear in a `*CodeScheme` field, across every entity:
+
+| `codeScheme` | what the paired code is | example |
+| --- | --- | --- |
+| `ISO-3166-1-ALPHA-2` | country, ISO 3166-1 **alpha-2** | `"AR"` |
+| `ISO-3166-2` | principal subdivision, ISO 3166-2 | `"AR-X"` (Córdoba) |
+| `INDEC` | AR locality — INDEC localidad censal, 8 digits (provincia 2 + departamento 3 + localidad 3) | `"14014010"` |
+
+Three properties this contract guarantees, because a caller keys on these:
+
+- **Stable.** The strings are the contract; a value never changes meaning or spelling. Adding a scheme (a new
+  country's national catalog — `IBGE`, `INSEE`) is additive; changing one is breaking and gets its own
+  CONTRACT-CHANGES entry.
+- **Unique.** No two coding systems share a token, so the pair alone identifies the catalog without the
+  caller needing to know which level it came from. This is why the two ISO forms are named separately rather
+  than both as `ISO`: 3166-1 defines three codes for the same country (alpha-2 `AR`, alpha-3 `ARG`, numeric
+  `032`), and a shared token would make country and region collide.
+- **Key-safe.** Uppercase, digits and hyphens only — no spaces, no case variation, nothing that differs
+  between two spellings of the same thing. A near-miss would not error anywhere; it would simply match no
+  row.
+
+Seed them as constants rather than retyping them, and treat an unrecognized scheme as "cannot resolve this
+level" rather than as a failure — that is exactly how a caller stays forward-compatible when a new entity
+lands.
 
 ---
 
@@ -550,6 +621,13 @@ WSAA/CMS signing, `homologacion`/`produccion`, the padrón service ids (`ws_sr_c
 `ws_sr_padron_a13`) and their `personaReturn`/`datosGenerales`/monotributo vocabulary — all inside
 `src/providers/arca/`. The neutral result already
 abstracts CAE → `authorizationCode`.
+
+Registry lookups add three of the same kind, and each one is why the corresponding neutral field exists:
+ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `ar-geography.ts`), the **free-text
+`localidad`** (resolved to an INDEC code against a vendored national catalog, same module), and the
+**`idImpuesto`** table — 30 IVA, 32 IVA exento, 20 monotributo — which is what `fiscalConditionCode` is
+derived from (`ar-fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
+table; that is this service's job, and the neutral field is the whole point of doing it here.
 
 ---
 
