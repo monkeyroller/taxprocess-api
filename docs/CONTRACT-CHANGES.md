@@ -6,6 +6,115 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-08-26 — The locality code now says which snapshot it came from
+
+Branch `feature/padron`. Answers both asks in [CONTRACT-REQUESTS.md](CONTRACT-REQUESTS.md) 2026-08-25
+(later). Additive on the wire; nothing breaks, and a reader that ignores the new key is correct today and
+stays correct.
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| `address.cityCodeSchemeVersion` — the ISO date the national catalog was read (`"2026-08-25"`). Present **exactly** when `cityCode` is, like the scheme. | §3 addresses, §5 | Optional. Read it when a code on a scheme you know matches no row: **same version as yours** ⇒ the gap is real, accept it; **newer than yours** ⇒ re-seed. |
+| The `INDEC` **code space is now a stated guarantee** — every code we emit is a localidad censal, never anything finer. | §5 | None. It writes down what you already depend on; see below. |
+| `identificationTypeCode` stays **○**, and §3 now says why. | §3 field table | None. Keep your `taxIdType` fallback — ✔ is not coming. |
+
+### Ask 6 — the snapshot, and the baseline it starts from
+
+Both repos vendor an independent snapshot of the same live dataset (georef-ar), so both can drift. The
+problem you described is real and it is specifically an *ambiguity*, not a missing feature: a code minted
+from a newer snapshot and a code inside the documented barrio gap arrive identically, and they need
+opposite responses. The version is what separates them, which is why it travels **on the address** rather
+than in prose — it is needed at the moment a code fails to resolve, not at integration time.
+
+The published baseline, now in §5:
+
+| | |
+| --- | --- |
+| Snapshot | `2026-08-25` |
+| Localidades censales / asentamientos read | 4027 / 14673 |
+| Distinct codes emittable | **4027** |
+
+Which matches your diff exactly, in both directions. So the two catalogs are known-identical as of
+`2026-08-25`, and any future mismatch is drift dated from there — your framing, and it is the right one.
+
+Two things worth knowing about the value. It is **the date the catalog was read, not a version georef
+publishes** — georef exposes no dataset version, so this is the honest strongest thing available; it is
+monotonic and comparable, which is all the drift question needs. And it is generated, not typed: the index
+generator stamps it into the vendored data, and the wire reads it from there, so it cannot survive a
+regeneration that changed the rows under it.
+
+**Only `INDEC` carries a version, and the ISO levels never will.** There is no snapshot behind them — the
+country is a constant and the 24 subdivisions are a fixed table (last changed in 1990). Do not wait for a
+`regionCodeSchemeVersion`.
+
+### The BAHRA projection is now contract, not an internal detail
+
+You flagged that core silently depends on our index projecting BAHRA asentamientos *up* to the containing
+localidad censal rather than emitting asentamiento codes — and you were right to, because it was documented
+only in a comment in the generated data file, where it read as ours to "improve". It is now a stated
+guarantee in §5: **every `INDEC` code we emit is a localidad censal**, and going finer is a breaking change
+with its own entry here.
+
+It is also enforced rather than promised. The index generator asserts that the distinct codes it emits equal
+the number of localidades censales it read, and the test suite asserts the same against what actually
+shipped. A future edit that indexed asentamiento or departamento ids fails the build instead of quietly
+emitting codes you would resolve none of.
+
+### Ask 7 — ○ is the truth, and §3 now says so
+
+Void as stated, and the field table says why so nobody wonders again. `identificationTypeCode` is derived
+from ARCA's `tipoClave`; that element is optional in the authority's schema, and the type is **not
+recoverable from the number** — CUIT, CUIL and CDI all draw from the same `20`/`23`/`24`/`27` prefixes, so
+the digits do not name their own kind. Every padrón response we have recorded does carry it, so in practice
+the key is present on both details; what we will not do is state a type ARCA did not, since a wrong type is
+worse for your draft than your existing fallback. Keep the fallback chain.
+
+### Your status update, noted
+
+`common.city` holding INDEC codes is recorded above: the 2026-08-25 `cityCode` row now carries a
+**superseded** note pointing here, so nobody reading the older entry is still told the field cannot be
+consumed. The row itself is left as written — it was true on the day, and this log is a record of what you
+were told, not a description of today.
+
+Also noted, and not acted on: we are **not** adding an endpoint that serves the catalog. Agreed on both the
+reason and the shape, and §5 now says so explicitly so it does not get proposed again.
+
+---
+
+## 2026-08-25 (later) — A clave lookup can now be answered by the second registry
+
+Branch `feature/padron`. A behaviour change on `POST /api/taxpayers/lookup`; no field, no shape and no
+code-space changes anywhere.
+
+**What changed.** A lookup by clave (`identificationTypeCode` 80 CUIT / 86 CUIL / 87 CDI) used to ask
+ARCA's *constancia* padrón and nothing else, so a clave that padrón does not hold came back
+`404 TAXPAYER_NOT_FOUND`. The two padrones are not the same population: the constancia knows only claves
+with an *inscripción*, while A13 knows every clave ARCA has issued — it is the superset. A clave lookup now
+falls back to A13 when the constancia has no such clave, and only a miss in **both** is a `404`.
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| A clave lookup may return `detail: "IDENTITY"` where it always returned `"REGISTRATION"`. | §3 lookup | **Recommended** — branch on `detail`, never on the identification type you sent. |
+| Fewer `404`s: a clave with no inscripción now resolves instead of coming back not-found. | §3 lookup | None. An identifier that used to `404` can now return `200`. |
+| A clave lookup can now report `DELEGATION_NOT_CONFIGURED` naming `ws_sr_padron_a13`. | §3 errors, §10 | None — ours to fix (the certificate's enrolment). |
+
+**What a fallback row looks like.** Exactly the `IDENTITY` column of §3's field table: no `taxes`, no
+`fiscalConditionCode`, no `simplifiedRegimeCategory`, and `documentType`, `documentNumber`, `birthDate`,
+`legalForm` present instead. Anything reasoning "this was a CUIT lookup, so it has taxes" will read
+`undefined` — the requested identification type never was a safe proxy for the key set, and now it visibly
+is not. `providerMetadata.service` names the padrón that answered, if you want it in a log.
+
+**One case that is deliberately not a `404`.** If the fallback cannot *reach* A13 at all (enrolment, token
+or transport), the lookup fails with that error rather than degrading to the constancia's not-found. With
+the superset unread the service does not know that nobody is registered, and a `404` would state something
+it cannot stand behind.
+
+**Not done, deliberately.** There is no fallback the other way: a clave the constancia holds is by
+definition in A13, so that lookup could only ever come back empty-handed. Document lookups (96 / 89 / 90)
+are unchanged — they already read A13.
+
+---
+
 ## 2026-08-25 — Taxpayer lookup: coded addresses, a fiscal condition, self-describing rows
 
 Branch `feature/padron`. Answers all five asks in [CONTRACT-REQUESTS.md](CONTRACT-REQUESTS.md) 2026-08-25.
@@ -28,7 +137,7 @@ populated nothing new returns what it did yesterday.
 | --- | --- | --- |
 | **`address.regionCode` now ISO 3166-2** (`"AR-X"`), was ARCA's `idProvincia`. Paired with `regionCodeScheme`. | §3 addresses | **Required** — see the box above. |
 | `address.countryCode` + `countryCodeScheme` — `"AR"` / `"ISO-3166-1-ALPHA-2"` on every ARCA address. | §3 addresses | Optional. Stop inferring the country from `integration_entity.country_id`; read it. |
-| `address.cityCode` + `cityCodeScheme` — the locality as an INDEC 8-digit code / `"INDEC"`. | §3 addresses | Optional, and **you cannot consume it yet** — `common.city` has no INDEC column. The code is on the wire now so the backfill has something to build against. |
+| `address.cityCode` + `cityCodeScheme` — the locality as an INDEC 8-digit code / `"INDEC"`. | §3 addresses | Optional, and **you cannot consume it yet** — `common.city` has no INDEC column. The code is on the wire now so the backfill has something to build against. **Superseded 2026-08-26:** that backfill landed the same day this was written; `cityCode` is consumed today. |
 | `TaxpayerDto.fiscalConditionCode` — the VAT condition, in the **same code space as `invoice.receiver.fiscalConditionCode`**. | §3 taxpayers | Optional. Narrow the tenant `contributor_type` candidates by it; preselect where exactly one matches. |
 | `TaxpayerDto.identificationTypeCode` / `identificationNumber` — the row's own identification pair. | §3 taxpayers | Optional. Replaces mapping `taxIdType` back to a code, and the fallback to the requested type. |
 

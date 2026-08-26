@@ -325,9 +325,17 @@ knob on the wire. For ARCA:
 
 | `identificationTypeCode` | what happens | resulting `detail` |
 | --- | --- | --- |
-| 80 CUIT, 86 CUIL, 87 CDI | the identifier **is** a clave — looked up directly | `REGISTRATION` |
+| 80 CUIT, 86 CUIL, 87 CDI | the identifier **is** a clave — looked up directly | `REGISTRATION`, or `IDENTITY` — see below |
 | 96 DNI, 89 LE, 90 LC | the document is resolved to the claves issued for it, then each is read | `IDENTITY` |
 | 91 CI extranjera, 94 pasaporte, 99 sin identificar | refused — no registry can answer for these | — |
+
+**A clave lookup can be answered by either registry, so `detail` is not implied by what you sent.** AR has
+two registries and they hold different populations: one knows only claves with an *inscripción* (registered
+taxes, a simplified-regime category), the other knows every clave the authority has issued — a superset. A
+clave is asked of the first, because it is the richer picture, and falls back to the second when the first
+has no such clave. So `detail` is `REGISTRATION` for a taxpayer with an inscripción and `IDENTITY` for a
+clave that exists without one, and a `404` means **both** registries missed. Read the key set off `detail`
+(the table below), never off the identification type in your request.
 
 Response:
 
@@ -357,7 +365,7 @@ it, — = never present for that detail.
 | `taxes[]` | ✔ | — | `{code, description, period, status, reason}` |
 | `simplifiedRegimeCategory` | ○ | — | small-taxpayer regime category (AR: monotributo) |
 | `fiscalConditionCode` | ○ | — | the taxpayer's VAT condition, **in the same code space as `invoice.receiver.fiscalConditionCode`** (§5) |
-| `identificationTypeCode` | ○ | ○ | canonical code behind `taxIdType` (AR: 80 CUIT / 86 CUIL / 87 CDI) |
+| `identificationTypeCode` | ○ | ○ | canonical code behind `taxIdType` (AR: 80 CUIT / 86 CUIL / 87 CDI). **○ is the truth, not a gap we intend to close** — see below |
 | `taxIdType` | ○ | ○ | AR: `"CUIT"` / `"CUIL"` / `"CDI"` |
 | `personType` | ○ | ○ | `"INDIVIDUAL"` \| `"LEGAL_ENTITY"` |
 | `name`, `firstName`, `lastName` | ○ | ○ | `name` is the legal name for an entity, the full name for a person |
@@ -366,6 +374,14 @@ it, — = never present for that detail.
 | `fiscalYearEndMonth`, `incorporationDate` | ○ | ○ | month 1–12; ISO date |
 | `documentType`, `documentNumber` | — | ○ | the identity document behind the clave |
 | `birthDate`, `registrationDate`, `legalForm` | — | ○ | ISO dates; `legalForm` is free text |
+
+**Why `identificationTypeCode` is ○ while `identificationNumber` is ✔.** The number repeats `taxId`, which
+the registry always states, so it costs nothing to guarantee. The *type* is the authority's own statement of
+what kind of clave it issued (AR: `tipoClave`), it is optional in the authority's schema, and it cannot be
+recovered from the number: in AR, CUIT, CUIL and CDI all draw from the same `20`/`23`/`24`/`27` prefixes, so
+the digits do not name their own kind. Every response recorded against the padrones so far carries it, so in
+practice the key is there — but this service will not state a type the authority did not, and inferring one
+would be worse than the caller's own fallback. Keep a fallback for it; ✔ is not coming.
 
 **Absence rule.** Optional scalars are **omitted, never `null`** — the same convention as `qr` /
 `dischargeDate` elsewhere in this contract. The arrays a detail covers are **always present**, `[]` when the
@@ -378,11 +394,11 @@ why `taxes` is `[]` on a `REGISTRATION` result with no registered taxes, and **a
 Every geographic level reads the same way — **a name from the authority, a code, and the standard that code
 belongs to**:
 
-| level | authority's name | code | standard |
-| --- | --- | --- | --- |
-| country | — | `countryCode` | `countryCodeScheme` |
-| region | `region` | `regionCode` | `regionCodeScheme` |
-| city | `city` | `cityCode` | `cityCodeScheme` |
+| level | authority's name | code | standard | catalog snapshot |
+| --- | --- | --- | --- | --- |
+| country | — | `countryCode` | `countryCodeScheme` | — |
+| region | `region` | `regionCode` | `regionCodeScheme` | — |
+| city | `city` | `cityCode` | `cityCodeScheme` | `cityCodeSchemeVersion` |
 
 Plus `street`, `postalCode`, and `kind`/`status` in the authority's own wording (AR: tipo/estado de
 domicilio). A Córdoba fiscal address:
@@ -393,6 +409,7 @@ domicilio). A Córdoba fiscal address:
   "countryCode": "AR",         "countryCodeScheme": "ISO-3166-1-ALPHA-2",
   "regionCode":  "AR-X",       "regionCodeScheme":  "ISO-3166-2",
   "cityCode":    "14014010",   "cityCodeScheme":    "INDEC",
+                               "cityCodeSchemeVersion": "2026-08-25",
   "kind": "FISCAL" }
 ```
 
@@ -412,16 +429,26 @@ the locality (`BARRIO YAPEYU` for a Córdoba address), the national catalog does
 that address therefore arrives with a `regionCode` and no `cityCode`, keeping only `city` as free text. CABA
 is the exception — its barrios all resolve to the single CABA locality.
 
+`cityCodeSchemeVersion` is on the same footing as the scheme rather than optional in its own right: it is
+present **exactly** when `cityCode` is, because what it dates is that code. It says which snapshot of the
+national catalog the code was drawn from, and it exists for one specific ambiguity — a caller resolving our
+codes against its own copy of the same *live* dataset gets nothing back both for a code minted from a newer
+snapshot than its own and for the barrio gap above, and those need opposite responses. See §5 for what the
+value is and how to read it. Only the city level carries one; the ISO levels have no snapshot behind them.
+
 `providerMetadata` is the escape hatch for data with no cross-country meaning; core should persist it opaquely
 and never branch on it. For ARCA it names the padrón service that answered and may carry `caracterizaciones`
 (including the 2026 *ganancias simplificada* flag), `esSucesion`, `deceasedDate`, `dependencia`, `regimenes`,
 `categoriasAutonomo`, and the authority's own per-block constancia errors.
 
-**Errors:** `404 TAXPAYER_NOT_FOUND` (nobody registered under the identifier), `400 ARCA_VALIDATION` with
-`details.code: "UNSUPPORTED_IDENTIFICATION_TYPE"` (an identification type no registry can answer for) or
-`"UNKNOWN_CODE"` / `"INVALID_ID"` (unknown canonical code / non-numeric identifier),
-`500 DELEGATION_NOT_CONFIGURED` (this service has no usable delegate certificate for the environment, **or it
-is not enrolled in the registry web service** — see §10).
+**Errors:** `404 TAXPAYER_NOT_FOUND` (nobody registered under the identifier, in any registry),
+`400 ARCA_VALIDATION` with `details.code: "UNSUPPORTED_IDENTIFICATION_TYPE"` (an identification type no
+registry can answer for) or `"UNKNOWN_CODE"` / `"INVALID_ID"` (unknown canonical code / non-numeric
+identifier), `500 DELEGATION_NOT_CONFIGURED` (this service has no usable delegate certificate for the
+environment, **or it is not enrolled in the registry web service** — see §10; a clave lookup can touch both
+AR registries, so both enrolments have to be in place). A fallback that cannot reach the second registry
+fails with that error rather than degrading to a `404`: with the superset unread, "nobody is registered" is
+not something this service can state.
 
 
 ---
@@ -500,7 +527,7 @@ catalogs. These are the only values that can appear in a `*CodeScheme` field, ac
 | --- | --- | --- |
 | `ISO-3166-1-ALPHA-2` | country, ISO 3166-1 **alpha-2** | `"AR"` |
 | `ISO-3166-2` | principal subdivision, ISO 3166-2 | `"AR-X"` (Córdoba) |
-| `INDEC` | AR locality — INDEC localidad censal, 8 digits (provincia 2 + departamento 3 + localidad 3) | `"14014010"` |
+| `INDEC` | AR locality — INDEC localidad censal, 8 digits (provincia 2 + departamento 3 + localidad 3). The one scheme whose catalog is vendored, so the one that states a snapshot — see below | `"14014010"` |
 
 Three properties this contract guarantees, because a caller keys on these:
 
@@ -518,6 +545,49 @@ Three properties this contract guarantees, because a caller keys on these:
 Seed them as constants rather than retyping them, and treat an unrecognized scheme as "cannot resolve this
 level" rather than as a failure — that is exactly how a caller stays forward-compatible when a new entity
 lands.
+
+#### The `INDEC` code space: localidades censales, and nothing finer
+
+**Every `INDEC` code this service emits is a *localidad censal*** — 8 digits, provincia 2 + departamento 3 +
+localidad 3. INDEC's geography has levels below that one and the resolver reads them: a rural entidad or
+paraje named in BAHRA is matched by name, then **projected up** to the localidad censal containing it, and
+the localidad's code is what goes on the wire. No asentamiento id, departamento id or barrio id is ever
+emitted.
+
+This is a **guarantee, not an implementation detail**, and it is stated here because a caller relies on it
+whether it knows or not: catalog the localidades-censales layer alone and every code we send resolves. A
+build-time assertion in the index generator holds us to it — the distinct codes it emits must equal the
+number of localidades censales it read, so a finer level cannot leak in silently. Emitting one anyway would
+be **breaking**, with its own CONTRACT-CHANGES entry, never an internal change: a caller would resolve none
+of it, and the failure would be indistinguishable from the barrio gap in §3.
+
+#### `cityCodeSchemeVersion` — which snapshot the code came from
+
+`INDEC` is the one scheme here with a version, because it is the one whose catalog this service **vendors a
+snapshot of**. The value is the ISO date that catalog was read:
+
+| | |
+| --- | --- |
+| Current snapshot | **`2026-08-25`** |
+| Source | georef-ar (`apis.datos.gob.ar/georef`), Ministerio del Interior |
+| Read from it | 4027 localidades censales, 14673 BAHRA asentamientos |
+| Emittable distinct codes | **4027** — the localidades censales, per the guarantee above |
+
+The dataset is live: INDEC adds localidades, so a caller resolving these codes against its own copy of the
+same source is holding a snapshot too, and the two can drift. **What the version is for is telling drift
+from a genuine gap.** Both arrive as a code that matches no row:
+
+- **Same version as your own snapshot** → the catalogs agree. The code names something your copy does not
+  hold either, i.e. the gap is real. Accept it and fall back to `city`.
+- **Version newer than your own** → re-seed your catalog. This is the case that is otherwise invisible.
+
+Read it, never match on it, and never reject a code for carrying a version you do not recognize. The ISO
+levels carry no version and never will: there is no snapshot behind them — the country is a constant, and
+the 24 AR subdivisions are a fixed table whose last change was Tierra del Fuego becoming a province in 1990.
+
+**Not offered, deliberately: an endpoint serving the catalog.** It would remove the drift by construction and
+it is the wrong shape — it makes a tax service a geography server. A caller carrying its own catalog is fine
+as long as it can date a mismatch, which is what the version is.
 
 ---
 
@@ -624,7 +694,8 @@ abstracts CAE → `authorizationCode`.
 
 Registry lookups add three of the same kind, and each one is why the corresponding neutral field exists:
 ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `ar-geography.ts`), the **free-text
-`localidad`** (resolved to an INDEC code against a vendored national catalog, same module), and the
+`localidad`** (resolved to an INDEC code against a vendored national catalog, same module — the catalog is
+internal, but *which snapshot of it* is published, §5), and the
 **`idImpuesto`** table — 30 IVA, 32 IVA exento, 20 monotributo — which is what `fiscalConditionCode` is
 derived from (`ar-fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
 table; that is this service's job, and the neutral field is the whole point of doing it here.

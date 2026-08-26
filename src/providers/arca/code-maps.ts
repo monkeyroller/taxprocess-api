@@ -209,9 +209,13 @@ export function identificationTypeForClaveKind(
  * padrón analogue of the code translations above, and the reason `/taxpayers/lookup` needs no explicit
  * "which service" knob on the wire.
  *
- * A **clave tributaria** (CUIT/CUIL/CDI) is looked up directly in the constancia service, which returns
- * the registration picture. An **identity document** (DNI/LE/LC) is not a clave at all, so it goes to
- * A13, the only padrón service that can resolve a document number to the claves issued for it.
+ * A **clave tributaria** (CUIT/CUIL/CDI) can be asked of a padrón as it stands, and goes to the constancia
+ * service, which returns the registration picture. What this returns is where a clave lookup *begins*, not
+ * which padrón ends up answering: the constancia holds only claves with an inscripción, so a miss there
+ * falls back to A13 (`ArcaProvider.claveFor`), and the reply can come back as either `detail`.
+ *
+ * An **identity document** (DNI/LE/LC) is not a clave at all, so it goes to A13, the only padrón service
+ * that can resolve a document number to the claves issued for it.
  *
  * Passport, foreign CI and "sin identificar" are refused: ARCA's `getIdPersonaListByDocumento` takes a
  * bare number with no document type, so there is no way to ask it about a passport — and code 99 names

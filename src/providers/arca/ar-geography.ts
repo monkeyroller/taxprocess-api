@@ -1,6 +1,10 @@
 import {AddressCodeScheme} from '../provider.js';
-import {INDEC_LOCALITY_ROWS} from './data/indec-localities.js';
-import {normalizeLocalityName, withoutPlaceKindPrefix} from './data/normalize-locality.js';
+import {INDEC_LOCALITY_ROWS, INDEC_SNAPSHOT} from './data/indec-localities.js';
+import {
+    expandAbbreviations,
+    normalizeLocalityName,
+    withoutPlaceKindPrefix,
+} from './data/normalize-locality.js';
 
 /**
  * Argentine geography codes for the neutral taxpayer address — the provider-side half of core's
@@ -31,6 +35,22 @@ export const AR_REGION_CODE_SCHEME = AddressCodeScheme.ISO_3166_2;
 
 /** ARCA answers the locality in INDEC's national coding, resolved from free text. */
 export const AR_CITY_CODE_SCHEME = AddressCodeScheme.INDEC;
+
+/**
+ * Which snapshot of the national catalog the locality code was drawn from, published on the wire beside it
+ * as `cityCodeSchemeVersion` (core's CONTRACT-REQUESTS ask 6).
+ *
+ * INDEC is the one scheme here that *has* a version, and the reason is that it is the one this service
+ * vendors a snapshot of. The dataset is live — INDEC adds localidades — and a caller resolving our codes
+ * against its own copy of it cannot otherwise tell a code minted from a newer snapshot (re-seed) from the
+ * documented barrio gap (accept and move on); both arrive as an unresolvable code. The ISO schemes carry no
+ * version because there is no snapshot behind them: the country is a constant and the 24 provinces are
+ * {@link AR_PROVINCES}, last changed when Tierra del Fuego became a province in 1990.
+ *
+ * Read from {@link INDEC_SNAPSHOT} rather than restated, so the version and the rows it describes are
+ * always the same generated artifact.
+ */
+export const AR_CITY_CODE_SCHEME_VERSION = INDEC_SNAPSHOT.date;
 
 /** One Argentine province in the three vocabularies this service has to bridge. */
 export interface ArProvince {
@@ -120,15 +140,43 @@ function record(index: Map<string, string | null>, key: string, code: string): v
     }
 }
 
+/**
+ * The extra spellings a catalog name is *also* filed under, so ARCA resolves it however it writes it:
+ *
+ *  - 187 catalog names genuinely begin with a place-kind word (`Barrio El Casal`), which ARCA may drop.
+ *  - 13 spell a word abbreviated (`Villa Gdor. Luis F. Etchevehere`, `9 de Julio (Est. Pueblo 9 de Julio)`),
+ *    which ARCA may write out. This is the mirror of the expansion done on ARCA's own text at lookup —
+ *    running it on both sides is what makes the two spellings interchangeable in either direction.
+ *
+ * Never includes the name as stated: that one goes straight into the index, and these must not compete
+ * with it.
+ */
+function aliasSpellingsOf(normalized: string): ReadonlyArray<string> {
+    const spellings: Array<string> = [];
+    const expanded = expandAbbreviations(normalized);
+    if (expanded !== undefined) {
+        spellings.push(expanded);
+    }
+    const stripped = withoutPlaceKindPrefix(normalized);
+    if (stripped !== undefined) {
+        spellings.push(stripped);
+        const strippedExpanded = expandAbbreviations(stripped);
+        if (strippedExpanded !== undefined) {
+            spellings.push(strippedExpanded);
+        }
+    }
+    return spellings;
+}
+
 function indexOfLocalities(): ReadonlyMap<string, string | null> {
     if (localityIndex !== undefined) {
         return localityIndex;
     }
     const index = new Map<string, string | null>();
-    // 187 catalog names genuinely begin with a place-kind word (`Barrio El Casal`). Each is indexed under
-    // the name as stated AND under its stripped form, so ARCA resolves it whichever way it spells it.
-    // The aliases are applied afterwards and only where the catalog states no such name outright: an
-    // alias must never shadow — or, by colliding, poison — a name the catalog actually carries.
+    // Each name is indexed as stated AND under every spelling in `aliasSpellingsOf`. The aliases are
+    // applied afterwards and only where the catalog states no such name outright: an alias must never
+    // shadow — or, by colliding, poison — a name the catalog actually carries. Nine of them would collide
+    // with a real name today and are dropped on exactly that rule.
     const aliases = new Map<string, string | null>();
     // Split on either ending: the file is written with LF and `.gitattributes` pins `eol=lf`, but the
     // parse should not be the thing that depends on that holding.
@@ -152,9 +200,8 @@ function indexOfLocalities(): ReadonlyMap<string, string | null> {
             continue;
         }
         record(index, `${provinceIndec}|${normalized}`, code);
-        const stripped = withoutPlaceKindPrefix(normalized);
-        if (stripped !== undefined) {
-            record(aliases, `${provinceIndec}|${stripped}`, code);
+        for (const alias of aliasSpellingsOf(normalized)) {
+            record(aliases, `${provinceIndec}|${alias}`, code);
         }
     }
     for (const [key, code] of aliases) {
@@ -170,11 +217,44 @@ function indexOfLocalities(): ReadonlyMap<string, string | null> {
 const CABA_INDEC = '02';
 
 /**
+ * Every spelling of one ARCA `localidad` worth putting to the index, in the order they must be tried:
+ * the text as stated first, then the rewrites, each strictly more speculative than the last. Order is the
+ * safety property — see {@link resolveIndecLocality}.
+ */
+function spellingsToTry(normalized: string, isCaba: boolean): ReadonlyArray<string> {
+    const spellings: Array<string> = [normalized];
+    const expanded = expandAbbreviations(normalized);
+    if (expanded !== undefined) {
+        spellings.push(expanded);
+    }
+    if (!isCaba) {
+        return spellings;
+    }
+    const stripped = withoutPlaceKindPrefix(normalized);
+    if (stripped === undefined) {
+        return spellings;
+    }
+    spellings.push(stripped);
+    const strippedExpanded = expandAbbreviations(stripped);
+    if (strippedExpanded !== undefined) {
+        spellings.push(strippedExpanded);
+    }
+    return spellings;
+}
+
+/**
  * The 8-digit INDEC localidad censal code for an ARCA address, or `undefined` when it does not resolve —
- * a normal per-address outcome, not an error. Resolution is exact-match-only after
- * {@link normalizeLocalityName}, scoped to the province, and gives up on any ambiguity: a wrong code would
- * put a customer in the wrong city, which is worse for the caller than an absent one. Scoping is what
+ * a normal per-address outcome, not an error. Every lookup is an exact match on a
+ * {@link normalizeLocalityName}d name, scoped to the province, and gives up on any ambiguity: a wrong code
+ * would put a customer in the wrong city, which is worse for the caller than an absent one. Scoping is what
  * separates `MERLO` in Buenos Aires from `MERLO` in San Luis.
+ *
+ * What varies is only *which* spellings of ARCA's text get that exact match, and they are tried in
+ * increasing order of speculation — as stated, then abbreviations written out
+ * ({@link expandAbbreviations}: `GRAL. SAN MARTIN` → `GENERAL SAN MARTIN`), then the CABA-only prefix strip
+ * below. The order is what keeps a rewrite from ever overriding a literal reading: the first spelling the
+ * index *knows* wins, including when what it knows is `null` for "ambiguous, refuse". So the 13 catalog
+ * names that themselves contain an abbreviation token are still found by anyone who spells them that way.
  *
  * Known gap: ARCA often reports a *barrio* of an interior city, which the national catalog does not model —
  * those addresses resolve to nothing.
@@ -187,8 +267,9 @@ const CABA_INDEC = '02';
  * carries its 48 barrios and every one of them points at the single CABA localidad, so a `PALERMO` or
  * `BARRIO PALERMO` address resolves to the same code either way.
  *
- * A name the catalog itself states with the prefix (`Barrio El Casal`) still resolves in any province,
- * with or without it — that symmetry lives in the index, not here.
+ * A name the catalog itself states with the prefix (`Barrio El Casal`) or with an abbreviation
+ * (`Villa Gdor. Luis F. Etchevehere`) still resolves in any province, spelled either way — that symmetry
+ * lives in the index, not here.
  */
 export function resolveIndecLocality(
     province: ArProvince | undefined,
@@ -202,14 +283,13 @@ export function resolveIndecLocality(
         return undefined;
     }
     const index = indexOfLocalities();
-    const asStated = index.get(`${province.indec}|${normalized}`);
-    if (asStated !== undefined || province.indec !== CABA_INDEC) {
-        // `null` is the ambiguous case, and it is an answer: refuse rather than fall through to a guess.
-        return asStated ?? undefined;
+    for (const spelling of spellingsToTry(normalized, province.indec === CABA_INDEC)) {
+        const code = index.get(`${province.indec}|${spelling}`);
+        if (code !== undefined) {
+            // `null` is the ambiguous case, and it is an answer: refuse rather than fall through to a
+            // rewrite that would resolve where the literal reading deliberately would not.
+            return code ?? undefined;
+        }
     }
-    const withoutPrefix = withoutPlaceKindPrefix(normalized);
-    if (withoutPrefix === undefined) {
-        return undefined;
-    }
-    return index.get(`${province.indec}|${withoutPrefix}`) ?? undefined;
+    return undefined;
 }

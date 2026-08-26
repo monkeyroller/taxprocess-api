@@ -1,5 +1,6 @@
 import {
     AR_CITY_CODE_SCHEME,
+    AR_CITY_CODE_SCHEME_VERSION,
     AR_COUNTRY_CODE,
     AR_COUNTRY_CODE_SCHEME,
     AR_REGION_CODE_SCHEME,
@@ -39,7 +40,8 @@ import type {
  *
  * ARCA's `region`/`city` names DO travel, as the fallback for a level that did not resolve. Each scheme is
  * set only alongside its own resolved code, never on its own: a scheme naming a code that is not there is
- * noise a caller would have to defend against.
+ * noise a caller would have to defend against. `cityCodeSchemeVersion` is guarded on the same condition for
+ * the same reason — it dates the code, so an address that resolved to none has nothing to date.
  */
 function toNeutralAddress(address: PadronAddress): TaxpayerAddressDto {
     const province = provinceByArcaId(address.regionCode);
@@ -56,6 +58,7 @@ function toNeutralAddress(address: PadronAddress): TaxpayerAddressDto {
         regionCodeScheme: province === undefined ? undefined : AR_REGION_CODE_SCHEME,
         cityCode,
         cityCodeScheme: cityCode === undefined ? undefined : AR_CITY_CODE_SCHEME,
+        cityCodeSchemeVersion: cityCode === undefined ? undefined : AR_CITY_CODE_SCHEME_VERSION,
         kind: address.kind,
         status: address.status,
     };

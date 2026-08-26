@@ -1,5 +1,6 @@
 import {describe, expect, it} from '@jest/globals';
 import {toNeutralTaxpayerResult} from './ar-taxpayer.mapper.js';
+import {AR_CITY_CODE_SCHEME_VERSION} from './ar-geography.js';
 import {AddressCodeScheme} from '../provider.js';
 import type {TaxpayerData} from './sdk/index.js';
 
@@ -120,6 +121,8 @@ describe('toNeutralTaxpayerResult', () => {
             regionCodeScheme: 'ISO-3166-2',
             cityCode: '14014010',
             cityCodeScheme: 'INDEC',
+            // The locality is the one level drawn from a vendored snapshot, so it also says which one.
+            cityCodeSchemeVersion: AR_CITY_CODE_SCHEME_VERSION,
         });
         // The authority's own names survive alongside the codes, as the fallback for an unresolved level.
         expect(taxpayer.fiscalAddress).toMatchObject({region: 'CORDOBA', city: 'CORDOBA'});
@@ -144,6 +147,9 @@ describe('toNeutralTaxpayerResult', () => {
 
         expect(taxpayer.fiscalAddress).not.toHaveProperty('cityCode');
         expect(taxpayer.fiscalAddress).not.toHaveProperty('cityCodeScheme');
+        // Nor the snapshot version: it dates a code, so there is nothing to date here. Sending it anyway
+        // would read as "this snapshot says there is no code", which is a claim the gap does not support.
+        expect(taxpayer.fiscalAddress).not.toHaveProperty('cityCodeSchemeVersion');
         expect(taxpayer.fiscalAddress).toMatchObject({regionCode: 'AR-X', regionCodeScheme: 'ISO-3166-2'});
         expect(taxpayer.fiscalAddress.city).toBe('BARRIO YAPEYU');
     });
@@ -174,6 +180,11 @@ describe('toNeutralTaxpayerResult', () => {
                     expect(schemes.has(onWire[`${level}CodeScheme`])).toBe(true);
                 }
             }
+            // The version is on the same footing as the scheme — it qualifies a code and never travels
+            // without one. Only the city level has a snapshot behind it, so only the city level sends one.
+            expect(onWire.cityCodeSchemeVersion === undefined).toBe(onWire.cityCode === undefined);
+            expect(onWire).not.toHaveProperty('countryCodeSchemeVersion');
+            expect(onWire).not.toHaveProperty('regionCodeSchemeVersion');
         }
     });
 

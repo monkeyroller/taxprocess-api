@@ -19,8 +19,31 @@
 // here and its address resolves to no code. The one exception is CABA, whose 48 barrios georef does carry,
 // every one of them pointing at the single localidad censal `02000010`. Closing the gap for the rest
 // would need a postal-code index, which has no openly-licensed source — see docs/CONTRACT-CHANGES.md.
-//
-// Generated from 4027 localidades censales and 14673 asentamientos.
+
+/**
+ * What this snapshot is: when georef-ar was read, and how much of it. Stated in code rather than in a
+ * header comment because it is published — `ar-geography.ts` reads {@link INDEC_SNAPSHOT.date} straight
+ * into the wire's `cityCodeSchemeVersion` (CONTRACT §5), so a caller holding its own snapshot of the same
+ * live dataset can date a mismatch instead of confusing drift with the barrio gap.
+ *
+ * Regenerating rewrites this and the rows together, which is the point: neither can go stale alone.
+ *
+ * The block below is the **one** thing in this file written by hand rather than by the generator, and only
+ * once: the rows were fetched on 2026-08-25 and core diffed its own catalog against them that day, finding
+ * the two code sets identical. Re-running the generator to mint the stamp would have fetched a genuinely
+ * newer snapshot and dated it today, throwing away the baseline that makes a version worth publishing.
+ * Every regeneration from here writes it.
+ */
+export const INDEC_SNAPSHOT = {
+    /** ISO date georef-ar was read. */
+    date: '2026-08-25',
+    /** Localidades censales read — and, by the generator's own assertion, the distinct codes below. */
+    localidadesCensales: 4027,
+    /** BAHRA asentamientos read, each projected up to the localidad censal containing it. */
+    asentamientos: 14673,
+    /** Rows below — unique province/name/code triples, so several names can share one code. */
+    nameRows: 4930,
+} as const;
 
 // Annotated `: string` on purpose, which is why the inferrable-types rule is off for this one line:
 // without the annotation TypeScript infers the literal type and copies all 4930 rows into

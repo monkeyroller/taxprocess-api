@@ -929,14 +929,87 @@ describe('ArcaProvider.lookupTaxpayers', () => {
         constanciaGetTaxpayer.mockRejectedValue(
             new ArcaTaxpayerNotFoundError('20111111112', 'No existe persona con ese Id'),
         );
+        identityGetTaxpayer.mockRejectedValue(new ArcaTaxpayerNotFoundError('20111111112'));
 
         await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject({
             name: 'TaxpayerNotFoundError',
             entityCode: 'ARCA',
             identificationTypeCode: 80,
             identificationNumber: '20111111112',
+            // The constancia's wording rather than A13's: only one of the two padrones says why.
             authorityMessage: expect.stringContaining('No existe persona'),
         });
+    });
+
+    it('falls back to A13 when the constancia padrón has no such clave', async () => {
+        // A13 is the superset. A clave ARCA issued with no inscripción registered against it is absent from
+        // the constancia and perfectly readable in A13, so the miss is a reason to ask the other padrón —
+        // the caller gets the identity picture instead of a 404 for someone who exists.
+        constanciaGetTaxpayer.mockRejectedValue(
+            new ArcaTaxpayerNotFoundError('20111111112', 'No existe persona con ese Id'),
+        );
+        identityGetTaxpayer.mockResolvedValue(identity('20111111112'));
+
+        const result = await provider().lookupTaxpayers('testing', 80, '20111111112');
+
+        expect(result).toEqual({
+            entityCode: 'ARCA',
+            detail: 'IDENTITY',
+            taxpayers: [expect.objectContaining({taxId: '20111111112', taxes: undefined})],
+        });
+        expect(identityGetTaxpayer).toHaveBeenCalledWith(expect.anything(), 20111111112);
+        // Each padrón is a separate WSAA service, so the fallback signs with its own ticket.
+        expect(resolve).toHaveBeenCalledWith('ARCA', DELEGATE_CUIT, CONSTANCIA_SERVICE, 'testing', undefined, true);
+        expect(resolve).toHaveBeenCalledWith('ARCA', DELEGATE_CUIT, A13_SERVICE, 'testing', undefined, true);
+    });
+
+    it.each([
+        [86, 'CUIL'],
+        [87, 'CDI'],
+    ])('falls back to A13 for %s (%s) as well, since getPersonaV2 takes any clave', async (code) => {
+        constanciaGetTaxpayer.mockRejectedValue(new ArcaTaxpayerNotFoundError('20111111112'));
+        identityGetTaxpayer.mockResolvedValue(identity('20111111112'));
+
+        const result = await provider().lookupTaxpayers('testing', code, '20111111112');
+
+        expect(result.detail).toBe('IDENTITY');
+        expect(identityGetTaxpayer).toHaveBeenCalledWith(expect.anything(), 20111111112);
+    });
+
+    it('leaves A13 alone when the constancia answers, so the fallback costs nothing', async () => {
+        constanciaGetTaxpayer.mockResolvedValue(registration('20111111112'));
+
+        await provider().lookupTaxpayers('testing', 80, '20111111112');
+
+        expect(identityGetTaxpayer).not.toHaveBeenCalled();
+        expect(resolve).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces a fallback that never reached A13 rather than calling it a not-found', async () => {
+        // With the superset unread we do not know that nobody is registered: a 404 would state something
+        // the service cannot stand behind, and would hide an enrolment only we can fix.
+        constanciaGetTaxpayer.mockRejectedValue(
+            new ArcaTaxpayerNotFoundError('20111111112', 'No existe persona con ese Id'),
+        );
+        resolve.mockImplementation((_entityCode, _issuerTaxId, service) =>
+            service === A13_SERVICE
+                ? Promise.reject(new ArcaSoapError('Computador no autorizado a acceder al servicio'))
+                : Promise.resolve({token: 't', sign: 's', cuit: Number(DELEGATE_CUIT)}),
+        );
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject({
+            name: 'DelegationNotConfiguredError',
+            reason: expect.stringContaining(A13_SERVICE),
+        });
+    });
+
+    it('does not ask A13 about a clave the constancia refused as malformed', async () => {
+        // Only "no such clave" is worth a second registry; a bad id is a 400 A13 would answer no better.
+        const thrown = new ArcaValidationError('El Id de la persona no es valido', 'INVALID_ID');
+        constanciaGetTaxpayer.mockRejectedValue(thrown);
+
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toBe(thrown);
+        expect(identityGetTaxpayer).not.toHaveBeenCalled();
     });
 
     it('refuses an identification type no padrón service can answer for, before any login', async () => {

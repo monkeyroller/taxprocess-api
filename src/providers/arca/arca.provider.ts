@@ -590,7 +590,7 @@ export class ArcaProvider extends TaxEntityProvider {
         try {
             const found =
                 route === 'CONSTANCIA'
-                    ? [await this.constanciaFor(environment, number)]
+                    ? [await this.claveFor(environment, number)]
                     : await this.identitiesForDocument(environment, number);
             if (found.length === 0) {
                 throw notFound();
@@ -606,9 +606,59 @@ export class ArcaProvider extends TaxEntityProvider {
         }
     }
 
+    /**
+     * One clave (CUIT/CUIL/CDI), read from whichever padrón holds it.
+     *
+     * The constancia service answers first because it is the richer picture — registered taxes, monotributo,
+     * and the fiscal condition derived from them. But it only knows claves that have an *inscripción*: a
+     * clave ARCA issued with nothing registered against it is simply absent there, while A13 knows the
+     * person behind it perfectly well. A13 is the superset — a clave A13 does not hold is in no padrón — so
+     * an A13 miss is the only authoritative "nobody", and a constancia miss is a reason to ask A13 rather
+     * than a `404`. There is deliberately no fallback the other way: a clave the constancia holds is by
+     * definition in A13, so that lookup could only ever come back empty-handed.
+     *
+     * A fallback that never *reached* A13 (no enrolment, token or transport fault) throws rather than
+     * degrading to the constancia's not-found: with the superset unread we do not know that nobody is
+     * registered, and a `404` would state something we cannot stand behind.
+     */
+    private async claveFor(environment: GenericEnvironment, taxpayerId: number): Promise<TaxpayerData> {
+        try {
+            return await this.constanciaFor(environment, taxpayerId);
+        } catch (err) {
+            // Only "no such clave" is worth a second registry. A malformed id, a credential fault or a
+            // transport failure says nothing about which padrón to ask, and asking again would just cost a
+            // second round trip before failing the same way.
+            if (!(err instanceof ArcaTaxpayerNotFoundError)) {
+                throw err;
+            }
+            try {
+                return await this.identityFor(environment, taxpayerId);
+            } catch (fallbackErr) {
+                if (fallbackErr instanceof ArcaTaxpayerNotFoundError) {
+                    // Both padrones missed, so this is a real not-found. The constancia's error is the one
+                    // rethrown: it carries the authority's own wording ("No existe persona con ese Id"),
+                    // where an A13 miss is a silent empty response with nothing but the SDK's default text.
+                    throw err;
+                }
+                throw fallbackErr;
+            }
+        }
+    }
+
     /** The registration picture for one clave (CUIT/CUIL/CDI), from the constancia service. */
     private async constanciaFor(environment: GenericEnvironment, taxpayerId: number): Promise<TaxpayerData> {
         const service = constanciaService(toArcaEnvironment(environment));
+        const auth = await this.padronAuth(environment, service.service);
+        return padronCall(environment, service.service, () => service.getTaxpayer(auth, taxpayerId));
+    }
+
+    /**
+     * One clave read from the identity padrón (A13) — `constanciaFor`'s twin, minus the tax picture. Used
+     * as the constancia's fallback, and it answers for any clave kind: `getPersonaV2` takes an `idPersona`,
+     * whether that is a CUIT, a CUIL or a CDI.
+     */
+    private async identityFor(environment: GenericEnvironment, taxpayerId: number): Promise<TaxpayerData> {
+        const service = taxpayerIdentityService(toArcaEnvironment(environment));
         const auth = await this.padronAuth(environment, service.service);
         return padronCall(environment, service.service, () => service.getTaxpayer(auth, taxpayerId));
     }

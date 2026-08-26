@@ -99,11 +99,11 @@ export type TaxpayerRegistrationStatus = 'ACTIVE' | 'INACTIVE';
  * Every geographic level reads the same way — **a name from the authority, a code, and the standard that
  * code belongs to**:
  *
- * | level | authority's name | code | standard |
- * | --- | --- | --- | --- |
- * | country | — | `countryCode` | `countryCodeScheme` |
- * | region | `region` | `regionCode` | `regionCodeScheme` |
- * | city | `city` | `cityCode` | `cityCodeScheme` |
+ * | level | authority's name | code | standard | snapshot |
+ * | --- | --- | --- | --- | --- |
+ * | country | — | `countryCode` | `countryCodeScheme` | — |
+ * | region | `region` | `regionCode` | `regionCodeScheme` | — |
+ * | city | `city` | `cityCode` | `cityCodeScheme` | `cityCodeSchemeVersion` |
  *
  * **Resolve a level by matching the pair, not the code alone.** A code means nothing without the scheme
  * naming the catalog it was drawn from — `"AR"` is an ISO 3166-1 alpha-2 country here, but the same two
@@ -114,6 +114,9 @@ export type TaxpayerRegistrationStatus = 'ACTIVE' | 'INACTIVE';
  * independently, so a partially-coded address is normal rather than a fault: read the codes when present,
  * and fall back to the authority's own name when a level did not resolve. The authority's names are also
  * the only thing left for a place its national catalog does not code at all.
+ *
+ * A level whose catalog this service vendors a *snapshot* of also states which snapshot, and only the city
+ * level does today — see {@link TaxpayerAddressDto.cityCodeSchemeVersion}.
  */
 export class TaxpayerAddressDto {
     street?: string;
@@ -146,6 +149,23 @@ export class TaxpayerAddressDto {
      */
     cityCode?: string;
     cityCodeScheme?: AddressCodeScheme;
+
+    /**
+     * Which snapshot of the coding system's catalog `cityCode` was drawn from — an ISO date (AR: the day
+     * georef-ar was read for the vendored INDEC index).
+     *
+     * Present **exactly** when `cityCode` is, so it is not an independently-optional key: it describes that
+     * code, and there is nothing to version when no code resolved.
+     *
+     * Its use is diagnostic, and only in one situation: a caller resolving `(code, codeScheme)` against its
+     * own copy of the same live national catalog gets nothing back for both a code minted from a *newer*
+     * snapshot than its own and a code it simply does not carry. Those need opposite responses — re-seed
+     * versus accept — and the version is what separates them. Same version and no match means the catalogs
+     * agree and the gap is real; a version newer than the caller's means re-seed.
+     *
+     * Never match on it, and never reject a code for carrying an unfamiliar one.
+     */
+    cityCodeSchemeVersion?: string;
 
     kind?: string;
     status?: string;

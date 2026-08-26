@@ -115,7 +115,27 @@ for (const triple of triples) {
     }
 }
 
+// The projection is a promise, not an implementation detail (CONTRACT §5): every code this file emits is
+// a *localidad censal*, because asentamientos contribute only their `localidad_censal.id` and each
+// localidad censal contributes its own row. So the distinct codes emitted must be exactly the number of
+// localidades censales read — no more (a finer level leaked in) and no fewer (a localidad went missing).
+//
+// A caller catalogs the localidades-censales layer alone and resolves everything we send; going finer is
+// a breaking contract change. This is the assertion that makes that a build failure rather than a silent
+// wire change, so a future "improvement" to asentamiento or departamento ids stops here.
+const distinctCodes = new Set([...triples].map((triple) => triple.split('\t')[2]));
+if (distinctCodes.size !== localidades.total) {
+    throw new Error(
+        `Emitted ${distinctCodes.size} distinct codes for ${localidades.total} localidades censales. ` +
+            `Every code must be a localidad censal — see CONTRACT §5, "the INDEC code space".`,
+    );
+}
+
 const sorted = [...triples].sort();
+// The day georef-ar was read. Vendored beside the rows so a caller can date a mismatch against its own
+// snapshot of the same live dataset (core's CONTRACT-REQUESTS ask 6), and so the version can never drift
+// from the data it describes — regenerating restamps both or neither.
+const snapshotDate = new Date().toISOString().slice(0, 10);
 const file = `// GENERATED FILE — do not edit by hand. Regenerate with \`node scripts/build-indec-index.mjs\`.
 //
 // INDEC localidad codes, vendored from georef-ar (Ministerio del Interior, datos.gob.ar) so a lookup
@@ -137,8 +157,25 @@ const file = `// GENERATED FILE — do not edit by hand. Regenerate with \`node 
 // here and its address resolves to no code. The one exception is CABA, whose 48 barrios georef does carry,
 // every one of them pointing at the single localidad censal \`02000010\`. Closing the gap for the rest
 // would need a postal-code index, which has no openly-licensed source — see docs/CONTRACT-CHANGES.md.
-//
-// Generated from ${localidades.total} localidades censales and ${asentamientos.total} asentamientos.
+
+/**
+ * What this snapshot is: when georef-ar was read, and how much of it. Stated in code rather than in a
+ * header comment because it is published — \`ar-geography.ts\` reads {@link INDEC_SNAPSHOT.date} straight
+ * into the wire's \`cityCodeSchemeVersion\` (CONTRACT §5), so a caller holding its own snapshot of the same
+ * live dataset can date a mismatch instead of confusing drift with the barrio gap.
+ *
+ * Regenerating rewrites this and the rows together, which is the point: neither can go stale alone.
+ */
+export const INDEC_SNAPSHOT = {
+    /** ISO date georef-ar was read. */
+    date: '${snapshotDate}',
+    /** Localidades censales read — and, by the generator's own assertion, the distinct codes below. */
+    localidadesCensales: ${localidades.total},
+    /** BAHRA asentamientos read, each projected up to the localidad censal containing it. */
+    asentamientos: ${asentamientos.total},
+    /** Rows below — unique province/name/code triples, so several names can share one code. */
+    nameRows: ${sorted.length},
+} as const;
 
 // Annotated \`: string\` on purpose, which is why the inferrable-types rule is off for this one line:
 // without the annotation TypeScript infers the literal type and copies all ${sorted.length} rows into
@@ -149,6 +186,7 @@ export const INDEC_LOCALITY_ROWS: string = \`${sorted.join('\n')}\`;
 
 await writeFile(OUT, file, 'utf8');
 console.log(
-    `wrote ${sorted.length} rows (${localidades.total} localidades, ${asentamientos.total} asentamientos, ` +
-        `${skipped} asentamientos skipped for having no localidad censal)`,
+    `wrote ${sorted.length} rows, snapshot ${snapshotDate} (${localidades.total} localidades, ` +
+        `${asentamientos.total} asentamientos, ${skipped} skipped for having no localidad censal). ` +
+        `The snapshot date is published as cityCodeSchemeVersion — this needs a CONTRACT-CHANGES entry.`,
 );
