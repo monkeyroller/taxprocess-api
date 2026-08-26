@@ -96,11 +96,17 @@ src/
 │   └── arca/              # the ARCA provider (sole owner of AR specifics)
 │       ├── arca.provider.ts
 │       ├── clients.ts     # shared SDK clients
-│       ├── code-maps.ts   # id → ARCA code maps (documentTypeId→CbteTipo, …)
+│       ├── code-maps.ts   # canonical code → ARCA code maps (documentTypeCode→CbteTipo, …)
+│       ├── ar-identifiers.ts       # CUIT/id parsing + canonicalization
 │       ├── ar-invoice.mapper.ts
-│       ├── ticket-store.ts    # WSAA ticket cache + CREDENTIALS_REQUIRED signal
-│       ├── credentials.ts     # PEM/CUIT credential validation
-│       ├── environment.ts     # production/testing ↔ produccion/homologacion
-│       └── sdk/           # copied ARCA SDK (verbatim; WSAA + WSFEv1 + padrón)
+│       ├── ar-taxpayer.mapper.ts   # SDK padrón data → neutral taxpayer DTOs
+│       ├── ar-fiscal-condition.ts  # ARCA impuestos → canonical fiscalConditionCode
+│       ├── ar-geography.ts         # idProvincia → ISO 3166-2, localidad → INDEC code
+│       ├── data/                   # vendored INDEC locality catalog (generated) + name folding
+│       ├── ticket-store.ts         # WSAA ticket cache + CREDENTIALS_REQUIRED signal
+│       ├── credentials.ts          # PEM/CUIT credential validation
+│       ├── delegate-credentials.ts # this service's own delegate cert (padrón lookups)
+│       ├── environment.ts          # production/testing ↔ produccion/homologacion
+│       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
 ```

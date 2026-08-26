@@ -50,6 +50,10 @@ export type {
 } from './invoicing/common/common-invoice.types.js';
 export {InvoiceWebService} from './invoicing/invoice-web-service.base.js';
 export {TaxpayerRegistryService} from './taxpayer-registry/taxpayer-registry.service.base.js';
+// The two concrete padrón services, exported alongside their base: each owns operations the other does not
+// (A13's identity-document search), and a consumer binding one to a `SoapClient` needs the concrete type.
+export {ConstanciaInscripcionService} from './taxpayer-registry/constancia-inscripcion.service.js';
+export {TaxpayerIdentityService} from './taxpayer-registry/taxpayer-identity.service.js';
 export type {
     PadronService,
     PadronDetail,

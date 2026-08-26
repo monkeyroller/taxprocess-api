@@ -1,7 +1,10 @@
-import {CommonInvoiceService, SoapClient, type ArcaEnvironment} from './sdk/index.js';
-// Concrete padrón services are not re-exported from the SDK barrel — import them directly.
-import {ConstanciaInscripcionService} from './sdk/taxpayer-registry/constancia-inscripcion.service.js';
-import {TaxpayerIdentityService} from './sdk/taxpayer-registry/taxpayer-identity.service.js';
+import {
+    CommonInvoiceService,
+    ConstanciaInscripcionService,
+    SoapClient,
+    TaxpayerIdentityService,
+    type ArcaEnvironment,
+} from './sdk/index.js';
 
 /**
  * Shared SDK clients. The `SoapClient` is stateless (native `fetch`) and safe to share process-wide;

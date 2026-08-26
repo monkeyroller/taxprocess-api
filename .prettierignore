@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
-# The copied SDK travels verbatim from webprocess-api — don't reformat it.
-src/arca/
+# The copied SDK travels verbatim from webprocess-api — don't reformat it. (Path follows the SDK's move
+# under the ARCA provider; the old `src/arca/` entry silently stopped matching anything.)
+src/providers/arca/sdk/
 pnpm-lock.yaml
