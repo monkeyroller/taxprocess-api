@@ -1,7 +1,7 @@
 import {TaxpayerRegistryService} from './taxpayer-registry.service.base.js';
 import {ENDPOINTS, Namespaces, ServiceId} from '../core/constants.js';
 import {ArcaTaxpayerNotFoundError} from '../core/errors.js';
-import {isTaxpayerMissing} from './padron-faults.js';
+import {isRegistrationUnavailable} from './padron-faults.js';
 import {firstOf} from '../invoicing/common/common-helpers.js';
 import {
     address,
@@ -41,16 +41,25 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
     protected override parseTaxpayer(result: Record<string, unknown>, taxpayerId: number): TaxpayerData {
         const persona = firstOf(result.personaReturn) ?? {};
         const errors = asArray(persona.errorConstancia).flatMap((e) => asArray(e.error).map(String));
-        // `errorConstancia` doubles as the not-found channel AND as a list of data-quality complaints about
+        const general = firstOf(persona.datosGenerales) ?? {};
+        // `errorConstancia` doubles as the no-answer channel AND as a list of data-quality complaints about
         // an existing taxpayer (manual §5.3: "Domicilio Incompleto", "Nombre erróneo", …). Only a complaint
-        // about the PERSON is a 404 — one about a missing address would otherwise throw away a complete
-        // registration. The rest ride along as metadata on an otherwise normal result.
-        const missing = errors.find(isTaxpayerMissing);
-        if (missing !== undefined) {
-            throw new ArcaTaxpayerNotFoundError(String(taxpayerId), missing);
+        // that the service cannot report this CLAVE is a not-found — nobody registered under it, or a clave
+        // that is inactive/cancelled.
+        //
+        // A MISSING `datosGenerales` is what makes that reading safe, so it is checked first rather than
+        // trusting the wording alone. The verdicts share their vocabulary with the data-quality channel —
+        // "cancelada" reads the same in "La CUIT fue cancelada" as in a complaint about some cancelled tax
+        // of a perfectly live taxpayer — and only the empty response distinguishes them. With a registration
+        // in hand there is nothing to fall through to A13 FOR: `estadoClave` already carries the inactive or
+        // cancelled state into `registrationStatus`, so the complaint rides along as metadata like the rest.
+        if (Object.keys(general).length === 0) {
+            const unavailable = errors.find(isRegistrationUnavailable);
+            if (unavailable !== undefined) {
+                throw new ArcaTaxpayerNotFoundError(String(taxpayerId), unavailable);
+            }
         }
 
-        const general = firstOf(persona.datosGenerales) ?? {};
         const regimeGeneral = firstOf(persona.datosRegimenGeneral) ?? {};
         const monotributo = firstOf(persona.datosMonotributo) ?? {};
 

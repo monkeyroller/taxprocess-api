@@ -53,6 +53,11 @@ export abstract class TaxpayerRegistryService {
      *
      * `subject` is the identifier the call is about, echoed into a not-found so the error names what was asked
      * for even when the authority's own wording does not.
+     *
+     * The padrón services are JAX-WS and expect UNQUALIFIED children (`<token>`, not
+     * `{a5.soap.ws.server.puc.sr}token`) — unlike the .NET invoicing services, which take the SDK's default
+     * qualified form. Getting this wrong is rejected at unmarshalling, before the ticket is read, so it
+     * surfaces as an auth-looking fault; see {@link ElementForm}.
      */
     protected async invoke(
         operation: string,
@@ -60,7 +65,9 @@ export abstract class TaxpayerRegistryService {
         subject: number,
     ): Promise<Record<string, unknown>> {
         try {
-            return await this.soap.call(this.endpoint(), this.namespace, operation, payload);
+            return await this.soap.call(this.endpoint(), this.namespace, operation, payload, {
+                elementForm: 'unqualified',
+            });
         } catch (err) {
             throw translatePadronFault(err, String(subject));
         }

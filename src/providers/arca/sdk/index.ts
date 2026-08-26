@@ -54,6 +54,9 @@ export {TaxpayerRegistryService} from './taxpayer-registry/taxpayer-registry.ser
 // (A13's identity-document search), and a consumer binding one to a `SoapClient` needs the concrete type.
 export {ConstanciaInscripcionService} from './taxpayer-registry/constancia-inscripcion.service.js';
 export {TaxpayerIdentityService} from './taxpayer-registry/taxpayer-identity.service.js';
+export {
+    PADRON_HOMOLOGACION_CUITS, PADRON_HOMOLOGACION_DOCUMENTS, PADRON_HOMOLOGACION_TAX_IDS
+} from './taxpayer-registry/padron-homologacion-ids.js';
 export type {
     PadronService,
     PadronDetail,

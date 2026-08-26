@@ -24,6 +24,25 @@ const TAXPAYER_MISSING =
     /no existe\s+(?:un[ao]?\s+|l[ao]\s+|el\s+)?(?:persona|clave|cuit|cuil|cdi|contribuyente)|(?:persona|clave|cuit|cuil|cdi|contribuyente)\b[^.]{0,40}\binexistente/i;
 
 /**
+ * "The clave is not one this padrón will report a registration for", in the spellings ARCA uses for a clave
+ * that is inactive or has been cancelled: `La clave se encuentra inactiva` and `La CUIT fue cancelada de
+ * acuerdo a: CLAVES INVALIDAS.` — both observed live against homologación.
+ *
+ * A DIFFERENT verdict from {@link TAXPAYER_MISSING}: the person is in the padrón, the constancia simply has
+ * no inscripción to show for them. It needs the same treatment all the same, because the answer is at the
+ * other service — A13's `getPersonaV2` reports an inactive clave in full, and does not hold a cancelled one
+ * at all, which is the authoritative "nobody".
+ *
+ * Subject and verdict must appear together, as above — but unlike `no existe`, "cancelada"/"inactiva" is
+ * vocabulary the data-quality channel shares ("La CUIT registra impuestos cancelados" is a complaint about a
+ * live taxpayer), and no proximity rule separates the two readings. The caller is what makes this safe: the
+ * constancia service consults it only for a response with NO `datosGenerales`, where there is no
+ * registration to throw away. Do not reuse it against a populated response.
+ */
+const CLAVE_INACTIVE =
+    /(?:persona|clave|cuit|cuil|cdi|contribuyente)\b[^.]{0,40}\b(?:inactiv[ao]|cancelad[ao])|claves?\s+inv[aá]lidas?/i;
+
+/**
  * Faults about the CALLER'S credentials rather than about the identifier: WSAA token/signature/certificate
  * problems, and ARCA's authorization wording. Matched first and passed through untouched, for the provider's
  * own ticket handling to classify (see `arca.provider.ts`).
@@ -42,9 +61,28 @@ const CREDENTIAL_FAULT = /token|ticket|firma|\bsign\b|certificad|no autoriz|comp
  */
 const ID_SUBJECT = /clave|cuit|cuil|cdi|documento|persona|\bid\b/i;
 
-/** Whether an authority message means "no taxpayer is registered under the identifier we asked about". */
-export function isTaxpayerMissing(message: string): boolean {
-    return !CREDENTIAL_FAULT.test(message) && TAXPAYER_MISSING.test(message);
+/**
+ * Why an EMPTY constancia response is empty: either nobody is registered under the clave we asked about
+ * ({@link TAXPAYER_MISSING}) or the clave is inactive/cancelled ({@link CLAVE_INACTIVE}). Ask it only of a
+ * response that carries no `datosGenerales` — see {@link CLAVE_INACTIVE} for why the wording alone does not
+ * settle it.
+ *
+ * The two verdicts share a treatment because they share a remedy: the constancia has no answer and A13 does.
+ * The `ArcaTaxpayerNotFoundError` this raises is read by the provider as "ask the other padrón", not as a
+ * `404` — only an A13 miss is authoritative (`arca.provider.ts`, `claveFor`). Left unclassified, an inactive
+ * clave comes back as a `200` carrying a taxpayer with no name, no `personType` and no `registrationStatus`:
+ * an answer about the taxpayer that the authority never gave.
+ *
+ * Deliberately NOT extended to the SOAP-fault path ({@link translatePadronFault}). The inactive/cancelled
+ * wording has only ever been seen in constancia's `errorConstancia` payload, and A13 — the service that
+ * reports through faults — answers for an inactive clave rather than refusing, which is why the SDK calls
+ * `getPersonaV2`. Classifying a fault we have never observed would assert "nobody" about a clave that exists.
+ */
+export function isRegistrationUnavailable(message: string): boolean {
+    if (CREDENTIAL_FAULT.test(message)) {
+        return false;
+    }
+    return TAXPAYER_MISSING.test(message) || CLAVE_INACTIVE.test(message);
 }
 
 /**

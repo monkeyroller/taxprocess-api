@@ -206,7 +206,13 @@ export class WsaaClient {
         // WSAA (an Axis service) expects an empty SOAPAction.
         let response: Record<string, unknown>;
         try {
-            response = await this.soap.call(endpoint, Namespaces.WSAA, 'loginCms', {in0: signedCms}, '');
+            response = await this.soap.call(
+                endpoint,
+                Namespaces.WSAA,
+                'loginCms',
+                {in0: signedCms},
+                {soapAction: ''},
+            );
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (/alreadyAuthenticated|ya posee un TA/i.test(message)) {

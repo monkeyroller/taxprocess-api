@@ -18,6 +18,32 @@ export interface SoapClientOptions {
     retryDelayMs?: number;
 }
 
+/**
+ * How the operation element's children are namespace-qualified — the wire consequence of the target
+ * schema's `elementFormDefault`. ARCA's services disagree on this, so it is per-call:
+ *
+ * - `'qualified'` (the default): the operation element declares the target namespace as the DEFAULT
+ *   `xmlns`, so every unprefixed child inherits it. What the .NET services want — WSFEv1/WSFEXv1 — and
+ *   what WSAA's `loginCms` accepts.
+ * - `'unqualified'`: the target namespace rides on a prefix, so ONLY the operation element carries it
+ *   and its children stay in no namespace at all. What the JAX-WS padrón services (`sr-padron`) want.
+ *   Sending them the qualified form is rejected before the ticket is even looked at, with
+ *   `Unmarshalling Error: unexpected element (uri:"http://a5.soap.ws.server.puc.sr/", local:"token").
+ *   Expected elements are <{}sign>,<{}token>,<{}cuitRepresentada>,<{}idPersona>` — a SOAP fault that
+ *   reads like an auth failure but is purely a body-shape one.
+ */
+export type ElementForm = 'qualified' | 'unqualified';
+
+export interface SoapCallOptions {
+    /**
+     * SOAPAction header; defaults to `"{namespace}/{operation}"`. Pass `''` for services (e.g. WSAA)
+     * that expect an empty action.
+     */
+    soapAction?: string;
+    /** Namespace form for the operation element's children. Defaults to `'qualified'`. */
+    elementForm?: ElementForm;
+}
+
 const SOAP_ENVELOPE_NS = 'http://schemas.xmlsoap.org/soap/envelope/';
 
 function sleep(ms: number): Promise<void> {
@@ -79,21 +105,20 @@ export class SoapClient {
      * the operation-specific child (e.g. `FECAESolicitarResult`, `loginCmsReturn`) off the result.
      *
      * @param endpoint absolute service URL
-     * @param namespace SOAP target namespace; the operation element carries it as the default xmlns
+     * @param namespace SOAP target namespace, carried by the operation element
      * @param operation operation name, e.g. `"FECAESolicitar"`
      * @param payload object serialized as the operation element's children
-     * @param soapAction SOAPAction header; defaults to `"{namespace}/{operation}"`. Pass `''` for
-     *   services (e.g. WSAA) that expect an empty action.
+     * @param options SOAPAction override and the children's {@link ElementForm}
      */
     async call(
         endpoint: string,
         namespace: string,
         operation: string,
         payload: Record<string, unknown>,
-        soapAction?: string,
+        options: SoapCallOptions = {},
     ): Promise<Record<string, unknown>> {
-        const envelope = this.buildEnvelope(namespace, operation, payload);
-        const action = soapAction ?? this.defaultSoapAction(namespace, operation);
+        const envelope = this.buildEnvelope(namespace, operation, payload, options.elementForm ?? 'qualified');
+        const action = options.soapAction ?? this.defaultSoapAction(namespace, operation);
         const rawXml = await this.fetchWithRetry(endpoint, envelope, action);
         return this.extractResponse(rawXml, operation);
     }
@@ -107,13 +132,24 @@ export class SoapClient {
         return `${namespace}${namespace.endsWith('/') ? '' : '/'}${operation}`;
     }
 
-    private buildEnvelope(namespace: string, operation: string, payload: Record<string, unknown>): string {
+    private buildEnvelope(
+        namespace: string,
+        operation: string,
+        payload: Record<string, unknown>,
+        elementForm: ElementForm,
+    ): string {
         const inner = serializePayload(payload);
+        // A prefix on the operation element leaves the children in no namespace; a default `xmlns` puts
+        // them all in the target one. See {@link ElementForm} — the two are not interchangeable.
+        const body =
+            elementForm === 'unqualified'
+                ? `<ns1:${operation} xmlns:ns1="${namespace}">${inner}</ns1:${operation}>`
+                : `<${operation} xmlns="${namespace}">${inner}</${operation}>`;
         return (
             '<?xml version="1.0" encoding="UTF-8"?>' +
             `<soap:Envelope xmlns:soap="${SOAP_ENVELOPE_NS}">` +
             '<soap:Body>' +
-            `<${operation} xmlns="${namespace}">${inner}</${operation}>` +
+            body +
             '</soap:Body></soap:Envelope>'
         );
     }

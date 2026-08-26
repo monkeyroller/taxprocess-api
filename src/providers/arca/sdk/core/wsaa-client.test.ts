@@ -21,9 +21,9 @@ class FakeSoap {
         _namespace: string,
         operation: string,
         payload: Record<string, unknown>,
-        soapAction?: string,
+        options?: {soapAction?: string},
     ): Promise<Record<string, unknown>> {
-        this.calls.push({operation, payload, soapAction});
+        this.calls.push({operation, payload, soapAction: options?.soapAction});
         return {loginCmsReturn: this.ticketXml};
     }
 

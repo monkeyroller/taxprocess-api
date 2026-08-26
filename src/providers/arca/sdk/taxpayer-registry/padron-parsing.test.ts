@@ -1,4 +1,4 @@
-import {describe, expect, it} from '@jest/globals';
+import {afterEach, describe, expect, it} from '@jest/globals';
 import {SoapClient} from '../core/soap-client.js';
 import {ArcaSoapError, ArcaTaxpayerNotFoundError, ArcaValidationError} from '../core/errors.js';
 import {ConstanciaInscripcionService} from './constancia-inscripcion.service.js';
@@ -161,6 +161,67 @@ const NOT_FOUND = constanciaResponse(`
     </errorConstancia>
 `);
 
+/**
+ * Live homologación, CUIT 24850833059: the constancia declines an INACTIVE clave — a `200` whose only
+ * content is the complaint. A13 holds this person in full (LEBLANC RACHEL, `registrationStatus: INACTIVE`),
+ * which is why this has to raise rather than parse into an empty taxpayer.
+ */
+const INACTIVE_CLAVE = constanciaResponse(`
+    <errorConstancia>
+        <error>La clave se encuentra inactiva</error>
+        <idPersona>24850833059</idPersona>
+    </errorConstancia>
+`);
+
+/**
+ * Live homologación, CUIT 20111111112: a CANCELLED clave, reported alongside two genuine data-quality
+ * complaints. The verdict is not the only entry and not the one a naive read would land on, and its
+ * siblings both name the CUIT without saying anything about its existence.
+ */
+const CANCELLED_CLAVE = constanciaResponse(`
+    <errorConstancia>
+        <error>La CUIT fue cancelada de acuerdo a: CLAVES INVALIDAS.</error>
+        <error>La CUIT no registra domicilio fiscal declarado, o el mismo se encuentra incompleto o incorrecto.</error>
+        <error>La CUIT registra una o más actividades económicas que no pertenecen al nomenclador de actividades vigente F. 883 RG AFIP3587/13</error>
+        <idPersona>20111111112</idPersona>
+    </errorConstancia>
+`);
+
+/**
+ * The same two complaints WITHOUT the cancellation verdict. Both name the CUIT, so they are exactly what an
+ * over-eager verdict pattern would misread as "no such taxpayer" — a real registration turned into a 404.
+ */
+const CUIT_DATA_ERRORS = constanciaResponse(`
+    <datosGenerales>
+        <idPersona>20111111112</idPersona>
+        <razonSocial>ALGUIEN SA</razonSocial>
+        <estadoClave>ACTIVO</estadoClave>
+    </datosGenerales>
+    <errorConstancia>
+        <error>La CUIT no registra domicilio fiscal declarado, o el mismo se encuentra incompleto o incorrecto.</error>
+        <error>La CUIT registra una o más actividades económicas que no pertenecen al nomenclador de actividades vigente F. 883 RG AFIP3587/13</error>
+        <idPersona>20111111112</idPersona>
+    </errorConstancia>
+`);
+
+/**
+ * The cancellation verdict beside a REGISTRATION the service did report. `getPersona_v2` answers for a clave
+ * the v1 operation refuses, so an inactive/cancelled clave can come back with its `datosGenerales` intact —
+ * and then the complaint is not a no-answer at all: `estadoClave` carries the state, and A13 has strictly
+ * less to say about this taxpayer than what is already in hand.
+ */
+const CANCELLED_CLAVE_WITH_REGISTRATION = constanciaResponse(`
+    <datosGenerales>
+        <idPersona>20111111112</idPersona>
+        <razonSocial>ALGUIEN SA</razonSocial>
+        <estadoClave>INACTIVO</estadoClave>
+    </datosGenerales>
+    <errorConstancia>
+        <error>La CUIT fue cancelada de acuerdo a: CLAVES INVALIDAS.</error>
+        <idPersona>20111111112</idPersona>
+    </errorConstancia>
+`);
+
 /** An existing taxpayer whose constancia carries data-quality complaints — NOT a not-found. */
 const WITH_DATA_ERRORS = constanciaResponse(`
     <datosGenerales>
@@ -263,6 +324,57 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
         const service = serviceReturning(ConstanciaInscripcionService, NOT_FOUND, 'getPersona_v2');
 
         await expect(service.getTaxpayer(AUTH, 12345678901)).rejects.toBeInstanceOf(ArcaTaxpayerNotFoundError);
+    });
+
+    /**
+     * An inactive or cancelled clave leaves every field of the response empty. Parsing it into a taxpayer
+     * yields a `200` with no name, no personType and no registrationStatus — an answer about the taxpayer
+     * that ARCA never gave. It must raise instead, so `claveFor` falls through to A13, which can answer.
+     */
+    it('raises a not-found for an inactive clave, so the lookup falls through to A13', async () => {
+        const service = serviceReturning(ConstanciaInscripcionService, INACTIVE_CLAVE, 'getPersona_v2');
+
+        const error = await service.getTaxpayer(AUTH, 24850833059).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(ArcaTaxpayerNotFoundError);
+        // ARCA's own wording rides along: it is what the provider rethrows into the 404 when A13 misses too.
+        expect((error as Error).message).toContain('La clave se encuentra inactiva');
+    });
+
+    it('raises a not-found for a cancelled clave, past the data-quality complaints beside it', async () => {
+        const service = serviceReturning(ConstanciaInscripcionService, CANCELLED_CLAVE, 'getPersona_v2');
+
+        const error = await service.getTaxpayer(AUTH, 20111111112).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(ArcaTaxpayerNotFoundError);
+        expect((error as Error).message).toContain('La CUIT fue cancelada');
+    });
+
+    it('keeps a registration the service did report, verdict beside it or not', async () => {
+        const service = serviceReturning(
+            ConstanciaInscripcionService,
+            CANCELLED_CLAVE_WITH_REGISTRATION,
+            'getPersona_v2',
+        );
+
+        const data = await service.getTaxpayer(AUTH, 20111111112);
+
+        expect(data.name).toBe('ALGUIEN SA');
+        expect(data.registrationStatus).toBe('INACTIVE');
+        // The verdict is not swallowed — it rides along where every other complaint does.
+        expect(data.providerMetadata.constanciaErrors).toEqual([
+            'La CUIT fue cancelada de acuerdo a: CLAVES INVALIDAS.',
+        ]);
+    });
+
+    it('does not read a complaint that merely names the CUIT as a verdict about its existence', async () => {
+        const service = serviceReturning(ConstanciaInscripcionService, CUIT_DATA_ERRORS, 'getPersona_v2');
+
+        const data = await service.getTaxpayer(AUTH, 20111111112);
+
+        expect(data.name).toBe('ALGUIEN SA');
+        expect(data.registrationStatus).toBe('ACTIVE');
+        expect(data.providerMetadata.constanciaErrors).toHaveLength(2);
     });
 
     it('treats other errorConstancia entries as data-quality notes on a real taxpayer, not a not-found', async () => {
@@ -601,5 +713,66 @@ describe('TaxpayerIdentityService', () => {
         );
 
         await expect(service.getIdPersonaList(AUTH, 11709676)).resolves.toEqual([]);
+    });
+});
+
+/**
+ * The request side, driven through a REAL `SoapClient` so the assertions are about bytes on the wire.
+ *
+ * ARCA's `sr-padron` webapp is JAX-WS with an unqualified schema: it wants `<token>`, not
+ * `{http://a5.soap.ws.server.puc.sr/}token`. The qualified envelope is rejected at unmarshalling —
+ * before the ticket is looked at — so the fault reads as an auth failure ("ARCA rejected the delegate
+ * ticket") and sends the reader after the certificate instead of the body. That misdiagnosis is what
+ * these tests exist to prevent recurring.
+ */
+describe('padrón request envelope', () => {
+    const originalFetch = (global as any).fetch;
+    afterEach(() => {
+        (global as any).fetch = originalFetch;
+    });
+
+    /** Captures the request body while answering with `responseXml`. */
+    function captureRequest(responseXml: string): {body: () => string} {
+        let body = '';
+        (global as any).fetch = async (_url: string, init: any) => {
+            body = init.body;
+            return {ok: true, status: 200, text: async () => responseXml};
+        };
+        return {body: () => body};
+    }
+
+    it('sends the constancia lookup with unqualified children', async () => {
+        const capture = captureRequest(
+            constanciaResponse('<datosGenerales><idPersona>20123456789</idPersona></datosGenerales>'),
+        );
+        const service = new ConstanciaInscripcionService(new SoapClient(), 'homologacion');
+
+        await service.getTaxpayer(AUTH, 20123456789);
+
+        const body = capture.body();
+        expect(body).toContain(`<ns1:getPersona_v2 xmlns:ns1="${CONSTANCIA_NS}">`);
+        expect(body).toContain('<token>t</token>');
+        expect(body).toContain('<sign>s</sign>');
+        expect(body).toContain('<cuitRepresentada>30999999997</cuitRepresentada>');
+        expect(body).toContain('<idPersona>20123456789</idPersona>');
+        expect(body).not.toContain(`xmlns="${CONSTANCIA_NS}"`);
+    });
+
+    it('sends the A13 document search with unqualified children', async () => {
+        const capture = captureRequest(
+            envelope(
+                'getIdPersonaListByDocumento',
+                A13_NS,
+                '<idPersonaListReturn><idPersona>23117096769</idPersona></idPersonaListReturn>',
+            ),
+        );
+        const service = new TaxpayerIdentityService(new SoapClient(), 'homologacion');
+
+        await service.getIdPersonaList(AUTH, 11709676);
+
+        const body = capture.body();
+        expect(body).toContain(`<ns1:getIdPersonaListByDocumento xmlns:ns1="${A13_NS}">`);
+        expect(body).toContain('<documento>11709676</documento>');
+        expect(body).not.toContain(`xmlns="${A13_NS}"`);
     });
 });
