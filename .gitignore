@@ -14,6 +14,9 @@ logs/
 .env.*
 !.env.example
 .secrets/
+# The same material as an archive rather than a directory (.secrets.rar, .secrets.zip). The directory
+# pattern above does not match those, so an archived copy was landing as an untracked file.
+.secrets.*
 *.key
 *.crt
 *.pem
