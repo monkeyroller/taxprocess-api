@@ -1,9 +1,17 @@
-import {ArcaAuthError, ArcaError, ArcaServiceError} from './sdk/index.js';
+import {
+    ArcaAuthError,
+    ArcaError,
+    ArcaServiceError,
+    ArcaSoapError,
+    ArcaValidationError,
+    NotImplementedError,
+} from './sdk/index.js';
 import type {ServiceIdValue} from './sdk/index.js';
 import {canonicalCuit} from './mapping/identifiers.js';
 import {
     DelegationNotAuthorizedError,
     DelegationNotConfiguredError,
+    ProviderFault,
     type EntityAuthBlock,
     type GenericEnvironment,
 } from '../provider.js';
@@ -177,6 +185,77 @@ export function notEnrolledError(
             environment,
             `the delegate certificate is not enrolled in the "${service}" web service at the authority`,
         );
+    }
+    return err;
+}
+
+/**
+ * ARCA business-rejection codes (`Errors.Err[].Code`) that are stable and caller-actionable —
+ * given the same input, ARCA rejects the same way every time, so these get their own wire category
+ * and a `400` (never the generic `502 ARCA_SERVICE`, which reads as "retry me"). Add an entry
+ * here once a code is confirmed to recur and worth a dedicated, translated message downstream.
+ *
+ * - `10069` — "Campo DocNro no puede ser igual al del emisor.": the receiver's identification
+ *   number is the same as the issuing company's own — never transient, always caller-fixable.
+ */
+const KNOWN_SERVICE_ERROR_CODES: Record<string, string> = {
+    '10069': 'RECEIVER_MATCHES_ISSUER',
+};
+
+/**
+ * Translates any ARCA-native failure into a neutral {@link ProviderFault} — the provider's outbound
+ * boundary, applied by `TaxEntityProvider`'s guard so no SDK error class can reach the HTTP layer.
+ *
+ * The `code` strings are the ones CONTRACT §8 documents and core branches on (`ARCA_VALIDATION`,
+ * `ARCA_SERVICE`, `ARCA_AUTH`, `ARCA_SOAP`, `ARCA_ERROR`, `RECEIVER_MATCHES_ISSUER`), and the `details`
+ * shapes (`{code}`, `{arcaCode, arcaErrors}`) likewise — so this is a pure relocation of the mapping that
+ * used to live in `http/error-mapper.ts`, not a new wire format.
+ *
+ * Anything already neutral passes through untouched: the provider raises `VoucherNotFoundError`,
+ * `TaxpayerNotFoundError`, `DelegationNotAuthorizedError`, `DelegationNotConfiguredError` and
+ * `CredentialsRequiredError` deliberately, and re-wrapping one as a generic fault would flatten a `403`,
+ * `404` or `409` into a `500`.
+ *
+ * `ArcaError` is tested LAST because every class above extends it — the subclass checks are the
+ * classification, and the base is only the fallback for an SDK error that is none of them.
+ */
+export function toProviderFault(err: unknown): unknown {
+    if (err instanceof ArcaValidationError) {
+        // Top-level `code` stays the stable category (§8); the specific reason (e.g.
+        // `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `UNMAPPED_CURRENCY`) rides in `details.code` so callers can
+        // branch on it without parsing the message. Absent when the validation error carried no code.
+        const details = err.code === undefined ? undefined : {code: err.code};
+        return new ProviderFault('VALIDATION', 'ARCA_VALIDATION', err.message, details);
+    }
+    if (err instanceof NotImplementedError) {
+        return new ProviderFault('NOT_IMPLEMENTED', 'NOT_IMPLEMENTED', err.message);
+    }
+    if (err instanceof ArcaAuthError) {
+        return new ProviderFault('AUTHORITY_AUTH', 'ARCA_AUTH', err.message);
+    }
+    if (err instanceof ArcaServiceError) {
+        // A known, recurring rejection gets its own stable category + `400` so the caller can branch on
+        // `code` without parsing the (Spanish, ARCA-authored) message. `arcaErrors` still rides along so
+        // an unmapped sibling code in the same response isn't silently dropped.
+        // `Object.hasOwn`, not `in`: codes come straight off ARCA's XML with no validation, and `in` would
+        // also match inherited keys (`constructor`, `toString`), yielding a bogus category downstream.
+        const known = err.errors.find((e) => Object.hasOwn(KNOWN_SERVICE_ERROR_CODES, e.code));
+        if (known !== undefined) {
+            return new ProviderFault('AUTHORITY_REJECTED', KNOWN_SERVICE_ERROR_CODES[known.code], known.message, {
+                arcaCode: known.code,
+                arcaErrors: err.errors,
+            });
+        }
+        // Unclassified business rejection: keep the transport-agnostic 502, but expose the full
+        // `{code, message}` list so a caller can branch on it, and so a future recurring code can be
+        // promoted into `KNOWN_SERVICE_ERROR_CODES` above.
+        return new ProviderFault('AUTHORITY_SERVICE', 'ARCA_SERVICE', err.message, {arcaErrors: err.errors});
+    }
+    if (err instanceof ArcaSoapError) {
+        return new ProviderFault('AUTHORITY_TRANSPORT', 'ARCA_SOAP', err.message);
+    }
+    if (err instanceof ArcaError) {
+        return new ProviderFault('PROVIDER_INTERNAL', 'ARCA_ERROR', err.message);
     }
     return err;
 }

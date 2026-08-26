@@ -180,12 +180,90 @@ export interface ValidateCredentialsInput {
  * {@link file://./registry.ts}.
  */
 export abstract class TaxEntityProvider {
-    abstract validateCredentials(input: ValidateCredentialsInput): Promise<CredentialValidationResult>;
-    abstract authorizeInvoice(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult>;
-    abstract lastAuthorized(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number): Promise<{number: number}>;
-    abstract nextNumbers(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCodes: ReadonlyArray<number>): Promise<NextNumbersResult>;
-    abstract queryVoucher(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number, voucherNumber: number): Promise<TaxAuthorizationResult>;
-    abstract authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult>;
+    /**
+     * Translates a failure from this provider's own vocabulary into a neutral one — normally a
+     * {@link ProviderFault}. Anything already neutral (or unrecognized) must be returned unchanged, which is
+     * what the default does.
+     *
+     * Every public method below runs its implementation through this, so a provider's native error class can
+     * never reach the HTTP layer. That is the whole reason the mapper needs no `instanceof` against any
+     * provider: the translation happens at the boundary the provider owns, on the way out.
+     */
+    protected translateFault(err: unknown): unknown {
+        return err;
+    }
+
+    /**
+     * Runs one provider operation, translating any native failure on the way out. `op()` is called *inside*
+     * the `try`, so an implementation that throws synchronously — a code-map lookup rejecting an unknown
+     * code before any I/O — is translated exactly like a rejected promise.
+     */
+    private async guarded<T>(op: () => Promise<T>): Promise<T> {
+        try {
+            return await op();
+        } catch (err) {
+            throw this.translateFault(err);
+        }
+    }
+
+    /*
+     * The public surface is final on purpose: each method is a thin guard around the `*Impl` hook a provider
+     * implements. Subclasses override the hooks, never these — overriding a public method would skip the
+     * translation and let an authority-specific error class escape to the wire.
+     */
+
+    validateCredentials(input: ValidateCredentialsInput): Promise<CredentialValidationResult> {
+        return this.guarded(() => this.validateCredentialsImpl(input));
+    }
+    authorizeInvoice(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult> {
+        return this.guarded(() => this.authorizeInvoiceImpl(entity, invoice));
+    }
+    lastAuthorized(
+        entity: EntityAuthBlock,
+        pointOfSaleNumber: number,
+        documentTypeCode: number,
+    ): Promise<{number: number}> {
+        return this.guarded(() => this.lastAuthorizedImpl(entity, pointOfSaleNumber, documentTypeCode));
+    }
+    nextNumbers(
+        entity: EntityAuthBlock,
+        pointOfSaleNumber: number,
+        documentTypeCodes: ReadonlyArray<number>,
+    ): Promise<NextNumbersResult> {
+        return this.guarded(() => this.nextNumbersImpl(entity, pointOfSaleNumber, documentTypeCodes));
+    }
+    queryVoucher(
+        entity: EntityAuthBlock,
+        pointOfSaleNumber: number,
+        documentTypeCode: number,
+        voucherNumber: number,
+    ): Promise<TaxAuthorizationResult> {
+        return this.guarded(() =>
+            this.queryVoucherImpl(entity, pointOfSaleNumber, documentTypeCode, voucherNumber),
+        );
+    }
+    authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult> {
+        return this.guarded(() => this.authorityStatusImpl(environment));
+    }
+    lookupTaxpayers(
+        environment: GenericEnvironment,
+        identificationTypeCode: number,
+        identificationNumber: string,
+    ): Promise<TaxpayerResult> {
+        return this.guarded(() =>
+            this.lookupTaxpayersImpl(environment, identificationTypeCode, identificationNumber),
+        );
+    }
+    pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
+        return this.guarded(() => this.pointsOfSaleImpl(entity));
+    }
+
+    protected abstract validateCredentialsImpl(input: ValidateCredentialsInput): Promise<CredentialValidationResult>;
+    protected abstract authorizeInvoiceImpl(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult>;
+    protected abstract lastAuthorizedImpl(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number): Promise<{number: number}>;
+    protected abstract nextNumbersImpl(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCodes: ReadonlyArray<number>): Promise<NextNumbersResult>;
+    protected abstract queryVoucherImpl(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number, voucherNumber: number): Promise<TaxAuthorizationResult>;
+    protected abstract authorityStatusImpl(environment: GenericEnvironment): Promise<AuthorityStatusResult>;
     /**
      * Looks up whoever the authority's registry holds under `identificationNumber`, interpreting it
      * according to `identificationTypeCode` (the same canonical code an invoice receiver carries). The
@@ -197,12 +275,91 @@ export abstract class TaxEntityProvider {
      * an identity document can legitimately match several taxpayers — and raises
      * {@link TaxpayerNotFoundError} rather than an empty one.
      */
-    abstract lookupTaxpayers(
+    protected abstract lookupTaxpayersImpl(
         environment: GenericEnvironment,
         identificationTypeCode: number,
         identificationNumber: string,
     ): Promise<TaxpayerResult>;
-    abstract pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult>;
+    protected abstract pointsOfSaleImpl(entity: EntityAuthBlock): Promise<PointsOfSaleResult>;
+}
+
+/**
+ * What kind of failure a provider is reporting — the neutral half of the error contract.
+ *
+ * A category maps to exactly one HTTP status (`http/error-mapper.ts` owns that table and nothing else), so
+ * this enumerates the *statuses the wire contract has*, not the vocabulary of any one authority. Providers
+ * classify into it; only providers know which of their authority's failures belongs where.
+ *
+ * The split matters most across the three `502`s and the two `400`s: an authority that refused our
+ * credential, one that rejected the business content, and one we could not reach are all "retry later" to a
+ * caller but different things to an operator — while a rejection that is stable and caller-fixable
+ * (`AUTHORITY_REJECTED`) must read as a `400`, because a `502` invites a retry that will fail identically.
+ */
+export type ProviderFaultCategory =
+    /** Provider-side validation, before or instead of an authority call. → `400` */
+    | 'VALIDATION'
+    /** The authority rejected the request for a stable, caller-fixable reason. → `400` */
+    | 'AUTHORITY_REJECTED'
+    /** The authority refused our credential/token. → `502` */
+    | 'AUTHORITY_AUTH'
+    /** The authority rejected the request for a reason we have not classified. → `502` */
+    | 'AUTHORITY_SERVICE'
+    /** The authority could not be reached, or answered unintelligibly. → `502` */
+    | 'AUTHORITY_TRANSPORT'
+    /** A provider operation that exists but is not implemented yet. → `501` */
+    | 'NOT_IMPLEMENTED'
+    /** A provider failure that is neither the caller's fault nor the authority's. → `500` */
+    | 'PROVIDER_INTERNAL';
+
+/**
+ * A provider failure, already translated out of its authority's vocabulary — the ONLY error shape the HTTP
+ * layer needs to understand from a provider.
+ *
+ * `code` is the stable wire category the caller branches on, and the **provider authors it**: ARCA emits its
+ * documented `ARCA_VALIDATION` / `ARCA_SERVICE` / `ARCA_AUTH` / `ARCA_SOAP` / `ARCA_ERROR` /
+ * `RECEIVER_MATCHES_ISSUER` (CONTRACT §8), and a future entity emits its own. That is deliberate: the codes
+ * are already entity-prefixed on the wire, so neutralizing them here would be a breaking contract change,
+ * and inventing a second neutral code alongside them would give callers two things to branch on. `details`
+ * is likewise provider-shaped (ARCA's `{code}` / `{arcaCode, arcaErrors}`) and travels verbatim.
+ *
+ * What the HTTP layer contributes is only the status, read from {@link category}. It therefore needs no
+ * `instanceof` against any provider's error classes, and no table of any authority's codes.
+ */
+export class ProviderFault extends Error {
+    constructor(
+        readonly category: ProviderFaultCategory,
+        readonly code: string,
+        message: string,
+        readonly details?: unknown,
+    ) {
+        super(message);
+        this.name = 'ProviderFault';
+    }
+}
+
+/**
+ * Raised when no valid ticket is cached for the issuer and the request carried no credentials. The HTTP
+ * layer maps this to `409 CREDENTIALS_REQUIRED`; core then re-sends the same request with the issuer's
+ * credentials attached, and the provider logs in to the authority and proceeds. Fields are reported in the
+ * neutral vocabulary (`entityCode`, `issuerTaxId`, generic `environment`); `service` is the authority's own
+ * web-service identifier, echoed as the opaque string the caller sees.
+ *
+ * Neutral rather than provider-local because the 409 handshake is a contract-level flow (CONTRACT §2), not
+ * an ARCA detail: any entity whose credentials core holds encrypted goes through the same exchange.
+ */
+export class CredentialsRequiredError extends Error {
+    constructor(
+        readonly entityCode: string,
+        readonly issuerTaxId: string,
+        readonly service: string,
+        readonly environment: GenericEnvironment,
+    ) {
+        super(
+            `CREDENTIALS_REQUIRED for entity=${entityCode} issuerTaxId=${issuerTaxId} ` +
+                `service=${service} env=${environment}`,
+        );
+        this.name = 'CredentialsRequiredError';
+    }
 }
 
 /** Raised when a request names an entity code with no registered provider. Maps to `400`. */

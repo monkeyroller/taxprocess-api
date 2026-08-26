@@ -1,32 +1,33 @@
 import type {Response} from 'express';
 import {
-    ArcaAuthError,
-    ArcaError,
-    ArcaServiceError,
-    ArcaSoapError,
-    ArcaValidationError,
-    NotImplementedError,
-} from '../providers/arca/sdk/index.js';
-import {CredentialsRequiredError} from '../providers/arca/auth/ticket-store.js';
-import {
+    CredentialsRequiredError,
     DelegationNotAuthorizedError,
     DelegationNotConfiguredError,
+    ProviderFault,
     TaxpayerNotFoundError,
     UnknownEntityError,
     VoucherNotFoundError,
+    type ProviderFaultCategory,
 } from '../providers/provider.js';
 
 /**
- * ARCA business-rejection codes (`Errors.Err[].Code`) that are stable and caller-actionable —
- * given the same input, ARCA rejects the same way every time, so these get their own category
- * and a `400` (never the generic `502 ARCA_SERVICE`, which reads as "retry me"). Add an entry
- * here once a code is confirmed to recur and worth a dedicated, translated message downstream.
+ * Neutral fault category → HTTP status. This is the ONLY thing this layer decides about a provider failure:
+ * the wire `code`, the `message` and the `details` are all authored by the provider that raised it (ARCA's
+ * `ARCA_*` / `RECEIVER_MATCHES_ISSUER` and their detail shapes live in `providers/arca/faults.ts`).
  *
- * - `10069` — "Campo DocNro no puede ser igual al del emisor.": the receiver's identification
- *   number is the same as the issuing company's own — never transient, always caller-fixable.
+ * Keeping it that way is what makes this module provider-agnostic. It used to `instanceof`-check the ARCA
+ * SDK's error classes and carry ARCA's own business-code table, which meant a second entity's failures had
+ * nowhere to land but the generic `500` — while the service's whole premise is that the provider owns every
+ * entity-specific detail.
  */
-const KNOWN_ARCA_SERVICE_ERROR_CODES: Record<string, {readonly status: number; readonly code: string}> = {
-    '10069': {status: 400, code: 'RECEIVER_MATCHES_ISSUER'},
+const STATUS_BY_CATEGORY: Record<ProviderFaultCategory, number> = {
+    VALIDATION: 400,
+    AUTHORITY_REJECTED: 400,
+    AUTHORITY_AUTH: 502,
+    AUTHORITY_SERVICE: 502,
+    AUTHORITY_TRANSPORT: 502,
+    NOT_IMPLEMENTED: 501,
+    PROVIDER_INTERNAL: 500,
 };
 
 export interface HttpErrorResult {
@@ -101,9 +102,15 @@ function validationDetailsOf(err: unknown): ReadonlyArray<ValidationSummary> | u
 }
 
 /**
- * Maps any thrown value to an HTTP status + neutral error body. ARCA SDK errors are matched by
- * `instanceof` (single SDK instance); framework HTTP errors (e.g. class-validator `400`s surfaced by
- * routing-controllers) are matched by their numeric `httpCode`.
+ * Maps any thrown value to an HTTP status + neutral error body.
+ *
+ * Three kinds of input, and no fourth: the neutral errors declared in `providers/provider.ts` (each with a
+ * status the contract fixes), a {@link ProviderFault} whose category gives the status and whose
+ * code/message/details the provider already authored, and framework HTTP errors (e.g. class-validator
+ * `400`s surfaced by routing-controllers) matched by their numeric `httpCode`. Anything else is a `500`.
+ *
+ * A provider's own error classes never appear here — `TaxEntityProvider` translates them to a
+ * {@link ProviderFault} on the way out of every public method.
  */
 export function toHttpError(err: unknown): HttpErrorResult {
     if (err instanceof CredentialsRequiredError) {
@@ -120,6 +127,9 @@ export function toHttpError(err: unknown): HttpErrorResult {
     if (err instanceof DelegationNotAuthorizedError) {
         // A delegated call the authority refused because the represented CUIT hasn't delegated to us — a
         // deterministic, user-actionable outcome (grant the delegation), so a distinct `403`, never a `502`.
+        // `arcaCode`/`arcaMessage` are the key names CONTRACT §8 froze and core reads; the error itself is
+        // neutral (`authorityCode`/`authorityMessage`), so renaming the wire keys is a breaking change to
+        // make deliberately with core, not a side effect of tidying this layer.
         return make(403, 'DELEGATION_NOT_AUTHORIZED', err.message, {
             delegateTaxId: err.delegateTaxId,
             issuerTaxId: err.issuerTaxId,
@@ -151,39 +161,10 @@ export function toHttpError(err: unknown): HttpErrorResult {
             identificationNumber: err.identificationNumber,
         });
     }
-    if (err instanceof ArcaValidationError) {
-        // Top-level `code` stays the stable category (§8); the specific reason (e.g.
-        // `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `UNMAPPED_CURRENCY`) rides in `details.code` so callers can
-        // branch on it without parsing the message. Absent when the validation error carried no code.
-        return make(400, 'ARCA_VALIDATION', err.message, err.code === undefined ? undefined : {code: err.code});
-    }
-    if (err instanceof NotImplementedError) {
-        return make(501, 'NOT_IMPLEMENTED', err.message);
-    }
-    if (err instanceof ArcaAuthError) {
-        return make(502, 'ARCA_AUTH', err.message);
-    }
-    if (err instanceof ArcaServiceError) {
-        // A known, recurring rejection gets its own stable category + `400` so the caller can branch on
-        // `code` without parsing the (Spanish, ARCA-authored) message. `arcaErrors` still rides along so
-        // an unmapped sibling code in the same response isn't silently dropped.
-        // `Object.hasOwn`, not `in`: codes come straight off ARCA's XML with no validation, and `in` would
-        // also match inherited keys (`constructor`, `toString`), yielding an undefined status downstream.
-        const known = err.errors.find((e) => Object.hasOwn(KNOWN_ARCA_SERVICE_ERROR_CODES, e.code));
-        if (known) {
-            const {status, code} = KNOWN_ARCA_SERVICE_ERROR_CODES[known.code];
-            return make(status, code, known.message, {arcaCode: known.code, arcaErrors: err.errors});
-        }
-        // Unclassified business rejection: keep the transport-agnostic 502, but expose the full
-        // `{code, message}` list — previously dropped entirely — so a caller can branch on it, and so a
-        // future recurring code can be promoted into `KNOWN_ARCA_SERVICE_ERROR_CODES` above.
-        return make(502, 'ARCA_SERVICE', err.message, {arcaErrors: err.errors});
-    }
-    if (err instanceof ArcaSoapError) {
-        return make(502, 'ARCA_SOAP', err.message);
-    }
-    if (err instanceof ArcaError) {
-        return make(500, 'ARCA_ERROR', err.message);
+    if (err instanceof ProviderFault) {
+        // Everything entity-specific — the wire code, the message, the details shape — was decided by the
+        // provider. All that is left here is the status its category implies.
+        return make(STATUS_BY_CATEGORY[err.category], err.code, err.message, err.details);
     }
 
     const httpCode = httpCodeOf(err);

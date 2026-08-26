@@ -18,6 +18,7 @@ import {
     TaxpayerNotFoundError,
     VoucherNotFoundError,
     type EntityAuthBlock,
+    type ProviderFaultCategory,
     type NeutralInvoice,
 } from '../provider.js';
 import type {DelegateCredentialStore} from './auth/delegate-credentials.js';
@@ -156,6 +157,21 @@ beforeEach(() => {
 afterEach(() => {
     jest.useRealTimers();
 });
+
+/**
+ * The neutral shape an ARCA failure reaches a caller in. `TaxEntityProvider` translates every
+ * provider-native error on the way out of a public method, so "this error propagates untouched" is asserted
+ * as the fault it translates to - same category, same wire code, same message - rather than as object
+ * identity against the SDK class. Which SDK error maps to which category is pinned in `faults.test.ts`.
+ */
+function fault(category: ProviderFaultCategory, code: string, message?: string): Record<string, unknown> {
+    return message === undefined ? {category, code} : {category, code, message};
+}
+
+/** An ARCA validation rejection: the stable wire category, with the specific reason under `details.code`. */
+function validationFault(reason: string): Record<string, unknown> {
+    return {category: 'VALIDATION', code: 'ARCA_VALIDATION', details: {code: reason}};
+}
 
 describe('ArcaProvider.authorizeInvoice', () => {
     beforeEach(() => {
@@ -382,13 +398,15 @@ describe('ArcaProvider.authorizeInvoice', () => {
         requestAuthorization.mockRejectedValue(thrown);
         queryVoucher.mockRejectedValue(notFoundError);
 
-        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
     });
 
     it('refuses a voucher range (voucherNumberTo > voucherNumberFrom) instead of silently truncating it', async () => {
         await expect(
             new ArcaProvider().authorizeInvoice(ENTITY, invoice({voucherNumberFrom: 17, voucherNumberTo: 18})),
-        ).rejects.toMatchObject({code: 'VOUCHER_RANGE_UNSUPPORTED'});
+        ).rejects.toMatchObject(validationFault('VOUCHER_RANGE_UNSUPPORTED'));
         // Rejected up front — no ticket minted, no authorize attempted.
         expect(resolve).not.toHaveBeenCalled();
         expect(requestAuthorization).not.toHaveBeenCalled();
@@ -402,7 +420,9 @@ describe('ArcaProvider.authorizeInvoice', () => {
         ]);
         requestAuthorization.mockRejectedValue(thrown);
 
-        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, invoice())).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
         expect(queryVoucher).not.toHaveBeenCalled();
     });
 });
@@ -476,7 +496,7 @@ describe('ArcaProvider delegated token/representación classification', () => {
         );
 
         const p = provider().authorizeInvoice(DELEGATED, invoice());
-        await expect(p).rejects.toBeInstanceOf(ArcaAuthError);
+        await expect(p).rejects.toMatchObject(fault('AUTHORITY_AUTH', 'ARCA_AUTH'));
         await expect(p).rejects.not.toBeInstanceOf(DelegationNotAuthorizedError);
         // A genuine token fault ⇒ evict the shared delegate ticket so the next request re-mints.
         expect(invalidateDelegated).toHaveBeenCalledWith('ARCA', 'testing', 'wsfe');
@@ -486,22 +506,29 @@ describe('ArcaProvider delegated token/representación classification', () => {
         const thrown = tokenError('Usuario no autorizado a realizar esta operación');
         requestAuthorization.mockRejectedValue(thrown);
 
-        // ENTITY has no `delegated` flag → the classifier does not run.
-        await expect(provider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
+        // ENTITY has no `delegated` flag → the classifier does not run, so this stays a plain authority
+        // rejection (never the delegation 403) through the neutral translation.
+        await expect(provider().authorizeInvoice(ENTITY, invoice())).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
     });
 
     it('leaves a 601 UNTOUCHED on a non-delegated call (classifier does not run)', async () => {
         const thrown = arcaError('601', 'CUIT representada no incluida en token');
         requestAuthorization.mockRejectedValue(thrown);
 
-        await expect(provider().authorizeInvoice(ENTITY, invoice())).rejects.toBe(thrown);
+        await expect(provider().authorizeInvoice(ENTITY, invoice())).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
     });
 
     it('leaves an ambiguous 600 as the original authority error (does not guess "delegation")', async () => {
         const thrown = tokenError('ValidacionDeToken: error interno del servicio');
         requestAuthorization.mockRejectedValue(thrown);
 
-        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toBe(thrown);
+        await expect(provider().authorizeInvoice(DELEGATED, invoice())).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
     });
 
     it('names our configured delegate CUIT — the CUIT the user must grant the service to', async () => {
@@ -585,7 +612,9 @@ describe('ArcaProvider.queryVoucher', () => {
         const thrown = new ArcaServiceError('[600] token', [{code: '600', message: 'ValidacionDeToken'}]);
         queryVoucher.mockRejectedValue(thrown);
 
-        await expect(new ArcaProvider().queryVoucher(ENTITY, 3, 1, 42)).rejects.toBe(thrown);
+        await expect(new ArcaProvider().queryVoucher(ENTITY, 3, 1, 42)).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
     });
 });
 
@@ -631,7 +660,9 @@ describe('ArcaProvider.pointsOfSale', () => {
         const thrown = new ArcaServiceError('[600] token', [{code: '600', message: 'ValidacionDeToken'}]);
         getPointsOfSale.mockRejectedValue(thrown);
 
-        await expect(new ArcaProvider().pointsOfSale(ENTITY)).rejects.toBe(thrown);
+        await expect(new ArcaProvider().pointsOfSale(ENTITY)).rejects.toMatchObject(
+            fault('AUTHORITY_SERVICE', 'ARCA_SERVICE', thrown.message),
+        );
     });
 });
 
@@ -675,9 +706,9 @@ describe('ArcaProvider.nextNumbers', () => {
 
     it('fails the whole batch on an unrecognized code, before any authority call (no silent omission)', async () => {
         // 9999 is not a known canonical CbteTipo → toCbteTipo throws up front.
-        await expect(new ArcaProvider().nextNumbers(ENTITY, 3, [1, 9999])).rejects.toMatchObject({
-            code: 'UNKNOWN_CODE',
-        });
+        await expect(new ArcaProvider().nextNumbers(ENTITY, 3, [1, 9999])).rejects.toMatchObject(
+            validationFault('UNKNOWN_CODE'),
+        );
         // Validated before minting a ticket or issuing any FECompUltimoAutorizado call.
         expect(resolve).not.toHaveBeenCalled();
         expect(getLastAuthorizedNumber).not.toHaveBeenCalled();
@@ -1008,28 +1039,28 @@ describe('ArcaProvider.lookupTaxpayers', () => {
         const thrown = new ArcaValidationError('El Id de la persona no es valido', 'INVALID_ID');
         constanciaGetTaxpayer.mockRejectedValue(thrown);
 
-        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toBe(thrown);
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject(
+            validationFault('INVALID_ID'),
+        );
         expect(identityGetTaxpayer).not.toHaveBeenCalled();
     });
 
     it('refuses an identification type no padrón service can answer for, before any login', async () => {
-        await expect(provider().lookupTaxpayers('testing', 94, 'AAB123456')).rejects.toMatchObject({
-            name: 'ArcaValidationError',
-            code: 'UNSUPPORTED_IDENTIFICATION_TYPE',
-        });
+        await expect(provider().lookupTaxpayers('testing', 94, 'AAB123456')).rejects.toMatchObject(
+            validationFault('UNSUPPORTED_IDENTIFICATION_TYPE'),
+        );
         expect(resolve).not.toHaveBeenCalled();
     });
 
     it('refuses an unknown identification type with the shared UNKNOWN_CODE reason', async () => {
-        await expect(provider().lookupTaxpayers('testing', 1234, '20111111112')).rejects.toMatchObject({
-            name: 'ArcaValidationError',
-            code: 'UNKNOWN_CODE',
-        });
+        await expect(provider().lookupTaxpayers('testing', 1234, '20111111112')).rejects.toMatchObject(
+            validationFault('UNKNOWN_CODE'),
+        );
     });
 
     it('rejects a non-numeric identification number before any login', async () => {
-        await expect(provider().lookupTaxpayers('testing', 80, '20-11111111-2')).rejects.toBeInstanceOf(
-            ArcaValidationError,
+        await expect(provider().lookupTaxpayers('testing', 80, '20-11111111-2')).rejects.toMatchObject(
+            validationFault('INVALID_ID'),
         );
         expect(resolve).not.toHaveBeenCalled();
     });
@@ -1061,8 +1092,8 @@ describe('ArcaProvider.lookupTaxpayers', () => {
         // on ArcaServiceError (WSFEv1's in-payload `Errors`), which the padrón services never produce.
         constanciaGetTaxpayer.mockRejectedValue(new ArcaSoapError('No autorizado, par token/sign invalido.'));
 
-        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toBeInstanceOf(
-            ArcaAuthError,
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject(
+            fault('AUTHORITY_AUTH', 'ARCA_AUTH'),
         );
         expect(invalidateDelegated).toHaveBeenCalledWith('ARCA', 'testing', CONSTANCIA_SERVICE);
     });
@@ -1070,7 +1101,9 @@ describe('ArcaProvider.lookupTaxpayers', () => {
     it('evicts on the A13 leg too, keyed on the A13 ticket rather than the constancia one', async () => {
         getIdPersonaList.mockRejectedValue(new ArcaSoapError('El ticket de acceso se encuentra vencido'));
 
-        await expect(provider().lookupTaxpayers('testing', 96, '11709676')).rejects.toBeInstanceOf(ArcaAuthError);
+        await expect(provider().lookupTaxpayers('testing', 96, '11709676')).rejects.toMatchObject(
+            fault('AUTHORITY_AUTH', 'ARCA_AUTH'),
+        );
         expect(invalidateDelegated).toHaveBeenCalledWith('ARCA', 'testing', A13_SERVICE);
     });
 
@@ -1080,7 +1113,11 @@ describe('ArcaProvider.lookupTaxpayers', () => {
         const thrown = new ArcaSoapError('Computador no autorizado a acceder al servicio');
         constanciaGetTaxpayer.mockRejectedValue(thrown);
 
-        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toBe(thrown);
+        // Still a transport fault, NOT the auth fault an eviction would accompany - that distinction is the
+        // point of the test, and it survives the neutral translation as the category.
+        await expect(provider().lookupTaxpayers('testing', 80, '20111111112')).rejects.toMatchObject(
+            fault('AUTHORITY_TRANSPORT', 'ARCA_SOAP', thrown.message),
+        );
         expect(invalidateDelegated).not.toHaveBeenCalled();
     });
 

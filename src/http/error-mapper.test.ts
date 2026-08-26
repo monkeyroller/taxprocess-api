@@ -1,57 +1,73 @@
 import {describe, expect, it} from '@jest/globals';
-import {ArcaServiceError, ArcaValidationError} from '../providers/arca/sdk/index.js';
-import {TaxpayerNotFoundError, VoucherNotFoundError} from '../providers/provider.js';
+import {
+    CredentialsRequiredError,
+    ProviderFault,
+    TaxpayerNotFoundError,
+    VoucherNotFoundError,
+    type ProviderFaultCategory,
+} from '../providers/provider.js';
 import {toHttpError} from './error-mapper.js';
 
-describe('toHttpError — ArcaValidationError', () => {
-    it('keeps ARCA_VALIDATION as the category and surfaces the specific reason in details.code', () => {
+/**
+ * This layer is provider-agnostic, so every case here is built from the NEUTRAL vocabulary — no ARCA error
+ * class appears, which is the property under test as much as the statuses are. The other half of the wire
+ * contract (which ARCA failure becomes which category/code/details) is pinned in
+ * `providers/arca/faults.test.ts`; the two together reproduce the exact envelopes CONTRACT §8 documents,
+ * and neither file needs the other's layer to do it.
+ */
+describe('toHttpError — ProviderFault category → status', () => {
+    const cases: ReadonlyArray<[ProviderFaultCategory, number]> = [
+        ['VALIDATION', 400],
+        ['AUTHORITY_REJECTED', 400],
+        ['AUTHORITY_AUTH', 502],
+        ['AUTHORITY_SERVICE', 502],
+        ['AUTHORITY_TRANSPORT', 502],
+        ['NOT_IMPLEMENTED', 501],
+        ['PROVIDER_INTERNAL', 500],
+    ];
+
+    it.each(cases)('maps %s to %i', (category, status) => {
+        expect(toHttpError(new ProviderFault(category, 'SOME_CODE', 'boom')).status).toBe(status);
+    });
+
+    it("passes the provider's code, message and details through verbatim", () => {
         const result = toHttpError(
-            new ArcaValidationError('amount mismatch', 'VOUCHER_ALREADY_AUTHORIZED_MISMATCH'),
+            new ProviderFault('VALIDATION', 'ARCA_VALIDATION', 'amount mismatch', {
+                code: 'VOUCHER_ALREADY_AUTHORIZED_MISMATCH',
+            }),
         );
         expect(result.status).toBe(400);
         expect(result.body.error.code).toBe('ARCA_VALIDATION');
-        expect(result.body.error.details).toEqual({code: 'VOUCHER_ALREADY_AUTHORIZED_MISMATCH'});
         expect(result.body.error.message).toBe('amount mismatch');
+        expect(result.body.error.details).toEqual({code: 'VOUCHER_ALREADY_AUTHORIZED_MISMATCH'});
     });
 
-    it('omits details when the validation error carried no code', () => {
-        const result = toHttpError(new ArcaValidationError('unknown VAT rate'));
-        expect(result.status).toBe(400);
-        expect(result.body.error.code).toBe('ARCA_VALIDATION');
+    it('omits details entirely when the fault carried none', () => {
+        const result = toHttpError(new ProviderFault('VALIDATION', 'ARCA_VALIDATION', 'unknown VAT rate'));
         expect(result.body.error.details).toBeUndefined();
     });
 
-    it('maps an unclassified ArcaServiceError to 502 ARCA_SERVICE, exposing the raw {code,message} entries', () => {
-        const result = toHttpError(new ArcaServiceError('rejected', [{code: '10015', message: 'bad'}]));
-        expect(result.status).toBe(502);
-        expect(result.body.error.code).toBe('ARCA_SERVICE');
-        expect(result.body.error.details).toEqual({arcaErrors: [{code: '10015', message: 'bad'}]});
-    });
-
-    it('promotes ARCA 10069 (receiver == issuer) to a stable 400 category instead of 502', () => {
+    it('does not interpret the details shape — a provider-specific payload rides through untouched', () => {
+        const details = {arcaCode: '10069', arcaErrors: [{code: '10069', message: 'same as issuer'}]};
         const result = toHttpError(
-            new ArcaServiceError('[10069] Campo DocNro no puede ser igual al del emisor.', [
-                {code: '10069', message: 'Campo DocNro no puede ser igual al del emisor.'},
-            ]),
+            new ProviderFault('AUTHORITY_REJECTED', 'RECEIVER_MATCHES_ISSUER', 'same as issuer', details),
         );
         expect(result.status).toBe(400);
-        expect(result.body.error.code).toBe('RECEIVER_MATCHES_ISSUER');
-        expect(result.body.error.message).toBe('Campo DocNro no puede ser igual al del emisor.');
-        expect(result.body.error.details).toEqual({
-            arcaCode: '10069',
-            arcaErrors: [{code: '10069', message: 'Campo DocNro no puede ser igual al del emisor.'}],
-        });
+        expect(result.body.error.details).toEqual(details);
     });
+});
 
-    it('does not treat an inherited Object key as a known code (would yield an undefined status)', () => {
-        // Codes come straight off ARCA's XML with no validation, so a fault or proxy page can put any
-        // string here. With `in`, 'constructor' matches and the lookup returns the Object function —
-        // `res.status(undefined)` throws inside the error handler and the caller gets nothing back.
-        for (const code of ['constructor', 'toString', 'valueOf']) {
-            const result = toHttpError(new ArcaServiceError('odd', [{code, message: 'odd'}]));
-            expect(result.status).toBe(502);
-            expect(result.body.error.code).toBe('ARCA_SERVICE');
-        }
+describe('toHttpError — CredentialsRequiredError', () => {
+    it('maps a ticket-cache miss to the 409 handshake with the neutral identity in details', () => {
+        const result = toHttpError(new CredentialsRequiredError('ARCA', '20111111112', 'wsfe', 'testing'));
+        expect(result.status).toBe(409);
+        expect(result.body.error.code).toBe('CREDENTIALS_REQUIRED');
+        expect(result.body.error.details).toEqual({
+            entityCode: 'ARCA',
+            issuerTaxId: '20111111112',
+            service: 'wsfe',
+            environment: 'testing',
+        });
     });
 });
 

@@ -21,6 +21,7 @@ import {
     isVoucherNotFound,
     notEnrolledError,
     translateDelegatedTokenError,
+    toProviderFault,
 } from './faults.js';
 import {
     isAlreadyAuthorizedError,
@@ -82,6 +83,16 @@ export class ArcaProvider extends TaxEntityProvider {
     }
 
     /**
+     * Translates any ARCA-native failure into a neutral {@link ProviderFault} on the way out of every public
+     * method (the base class applies it). This is what keeps `http/error-mapper.ts` free of ARCA: the SDK's
+     * error classes and ARCA's business codes stop here, and the HTTP layer sees only a neutral category plus
+     * the wire `code`/`details` this provider authored.
+     */
+    protected override translateFault(err: unknown): unknown {
+        return toProviderFault(err);
+    }
+
+    /**
      * Runs a delegated SDK call and, on failure, classifies a WSFEv1 token/representación rejection (see the
      * 2×2 in `docs/CONTRACT.md` §10) via {@link translateDelegatedTokenError}: a `601 CUIT representada no
      * incluida` — or an authorization-flavored overloaded `600` — → `DelegationNotAuthorizedError` (403, the
@@ -136,11 +147,11 @@ export class ArcaProvider extends TaxEntityProvider {
         }
     }
 
-    validateCredentials(input: ValidateCredentialsInput): Promise<CredentialValidationResult> {
+    protected validateCredentialsImpl(input: ValidateCredentialsInput): Promise<CredentialValidationResult> {
         return Promise.resolve(validateArcaCredentials(input));
     }
 
-    async authorizeInvoice(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult> {
+    protected async authorizeInvoiceImpl(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult> {
         // Single-voucher flow only (contract §3): the mapper authorizes exactly `voucherNumberFrom` and
         // sets CbteHasta to it, so a differing `voucherNumberTo` would be silently truncated. Reject it up
         // front — before minting a WSAA ticket — rather than authorize a number the caller did not ask for.
@@ -239,7 +250,7 @@ export class ArcaProvider extends TaxEntityProvider {
         });
     }
 
-    async lastAuthorized(
+    protected async lastAuthorizedImpl(
         entity: EntityAuthBlock,
         pointOfSaleNumber: number,
         documentTypeCode: number,
@@ -259,7 +270,7 @@ export class ArcaProvider extends TaxEntityProvider {
         return {number};
     }
 
-    async nextNumbers(
+    protected async nextNumbersImpl(
         entity: EntityAuthBlock,
         pointOfSaleNumber: number,
         documentTypeCodes: ReadonlyArray<number>,
@@ -294,7 +305,7 @@ export class ArcaProvider extends TaxEntityProvider {
         return {numbers};
     }
 
-    async queryVoucher(
+    protected async queryVoucherImpl(
         entity: EntityAuthBlock,
         pointOfSaleNumber: number,
         documentTypeCode: number,
@@ -326,11 +337,11 @@ export class ArcaProvider extends TaxEntityProvider {
         }
     }
 
-    async authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult> {
+    protected async authorityStatusImpl(environment: GenericEnvironment): Promise<AuthorityStatusResult> {
         return commonInvoiceService(toArcaEnvironment(environment)).getServerStatus();
     }
 
-    async pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
+    protected async pointsOfSaleImpl(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
         const auth = await ticketStore.resolve(
             entity.entityCode,
             entity.issuerTaxId,
@@ -354,7 +365,7 @@ export class ArcaProvider extends TaxEntityProvider {
         }
     }
 
-    async lookupTaxpayers(
+    protected async lookupTaxpayersImpl(
         environment: GenericEnvironment,
         identificationTypeCode: number,
         identificationNumber: string,

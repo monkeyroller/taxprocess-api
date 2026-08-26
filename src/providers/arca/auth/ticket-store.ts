@@ -11,25 +11,12 @@ import {toArcaEnvironment} from './environment.js';
 import {canonicalCuit, parseArcaId} from '../mapping/identifiers.js';
 import {delegateCredentialStore, type DelegateCredentials, type DelegateCredentialStore} from './delegate-credentials.js';
 import {env} from '../../../config/env.js';
-import {DelegationNotConfiguredError, type GenericEnvironment, type IssuerCredentials} from '../../provider.js';
-
-/**
- * Raised when no valid ticket is cached for the issuer and the request carried no credentials. The HTTP
- * layer maps this to `409 CREDENTIALS_REQUIRED`; core then re-sends the same request with the issuer's
- * credentials attached, and this service logs in to ARCA and proceeds. Fields are reported in the
- * neutral vocabulary (`entityCode`, `issuerTaxId`, generic `environment`).
- */
-export class CredentialsRequiredError extends Error {
-    constructor(
-        readonly entityCode: string,
-        readonly issuerTaxId: string,
-        readonly service: ServiceIdValue,
-        readonly environment: GenericEnvironment,
-    ) {
-        super(`CREDENTIALS_REQUIRED for entity=${entityCode} issuerTaxId=${issuerTaxId} service=${service} env=${environment}`);
-        this.name = 'CredentialsRequiredError';
-    }
-}
+import {
+    CredentialsRequiredError,
+    DelegationNotConfiguredError,
+    type GenericEnvironment,
+    type IssuerCredentials,
+} from '../../provider.js';
 
 /**
  * Owns WSAA authentication for the whole process. This service — never core — talks to real ARCA: it

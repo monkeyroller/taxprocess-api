@@ -1,6 +1,7 @@
 import forge from 'node-forge';
 import {ArcaValidationError, ServiceId, type AccessTicket, type ArcaConfig, type ServiceIdValue, type WsaaClient} from '../sdk/index.js';
-import {CredentialsRequiredError, TicketStore} from './ticket-store.js';
+import {TicketStore} from './ticket-store.js';
+import {CredentialsRequiredError} from '../../provider.js';
 import type {DelegateCredentials, DelegateCredentialStore} from './delegate-credentials.js';
 import {DelegationNotConfiguredError, type GenericEnvironment} from '../../provider.js';
 
