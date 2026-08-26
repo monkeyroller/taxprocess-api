@@ -171,7 +171,7 @@ describe('resolveIndecLocality', () => {
     });
 
     it('reports nothing for a barrio of an interior city — the known coverage gap', () => {
-        // `BARRIO YAPEYU` is a real Córdoba fiscal address (see padron.parsers.test.ts) and the national
+        // `BARRIO YAPEYU` is a real Córdoba fiscal address (see padron-parsing.test.ts) and the national
         // catalog does not code neighbourhoods outside CABA. Omitting is the contract-sanctioned outcome;
         // this test exists so the gap is a recorded decision rather than a surprise.
         expect(resolveIndecLocality(cordoba, 'BARRIO YAPEYU')).toBeUndefined();

@@ -52,7 +52,7 @@ describe('deriveFiscalConditionCode', () => {
     });
 
     it('ignores impuestos that say nothing about VAT', () => {
-        // The individual in padron.parsers.test.ts is registered only in DERECHO ESPECIFICO. That is a
+        // The individual in padron-parsing.test.ts is registered only in DERECHO ESPECIFICO. That is a
         // real, active registration and still no basis for a fiscal condition.
         const taxpayer = registration([active('2015', 'DERECHO ESPECIFICO')]);
 

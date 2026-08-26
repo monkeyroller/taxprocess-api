@@ -15,7 +15,7 @@ import type {TaxpayerData, PadronTax} from '../sdk/index.js';
 /**
  * The ARCA `idImpuesto` values that state a VAT condition, and the canonical code each implies. Confirmed
  * against ARCA's impuesto catalog; `20` is corroborated by a real constancia response in
- * `padron.parsers.test.ts`. Every other impuesto a taxpayer holds (ganancias, seguridad social, the
+ * `padron-parsing.test.ts`. Every other impuesto a taxpayer holds (ganancias, seguridad social, the
  * `DERECHO ESPECIFICO` of the fixtures, …) says nothing about VAT and is deliberately not listed.
  */
 const VAT_CONDITION_BY_TAX_CODE: ReadonlyMap<string, TaxProcessFiscalConditionCode> = new Map([
@@ -64,7 +64,7 @@ function isMonotributoDeregistered(taxes: ReadonlyArray<PadronTax>): boolean {
  * `undefined` is the answer in these situations, all of them normal:
  *
  * - **`IDENTITY` results**, which carry no `taxes` at all — A13 cannot report the tax picture.
- * - **No VAT-relevant registration**, e.g. the individual in `padron.parsers.test.ts` registered only in
+ * - **No VAT-relevant registration**, e.g. the individual in `padron-parsing.test.ts` registered only in
  *   `DERECHO ESPECIFICO`. Consumidor Final is *not* assumed here: it is a plausible guess rather than
  *   something ARCA stated, and core preselects on this code — a wrong preselect is worse for the operator
  *   than an empty field they were always going to fill in.
