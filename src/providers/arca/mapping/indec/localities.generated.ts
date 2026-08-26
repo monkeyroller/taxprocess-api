@@ -4,7 +4,7 @@
 // needs no network call and no database. One row per unique province / name / code triple, sorted,
 // tab-separated, newline-delimited:
 //
-//   - `provincia` — INDEC 2-digit province code (NOT ARCA's `idProvincia`; see `ar-geography.ts`).
+//   - `provincia` — INDEC 2-digit province code (NOT ARCA's `idProvincia`; see `geography.ts`).
 //   - `nombre` — the place name verbatim from the catalog, accents and all. Normalization happens at
 //     lookup time (`normalize-locality.ts`), so this file stays a faithful copy of the source.
 //   - `codigo` — the 8-digit INDEC localidad censal code (provincia 2 + departamento 3 + localidad 3).
@@ -22,7 +22,7 @@
 
 /**
  * What this snapshot is: when georef-ar was read, and how much of it. Stated in code rather than in a
- * header comment because it is published — `ar-geography.ts` reads {@link INDEC_SNAPSHOT.date} straight
+ * header comment because it is published — `geography.ts` reads {@link INDEC_SNAPSHOT.date} straight
  * into the wire's `cityCodeSchemeVersion` (CONTRACT §5), so a caller holding its own snapshot of the same
  * live dataset can date a mismatch instead of confusing drift with the barrio gap.
  *

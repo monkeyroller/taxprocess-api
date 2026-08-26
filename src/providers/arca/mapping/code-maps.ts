@@ -1,4 +1,4 @@
-import {ArcaValidationError} from './sdk/index.js';
+import {ArcaValidationError} from '../sdk/index.js';
 
 /**
  * Canonical taxprocess codes → real ARCA codes. Core sends a **provider-agnostic canonical code** for

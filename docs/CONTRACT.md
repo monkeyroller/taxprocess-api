@@ -332,10 +332,12 @@ knob on the wire. For ARCA:
 **A clave lookup can be answered by either registry, so `detail` is not implied by what you sent.** AR has
 two registries and they hold different populations: one knows only claves with an *inscripción* (registered
 taxes, a simplified-regime category), the other knows every clave the authority has issued — a superset. A
-clave is asked of the first, because it is the richer picture, and falls back to the second when the first
-has no such clave. So `detail` is `REGISTRATION` for a taxpayer with an inscripción and `IDENTITY` for a
-clave that exists without one, and a `404` means **both** registries missed. Read the key set off `detail`
-(the table below), never off the identification type in your request.
+clave is asked of the first, because it is the richer picture, and falls back to the second whenever the
+first will not report an inscripción for it — either it holds no such clave, or the clave is **inactive or
+cancelled**, which it reports as no registration at all. So `detail` is `REGISTRATION` for a taxpayer with a
+current inscripción and `IDENTITY` for a clave that exists without one, including one whose registration has
+lapsed (`registrationStatus: "INACTIVE"`), and a `404` means **both** registries missed. Read the key set
+off `detail` (the table below), never off the identification type in your request.
 
 Response:
 
@@ -441,7 +443,8 @@ and never branch on it. For ARCA it names the padrón service that answered and 
 (including the 2026 *ganancias simplificada* flag), `esSucesion`, `deceasedDate`, `dependencia`, `regimenes`,
 `categoriasAutonomo`, and the authority's own per-block constancia errors.
 
-**Errors:** `404 TAXPAYER_NOT_FOUND` (nobody registered under the identifier, in any registry),
+**Errors:** `404 TAXPAYER_NOT_FOUND` (no registry will report a taxpayer under the identifier — nobody is
+registered under it, or the clave has been cancelled and neither registry still holds the person),
 `400 ARCA_VALIDATION` with `details.code: "UNSUPPORTED_IDENTIFICATION_TYPE"` (an identification type no
 registry can answer for) or `"UNKNOWN_CODE"` / `"INVALID_ID"` (unknown canonical code / non-numeric
 identifier), `500 DELEGATION_NOT_CONFIGURED` (this service has no usable delegate certificate for the
@@ -500,7 +503,7 @@ delegate certificate — provably the same physical certificate, hence the same 
 ## 5. Canonical codes the caller supplies
 
 Core sends **provider-agnostic canonical codes** (from its `common.*.fiscal_code` columns — no longer its DB
-primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/code-maps.ts`,
+primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/mapping/code-maps.ts`,
 where the three translations are the identity — canonical code == ARCA code).
 
 | Request field | Source in webprocess-api | ARCA target code |
@@ -675,7 +678,7 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | 400 | `RECEIVER_MATCHES_ISSUER` | the authority rejected the voucher because the receiver's identification number equals the issuer's own (ARCA `10069`). Stable and caller-fixable, so it is a `400` — **not** the `502 ARCA_SERVICE` an unclassified rejection gets; `details: { arcaCode, arcaErrors }` |
 | 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
-| 404 | `TAXPAYER_NOT_FOUND` | `taxpayers/lookup` only — the authority's registry holds nobody under the identifier (an unregistered tax id, or a document matching no clave); `details: { entityCode, identificationTypeCode, identificationNumber }`. Stable outcome, **never** a `502`, and the reason a successful lookup never returns an empty list |
+| 404 | `TAXPAYER_NOT_FOUND` | `taxpayers/lookup` only — no registry will report a taxpayer under the identifier (an unregistered tax id, a cancelled clave, or a document matching no clave); `details: { entityCode, identificationTypeCode, identificationNumber }`. `message` carries the authority's own wording where it gave one. Stable outcome, **never** a `502`, and the reason a successful lookup never returns an empty list |
 | 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented |
@@ -693,11 +696,11 @@ WSAA/CMS signing, `homologacion`/`produccion`, the padrón service ids (`ws_sr_c
 abstracts CAE → `authorizationCode`.
 
 Registry lookups add three of the same kind, and each one is why the corresponding neutral field exists:
-ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `ar-geography.ts`), the **free-text
+ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `mapping/geography.ts`), the **free-text
 `localidad`** (resolved to an INDEC code against a vendored national catalog, same module — the catalog is
 internal, but *which snapshot of it* is published, §5), and the
 **`idImpuesto`** table — 30 IVA, 32 IVA exento, 20 monotributo — which is what `fiscalConditionCode` is
-derived from (`ar-fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
+derived from (`mapping/fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
 table; that is this service's job, and the neutral field is the whole point of doing it here.
 
 ---

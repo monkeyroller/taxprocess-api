@@ -1,7 +1,7 @@
 import {describe, expect, it} from '@jest/globals';
-import {deriveFiscalConditionCode} from './ar-fiscal-condition.js';
+import {deriveFiscalConditionCode} from './fiscal-condition.js';
 import {TaxProcessFiscalConditionCode} from './code-maps.js';
-import type {PadronTax, TaxpayerData} from './sdk/index.js';
+import type {PadronTax, TaxpayerData} from '../sdk/index.js';
 
 /**
  * The fiscal-condition derivation. The interesting cases are the ones that report NOTHING: this field

@@ -5,10 +5,10 @@ import {
     certificateSubjectSerialNumber,
     isCertificateSigningRequest,
     keyMatchesCertificatePem,
-} from './sdk/index.js';
-import {canonicalCuit} from './ar-identifiers.js';
-import {env, type ArcaDelegateConfig} from '../../config/env.js';
-import {DelegationNotConfiguredError, type GenericEnvironment} from '../provider.js';
+} from '../sdk/index.js';
+import {canonicalCuit} from '../mapping/identifiers.js';
+import {env, type ArcaDelegateConfig} from '../../../config/env.js';
+import {DelegationNotConfiguredError, type GenericEnvironment} from '../../provider.js';
 
 /**
  * The service's own ARCA *delegate* certificate for one environment — the platform credential this

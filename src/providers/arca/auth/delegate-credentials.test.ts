@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import forge from 'node-forge';
-import {canonicalizeCertificatePem, canonicalizePrivateKeyPem} from './sdk/index.js';
+import {canonicalizeCertificatePem, canonicalizePrivateKeyPem} from '../sdk/index.js';
 import {DelegateCredentialStore} from './delegate-credentials.js';
-import {DelegationNotConfiguredError} from '../provider.js';
-import type {ArcaDelegateConfig, DelegateCertConfig} from '../../config/env.js';
+import {DelegationNotConfiguredError} from '../../provider.js';
+import type {ArcaDelegateConfig, DelegateCertConfig} from '../../../config/env.js';
 
 interface Pair {
     certPem: string;

@@ -1,4 +1,4 @@
-import {ArcaValidationError} from './sdk/index.js';
+import {ArcaValidationError} from '../sdk/index.js';
 import {
     identificationTypeForClaveKind,
     toCbteTipo,

@@ -6,17 +6,17 @@ import {
     AR_REGION_CODE_SCHEME,
     provinceByArcaId,
     resolveIndecLocality,
-} from './ar-geography.js';
-import {deriveFiscalConditionCode} from './ar-fiscal-condition.js';
+} from './geography.js';
+import {deriveFiscalConditionCode} from './fiscal-condition.js';
 import {identificationTypeForClaveKind} from './code-maps.js';
-import type {PadronAddress, TaxpayerData} from './sdk/index.js';
+import type {PadronAddress, TaxpayerData} from '../sdk/index.js';
 import type {
     TaxpayerActivityDto,
     TaxpayerAddressDto,
     TaxpayerDto,
     TaxpayerResultDto,
     TaxpayerTaxDto,
-} from '../../http/dto/neutral-result.dto.js';
+} from '../../../http/dto/neutral-result.dto.js';
 
 /**
  * SDK padrón data → the neutral taxpayer DTOs.

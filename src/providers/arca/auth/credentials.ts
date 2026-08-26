@@ -4,13 +4,13 @@ import {
     isValidCertificate,
     isValidPrivateKey,
     keyMatchesCertificatePem,
-} from './sdk/index.js';
-import {canonicalCuit} from './ar-identifiers.js';
+} from '../sdk/index.js';
+import {canonicalCuit} from '../mapping/identifiers.js';
 import type {
     CredentialValidationError,
     CredentialValidationResult,
     ValidateCredentialsInput,
-} from '../provider.js';
+} from '../../provider.js';
 
 /**
  * Validates an ARCA credential bundle at registration time (H3): the certificate is an issued cert (not a

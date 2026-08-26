@@ -1,8 +1,8 @@
 import {ArcaServiceError, ArcaValidationError} from './sdk/index.js';
 import type {ArcaAuth, CommonInvoiceRequest, CommonInvoiceResult} from './sdk/index.js';
 import type {commonInvoiceService} from './clients.js';
-import {buildQrUrl, toNeutralResult} from './ar-invoice.mapper.js';
-import {toCbteTipo} from './code-maps.js';
+import {buildQrUrl, toNeutralResult} from './mapping/invoice.mapper.js';
+import {toCbteTipo} from './mapping/code-maps.js';
 import type {NeutralInvoice, TaxAuthorizationResult} from '../provider.js';
 
 /**

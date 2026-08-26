@@ -7,7 +7,7 @@ import {
     ArcaValidationError,
     NotImplementedError,
 } from '../providers/arca/sdk/index.js';
-import {CredentialsRequiredError} from '../providers/arca/ticket-store.js';
+import {CredentialsRequiredError} from '../providers/arca/auth/ticket-store.js';
 import {
     DelegationNotAuthorizedError,
     DelegationNotConfiguredError,

@@ -1,4 +1,4 @@
-import {ArcaValidationError} from './sdk/index.js';
+import {ArcaValidationError} from '../sdk/index.js';
 
 /**
  * Parses an all-digits ARCA identifier string (issuer CUIT, receiver `DocNro`, taxpayer id) into a

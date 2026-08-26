@@ -8,10 +8,10 @@ import {
     AR_REGION_CODE_SCHEME,
     provinceByArcaId,
     resolveIndecLocality,
-} from './ar-geography.js';
-import {AddressCodeScheme} from '../provider.js';
-import {INDEC_LOCALITY_ROWS, INDEC_SNAPSHOT} from './data/indec-localities.js';
-import {LOCALITY_ABBREVIATIONS, normalizeLocalityName} from './data/normalize-locality.js';
+} from './geography.js';
+import {AddressCodeScheme} from '../../provider.js';
+import {INDEC_LOCALITY_ROWS, INDEC_SNAPSHOT} from './indec/localities.generated.js';
+import {LOCALITY_ABBREVIATIONS, normalizeLocalityName} from './indec/normalize-locality.js';
 
 /**
  * The province table and the INDEC locality resolver. Two things are worth testing here and they are

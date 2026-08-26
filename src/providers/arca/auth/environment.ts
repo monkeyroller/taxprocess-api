@@ -1,5 +1,5 @@
-import type {ArcaEnvironment} from './sdk/index.js';
-import type {GenericEnvironment} from '../provider.js';
+import type {ArcaEnvironment} from '../sdk/index.js';
+import type {GenericEnvironment} from '../../provider.js';
 
 /**
  * Maps the neutral wire environment to ARCA's own vocabulary — kept inside the AR provider so

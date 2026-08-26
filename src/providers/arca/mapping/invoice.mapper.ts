@@ -10,15 +10,15 @@ import {
     type InvoiceLineTax,
     type InvoiceTotals,
     type PointOfSaleInfo,
-} from './sdk/index.js';
+} from '../sdk/index.js';
 import {isNonVatDiscriminating, toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
-import {parseArcaId} from './ar-identifiers.js';
-import type {NeutralInvoice} from '../provider.js';
+import {parseArcaId} from './identifiers.js';
+import type {NeutralInvoice} from '../../provider.js';
 import type {
     NeutralAuthorizationResultDto,
     NeutralAuthorizationStatus,
     PointOfSaleDto,
-} from '../../http/dto/neutral-result.dto.js';
+} from '../../../http/dto/neutral-result.dto.js';
 
 /**
  * Argentina-specific translation from the neutral invoice (carrying canonical taxprocess codes) to the

@@ -4,7 +4,7 @@ import express, {type NextFunction, type Request, type Response} from 'express';
 import cors from 'cors';
 import {useExpressServer} from 'routing-controllers';
 import {env} from './config/env.js';
-import {delegateCredentialStore} from './providers/arca/delegate-credentials.js';
+import {delegateCredentialStore} from './providers/arca/auth/delegate-credentials.js';
 import {StatusController} from './http/controllers/status.controller.js';
 import {InvoicesController} from './http/controllers/invoices.controller.js';
 import {PointsOfSaleController} from './http/controllers/points-of-sale.controller.js';

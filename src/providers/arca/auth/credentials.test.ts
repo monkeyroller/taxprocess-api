@@ -1,6 +1,6 @@
 import forge from 'node-forge';
 import {validateArcaCredentials} from './credentials.js';
-import type {ValidateCredentialsInput} from '../provider.js';
+import type {ValidateCredentialsInput} from '../../provider.js';
 
 interface Pair {
     certPem: string;

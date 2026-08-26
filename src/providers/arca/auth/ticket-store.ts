@@ -5,13 +5,13 @@ import {
     type ArcaAuth,
     type ArcaConfig,
     type ServiceIdValue,
-} from './sdk/index.js';
-import {soap} from './clients.js';
+} from '../sdk/index.js';
+import {soap} from '../clients.js';
 import {toArcaEnvironment} from './environment.js';
-import {canonicalCuit, parseArcaId} from './ar-identifiers.js';
+import {canonicalCuit, parseArcaId} from '../mapping/identifiers.js';
 import {delegateCredentialStore, type DelegateCredentials, type DelegateCredentialStore} from './delegate-credentials.js';
-import {env} from '../../config/env.js';
-import {DelegationNotConfiguredError, type GenericEnvironment, type IssuerCredentials} from '../provider.js';
+import {env} from '../../../config/env.js';
+import {DelegationNotConfiguredError, type GenericEnvironment, type IssuerCredentials} from '../../provider.js';
 
 /**
  * Raised when no valid ticket is cached for the issuer and the request carried no credentials. The HTTP

@@ -6,6 +6,49 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-08-26 (later) — An inactive or cancelled clave now gets a real answer
+
+Branch `feature/padron`. A behaviour change on `POST /api/taxpayers/lookup`; no field, no shape and no
+code-space changes. It is a **conformance fix** — the behaviour it replaces was a defect, not something
+CONTRACT.md ever promised.
+
+**What was wrong.** ARCA's constancia padrón reports a clave that is *inactive* or *cancelled* the same way
+it reports a data-quality complaint: a `200` whose only content is the complaint, with every taxpayer field
+empty. The service was reading those two cases as a complaint about an otherwise fine taxpayer, so a lookup
+for such a clave returned `200` with a row carrying `taxId` and `providerMetadata` and nothing else — no
+`name`, no `personType`, no `registrationStatus`, and `addresses` / `activities` / `taxes` all empty. That
+broke two things §3 already guarantees: that a `200` row is a taxpayer, and that its key set follows from
+`detail`. It also reads to an end user as "here is the taxpayer" when the authority never said so.
+
+**What changed.** Those two verdicts are now read for what they are — the constancia declining to report an
+inscripción — which is exactly the condition §3's fallback exists for. The lookup falls through to A13, and
+A13 decides:
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| A clave with a **lapsed** registration now returns `200 detail: "IDENTITY"` with the person in full and `registrationStatus: "INACTIVE"`, where it returned a `200` `REGISTRATION` row with no name. | §3 lookup | None, if you branch on `detail` as §3 already asks. |
+| A **cancelled** clave now returns `404 TAXPAYER_NOT_FOUND`, where it returned that same nameless `200`. | §3 errors, §8 | None — you already handle `404` on this endpoint. |
+| `404` on this endpoint no longer means strictly "nobody is registered"; a cancelled clave neither registry still holds counts too. `message` carries ARCA's own wording. | §3 errors, §8 | None. Wording only — the outcome and `details` are unchanged. |
+
+**If you coded around the old response, undo it.** Anything defending against a `200` row with no `name` or
+no `registrationStatus` on this endpoint can go: that row no longer occurs. Nothing needs to be added.
+
+**Worked example**, both verified against ARCA homologación. CUIT `24850833059` — one of the authority's
+own published test claves — is inactive: it now answers `IDENTITY` / `LEBLANC RACHEL` / `INACTIVE`, with
+document, birth date and both addresses. CUIT `20111111112` is cancelled: it now answers `404`, carrying
+ARCA's wording `La CUIT fue cancelada de acuerdo a: CLAVES INVALIDAS.`
+
+**Unchanged.** Document lookups (96 / 89 / 90) — they already read A13 and never went through the
+constancia. Claves with a current inscripción still answer `REGISTRATION`, identically. There is still no
+fallback the other way, for the reason given in the 2026-08-25 (later) entry.
+
+**Also on this branch, not a contract change.** Clave lookups against ARCA's padrón services were failing
+outright with `502 ARCA_AUTH` — a malformed SOAP body that the authority rejects before reading the ticket,
+so it reported as a credential fault. Fixed; both padrones answer. If you tested this endpoint against
+`feature/padron` and saw `502 ARCA_AUTH` on every clave, that is why, and it is gone.
+
+---
+
 ## 2026-08-26 — The locality code now says which snapshot it came from
 
 Branch `feature/padron`. Answers both asks in [CONTRACT-REQUESTS.md](CONTRACT-REQUESTS.md) 2026-08-25
@@ -162,7 +205,7 @@ ever answer, so they were replaced by the uniform pair before release rather tha
 
 **`cityCode` does not cover barrios of interior cities.** ARCA regularly reports a *barrio* as the locality —
 `BARRIO YAPEYU` for a real Córdoba fiscal address — and the national catalogs (INDEC localidades censales
-plus BAHRA asentamientos, vendored in `src/providers/arca/data/`) model settlements, not neighbourhoods.
+plus BAHRA asentamientos, vendored in `src/providers/arca/mapping/indec/`) model settlements, not neighbourhoods.
 Those addresses arrive with a `regionCode` and **no** `cityCode`, keeping only `city` as the authority's free
 text. CABA is the exception: its 48 barrios are in
 the catalog and all resolve to the single CABA locality, so a `PALERMO` address does get a code. Closing the

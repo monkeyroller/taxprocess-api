@@ -1,6 +1,6 @@
 import {ArcaAuthError, ArcaError, ArcaServiceError} from './sdk/index.js';
 import type {ServiceIdValue} from './sdk/index.js';
-import {canonicalCuit} from './ar-identifiers.js';
+import {canonicalCuit} from './mapping/identifiers.js';
 import {
     DelegationNotAuthorizedError,
     DelegationNotConfiguredError,

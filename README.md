@@ -94,19 +94,23 @@ src/
 │   ├── provider.ts        # abstract TaxEntityProvider + neutral request/result types
 │   ├── registry.ts        # entityCode → provider dispatch
 │   └── arca/              # the ARCA provider (sole owner of AR specifics)
-│       ├── arca.provider.ts
-│       ├── clients.ts     # shared SDK clients
-│       ├── code-maps.ts   # canonical code → ARCA code maps (documentTypeCode→CbteTipo, …)
-│       ├── ar-identifiers.ts       # CUIT/id parsing + canonicalization
-│       ├── ar-invoice.mapper.ts
-│       ├── ar-taxpayer.mapper.ts   # SDK padrón data → neutral taxpayer DTOs
-│       ├── ar-fiscal-condition.ts  # ARCA impuestos → canonical fiscalConditionCode
-│       ├── ar-geography.ts         # idProvincia → ISO 3166-2, localidad → INDEC code
-│       ├── data/                   # vendored INDEC locality catalog (generated) + name folding
-│       ├── ticket-store.ts         # WSAA ticket cache + CREDENTIALS_REQUIRED signal
-│       ├── credentials.ts          # PEM/CUIT credential validation
-│       ├── delegate-credentials.ts # this service's own delegate cert (padrón lookups)
-│       ├── environment.ts          # production/testing ↔ produccion/homologacion
+│       ├── arca.provider.ts        # orchestration: resolve a ticket, call the SDK, map the answer
+│       ├── clients.ts              # shared SDK clients
+│       ├── faults.ts               # what an ARCA failure IS (pure classification)
+│       ├── voucher-recovery.ts     # already-authorized (10016) reconciliation
+│       ├── auth/                   # who we sign as
+│       │   ├── ticket-store.ts         # WSAA ticket cache + CREDENTIALS_REQUIRED signal
+│       │   ├── credentials.ts          # PEM/CUIT credential validation
+│       │   ├── delegate-credentials.ts # this service's own delegate cert (padrón lookups)
+│       │   └── environment.ts          # production/testing ↔ produccion/homologacion
+│       ├── mapping/                # canonical/neutral ↔ ARCA translation
+│       │   ├── code-maps.ts            # canonical code → ARCA code (documentTypeCode→CbteTipo, …)
+│       │   ├── identifiers.ts          # CUIT/id parsing + canonicalization
+│       │   ├── invoice.mapper.ts       # neutral invoice ↔ WSFEv1 request/result
+│       │   ├── taxpayer.mapper.ts      # SDK padrón data → neutral taxpayer DTOs
+│       │   ├── fiscal-condition.ts     # ARCA impuestos → canonical fiscalConditionCode
+│       │   ├── geography.ts            # idProvincia → ISO 3166-2, localidad → INDEC code
+│       │   └── indec/                  # the vendored INDEC catalog + the folding applied to it
 │       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
 ```

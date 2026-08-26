@@ -1,10 +1,10 @@
-import {AddressCodeScheme} from '../provider.js';
-import {INDEC_LOCALITY_ROWS, INDEC_SNAPSHOT} from './data/indec-localities.js';
+import {AddressCodeScheme} from '../../provider.js';
+import {INDEC_LOCALITY_ROWS, INDEC_SNAPSHOT} from './indec/localities.generated.js';
 import {
     expandAbbreviations,
     normalizeLocalityName,
     withoutPlaceKindPrefix,
-} from './data/normalize-locality.js';
+} from './indec/normalize-locality.js';
 
 /**
  * Argentine geography codes for the neutral taxpayer address — the provider-side half of core's
@@ -190,7 +190,7 @@ function indexOfLocalities(): ReadonlyMap<string, string | null> {
         // the wrong value, and a row too short makes `name` `undefined`, which the compiler cannot see
         // (`noUncheckedIndexedAccess` is off) and which would throw inside `normalizeLocalityName` — on
         // every lookup for the life of the process, since the index is memoized only once it is built.
-        // `ar-geography.test.ts` is where a malformed file fails loudly.
+        // `geography.test.ts` is where a malformed file fails loudly.
         if (fields.length !== 3) {
             continue;
         }

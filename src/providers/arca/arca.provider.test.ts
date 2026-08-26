@@ -20,7 +20,7 @@ import {
     type EntityAuthBlock,
     type NeutralInvoice,
 } from '../provider.js';
-import type {DelegateCredentialStore} from './delegate-credentials.js';
+import type {DelegateCredentialStore} from './auth/delegate-credentials.js';
 import {NeutralInvoiceDto, NextNumbersRequestDto, PointsOfSaleRequestDto} from '../../http/dto/invoice.dto.js';
 
 /**
@@ -67,7 +67,7 @@ const CONSTANCIA_SERVICE = 'ws_sr_constancia_inscripcion';
 const A13_SERVICE = 'ws_sr_padron_a13';
 const DELEGATE_CUIT = '30999999997';
 
-jest.unstable_mockModule('./ticket-store.js', () => ({
+jest.unstable_mockModule('./auth/ticket-store.js', () => ({
     ticketStore: {resolve, invalidateDelegated},
     CredentialsRequiredError: class extends Error {},
 }));

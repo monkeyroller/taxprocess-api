@@ -1,5 +1,5 @@
 import {TaxProcessFiscalConditionCode} from './code-maps.js';
-import type {TaxpayerData, PadronTax} from './sdk/index.js';
+import type {TaxpayerData, PadronTax} from '../sdk/index.js';
 
 /**
  * The taxpayer's fiscal condition, derived from what the padrón reports — core's CONTRACT-REQUESTS ask 4.

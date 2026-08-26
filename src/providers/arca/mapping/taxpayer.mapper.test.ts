@@ -1,8 +1,8 @@
 import {describe, expect, it} from '@jest/globals';
-import {toNeutralTaxpayerResult} from './ar-taxpayer.mapper.js';
-import {AR_CITY_CODE_SCHEME_VERSION} from './ar-geography.js';
-import {AddressCodeScheme} from '../provider.js';
-import type {TaxpayerData} from './sdk/index.js';
+import {toNeutralTaxpayerResult} from './taxpayer.mapper.js';
+import {AR_CITY_CODE_SCHEME_VERSION} from './geography.js';
+import {AddressCodeScheme} from '../../provider.js';
+import type {TaxpayerData} from '../sdk/index.js';
 
 /**
  * The neutral taxpayer wire shape. What matters here is not the copying — it is the ABSENCE rules the

@@ -1,11 +1,11 @@
-import {ArcaValidationError, type CommonInvoiceResult} from './sdk/index.js';
-import type {NeutralInvoice} from '../provider.js';
+import {ArcaValidationError, type CommonInvoiceResult} from '../sdk/index.js';
+import type {NeutralInvoice} from '../../provider.js';
 import {
     buildCommonInvoiceRequest,
     buildQrUrl,
     concept1DateWindowError,
     toNeutralResult,
-} from './ar-invoice.mapper.js';
+} from './invoice.mapper.js';
 
 function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
     return {

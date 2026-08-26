@@ -11,10 +11,10 @@ import {
     type TaxpayerData,
 } from './sdk/index.js';
 import {commonInvoiceService, constanciaService, taxpayerIdentityService} from './clients.js';
-import {ticketStore} from './ticket-store.js';
-import {delegateCredentialStore, type DelegateCredentialStore} from './delegate-credentials.js';
-import {toArcaEnvironment} from './environment.js';
-import {toCbteTipo, toPadronService} from './code-maps.js';
+import {ticketStore} from './auth/ticket-store.js';
+import {delegateCredentialStore, type DelegateCredentialStore} from './auth/delegate-credentials.js';
+import {toArcaEnvironment} from './auth/environment.js';
+import {toCbteTipo, toPadronService} from './mapping/code-maps.js';
 import {
     isNoResults,
     isPadronTicketFault,
@@ -33,10 +33,10 @@ import {
     concept1DateWindowError,
     toNeutralResult,
     toNeutralPointOfSale,
-} from './ar-invoice.mapper.js';
-import {toNeutralTaxpayerResult} from './ar-taxpayer.mapper.js';
-import {validateArcaCredentials} from './credentials.js';
-import {parseArcaId} from './ar-identifiers.js';
+} from './mapping/invoice.mapper.js';
+import {toNeutralTaxpayerResult} from './mapping/taxpayer.mapper.js';
+import {validateArcaCredentials} from './auth/credentials.js';
+import {parseArcaId} from './mapping/identifiers.js';
 import {
     DelegationNotConfiguredError,
     TaxEntityProvider,
@@ -389,12 +389,14 @@ export class ArcaProvider extends TaxEntityProvider {
      * One clave (CUIT/CUIL/CDI), read from whichever padrón holds it.
      *
      * The constancia service answers first because it is the richer picture — registered taxes, monotributo,
-     * and the fiscal condition derived from them. But it only knows claves that have an *inscripción*: a
-     * clave ARCA issued with nothing registered against it is simply absent there, while A13 knows the
-     * person behind it perfectly well. A13 is the superset — a clave A13 does not hold is in no padrón — so
-     * an A13 miss is the only authoritative "nobody", and a constancia miss is a reason to ask A13 rather
-     * than a `404`. There is deliberately no fallback the other way: a clave the constancia holds is by
-     * definition in A13, so that lookup could only ever come back empty-handed.
+     * and the fiscal condition derived from them. But it only reports claves that have a *current
+     * inscripción*: a clave ARCA issued with nothing registered against it is simply absent there, and one
+     * that is inactive or cancelled comes back as a complaint with every field empty — while A13 knows the
+     * person behind it perfectly well (`getPersonaV2` reports an inactive clave in full). A13 is the
+     * superset — a clave A13 does not hold is in no padrón — so an A13 miss is the only authoritative
+     * "nobody", and a constancia miss is a reason to ask A13 rather than a `404`. There is deliberately no
+     * fallback the other way: a clave the constancia holds is by definition in A13, so that lookup could
+     * only ever come back empty-handed.
      *
      * A fallback that never *reached* A13 (no enrolment, token or transport fault) throws rather than
      * degrading to the constancia's not-found: with the superset unread we do not know that nobody is

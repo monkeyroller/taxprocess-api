@@ -1,8 +1,8 @@
 /**
  * The one normalization used on BOTH sides of an INDEC locality lookup: on the catalog names when the
  * index is built, and on ARCA's free-text `localidad` when one is resolved. Keeping it in a module of its
- * own — imported by the index builder and by `ar-geography.ts` alike — is what guarantees the two can
- * never drift, which is also why `indec-localities.ts` stores names verbatim instead of pre-normalized.
+ * own — imported by the index builder and by `geography.ts` alike — is what guarantees the two can
+ * never drift, which is also why `localities.generated.ts` stores names verbatim instead of pre-normalized.
  *
  * Folding is deliberately shallow: case, accents, punctuation, whitespace. On top of it sits one further,
  * strictly opt-in step — {@link expandAbbreviations}, the `GRAL.` → `GENERAL` rewrite ARCA's free text
@@ -11,7 +11,7 @@
  *
  * The `BARRIO`/`B°` prefix ARCA prepends is deliberately **not** folded away here. It carries meaning:
  * it says the text names a neighbourhood rather than a locality, and dropping it would let a barrio match
- * the unrelated locality of the same name (see {@link withoutPlaceKindPrefix} and `ar-geography.ts`).
+ * the unrelated locality of the same name (see {@link withoutPlaceKindPrefix} and `geography.ts`).
  */
 
 /** Leading tokens that name the *kind* of place rather than the place (`BARRIO YAPEYU` → `YAPEYU`). */
@@ -72,7 +72,7 @@ export function withoutPlaceKindPrefix(normalized: string): string | undefined {
  * `CAP` → `CAPITAN` is kept despite `CAP. FEDERAL` being a common way to write *Capital Federal*: the
  * catalog holds no `CAPITAL` anywhere, so the worst that spelling can do is resolve to nothing.
  *
- * Exported only so `ar-geography.test.ts` can invert it and run every catalog name back through the
+ * Exported only so `geography.test.ts` can invert it and run every catalog name back through the
  * resolver abbreviated — a check that has to read the table itself to stay honest when the table changes.
  */
 export const LOCALITY_ABBREVIATIONS: ReadonlyMap<string, string> = new Map([
@@ -116,7 +116,7 @@ export const LOCALITY_ABBREVIATIONS: ReadonlyMap<string, string> = new Map([
  * Every word is rewritten, not just the first: the catalog's own `VILLA GDOR LUIS F ETCHEVEHERE` puts the
  * abbreviation second, and `NTRA SRA DE FATIMA` abbreviates two words running.
  *
- * This is only ever a *fallback* spelling (see `ar-geography.ts`), which is what makes it safe. A name the
+ * This is only ever a *fallback* spelling (see `geography.ts`), which is what makes it safe. A name the
  * catalog states literally is found before expansion is ever attempted, so the nine catalog names that
  * genuinely contain one of these tokens cannot be rewritten out from under a caller who spelled them right.
  */
