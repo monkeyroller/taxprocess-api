@@ -7,6 +7,310 @@ than in core, and whether core is blocked on it.
 
 ---
 
+## 2026-08-28 — The cotización: a rate, a band, and who is allowed to ask for it
+
+Requested by `webprocess-api` while building foreign-currency electronic sales. **Asks 8, 9, 10 and 11 are
+blocking** — core cannot issue a compliant foreign-currency voucher without them, and today it does not try:
+every sale it authorizes is in the entity's own currency. Ask 12 is not blocking and has a fallback we will
+happily take.
+
+The through-line is the same as the last two entries, from the other end. **CONTRACT §5 says core sends
+canonical codes out of its own `*.fiscal_code` columns and this service maps them identity.** Currency is the
+one row in that table that does not work that way — and `currencyRate` is the one number on the wire this
+service hands to the authority without ever having seen the authority's own value for it.
+
+| # | Ask | Field | Blocking core? |
+| --- | --- | --- | --- |
+| 8 | The cotización — the entity's **whole table** in one call, and one code for an arbitrary `date` | `POST /api/currencies/rates` | **Yes** |
+| 9 | Serve it under **your delegate identity**, with no entity block | — | **Yes** |
+| 10 | You own the band, and the reference currency answers 1/1/1 offline | `lowerLimit` / `upperLimit` / `bandBasis` | **Yes** |
+| 11 | `invoice.currencyCode` alongside `currencyIso`, then instead of it | `invoice.currencyCode` | **Yes** |
+| 12 | The currency list, as a seed source we read once a year | `POST /api/currencies` | No — a table in CONTRACT.md does |
+
+**The problem.** `invoice.currencyRate` is documented as "exchange rate to the local currency"
+(CONTRACT.md:92) and lands as `MonCotiz` unvalidated: `common-invoice.service.ts:69-70` writes
+`detail.MonCotiz = request.currencyRate.toFixed(6)` and nothing between core's DTO and ARCA's XSD has an
+opinion about the number. On our side it is `sale.currency_rate`, the **negotiated** rate a salesperson may
+override (`create-sale.dto.ts`, `@MinNumericString(0.000001)`). So today a user can invoice USD at 900 on a
+day the authority published 1465.5, and both services will help them do it. `voucher-recovery.ts` compares
+`MonId` on recovery and deliberately not `MonCotiz`, which is correct, and also means nothing downstream
+catches it either.
+
+Core now checks that at sale-create — the only moment the number can still be changed, since
+`sale.currency_rate` is a pinned snapshot the whole payment tree is derived from. To check it, core needs the
+authority's number. Core cannot get it: it is published daily and needs a WSAA ticket.
+
+---
+
+### Ask 8 — one call, one vintage, every currency
+
+**Ask:** `POST /api/currencies/rates` taking `{entityCode, environment, currencyCodes?, date?}` and returning,
+per code, `{currencyCode, rate, lowerLimit, upperLimit, rateDate, bandBasis}`, plus a top-level `refreshAfter`
+and a vintage marker. Codes with no publication come back under `unavailable` with a reason, never as a failed
+batch.
+
+```jsonc
+// request — the daily sync: omit both optional fields
+{ "entityCode": "ARCA", "environment": "production" }
+
+// request — a backdated sale: one code, one date
+{ "entityCode": "ARCA", "environment": "production", "currencyCodes": ["DOL"], "date": "2026-08-25" }
+
+// response
+{ "entityCode": "ARCA", "environment": "production",
+  "rates": [
+    { "currencyCode": "DOL", "rate": 1465.5, "lowerLimit": 1465.5, "upperLimit": 1465.5,
+      "rateDate": "2026-08-27", "bandBasis": "EXACT" },
+    { "currencyCode": "PES", "rate": 1, "lowerLimit": 1, "upperLimit": 1,
+      "rateDate": "2026-08-28", "bandBasis": "REFERENCE" }
+  ],
+  "unavailable": [ { "currencyCode": "060", "reason": "NO_PUBLICATION" } ],
+  "publishedAt": "2026-08-27",
+  "refreshAfter": "2026-08-28T19:00:00-03:00" }
+```
+
+**`currencyCodes` must be optional, and omitting it must mean the entity's WHOLE table.** An authority
+publishes all its cotizaciones at once, so that is both the shape of the daily call and the shape of the
+answer core caches. Core enumerating the ~50 codes it happens to know would also silently miss any its seed
+has drifted behind on.
+
+**Why batched — consistency, not call volume.** `FEParamGetCotizacion` takes one `MonId` per call, so N calls
+can straddle a publication boundary and hand core a set where DOL is today's and EUR is yesterday's. A batch
+answers from one moment. The fan-out belongs here for the same reason it already does in
+`POST /invoices/next-numbers`, which fans out `FECompUltimoAutorizado` per code behind one neutral batch call
+(`arca.provider.ts:280`) — §5's "this service owns the mechanical mapping", exactly.
+
+**Why here.** The cotización requires a WSAA ticket and a `wsfe` enrolment. There is no version of core that
+can obtain it.
+
+**`date` is not optional to us.** Core caches only the LATEST publication, so a backdated voucher is validated
+by a live per-date call for one code. That changes the expected traffic from "once per entity per day" to
+"that, plus one per backdated sale". Say if that is a problem — the alternative is core keeping a per-date
+calendar, which we deliberately did not build.
+
+**A vintage marker, please** — the top-level `publishedAt` above, or a guarantee that `rateDate` is shared
+across the batch. Core's schedule fires on the entity's own publication time; a run that fires five minutes
+early looks *identical* to one that fires after, and without a vintage there is nothing for the schedule to
+self-correct against.
+
+**`refreshAfter`, and why core wants a timestamp rather than a clock.** ARCA publishes on its own schedule; a
+future entity will publish on another. If core hardcodes "≈19:00 ART" that is an Argentine policy constant
+living in a country-agnostic core — the same thing §9 moved `idProvincia` off the wire to avoid. Make it an
+absolute ISO instant meaning "this value cannot change before then". Core stores it and lets it push the next
+run **later, never earlier**: the local schedule sets the rhythm, you may veto an early ask. Two properties
+core depends on: present on `unavailable` entries too (that is the case a client would otherwise poll hot),
+and never in the past.
+
+**One semantic to state rather than imply.** `rateDate` is the date the rate is *for* — the last published
+business day — which may be earlier than the date asked for. Core stores `rateDate`, not the request date, so
+a Monday sale is provably validated against Friday's number.
+
+**On absence.** Core cannot ship the check. The catalogue, the binding, the cache and the sync all landed
+anyway (see the closing section), but with no band there is nothing to check against, and shipping a
+"validated" foreign-currency sale that validated nothing is worse than not shipping it.
+
+---
+
+### Ask 9 — a public number should not need a customer's certificate
+
+**Ask:** serve ask 8 with **no `entity` block and no credentials**, under this service's own delegate identity
+— the shape `POST /api/taxpayers/lookup` already has (CONTRACT.md:311-314, and §10's *"Registry lookups use
+our delegate identity, not a representación"*).
+
+This one is a decision core has already built against, not a preference, so it is worth saying why plainly
+rather than offering it as an option.
+
+**Why it is a precondition.** A cotización is a property of `(entity, currency, date)` and nothing else. Core
+caches it in a shared `common.*` row serving **every tenant**. If the endpoint demands a tenant's
+`issuerTaxId` and credentials, a platform-wide catalogue gets populated with **one arbitrary customer's
+certificate**: it breaks when their cert lapses, it spends their ARCA ticket budget fetching other customers'
+data, and a tenant with no valid integration cannot read a number that is public information. Either this is
+credential-free or core cannot cache centrally at all.
+
+**Why not core.** Core holds tenant certificates encrypted and can decrypt them — that is not the obstacle.
+The obstacle is that doing so would be *wrong*: it makes a shared fact tenant-owned.
+
+**The one thing genuinely open, and it is yours to settle.** Unlike the padrón services this is a WSFEv1 call,
+so it carries `Auth.Cuit`. **Does `FEParamGetCotizacion` succeed with `Auth.Cuit` = your own delegate CUIT and
+no representación?** Reasons to expect yes: it is a `FEParam*` method — reference data, not a taxpayer's
+ledger; `FEParamGetPtosVenta` is the one `FEParam*` that is genuinely issuer-scoped and a cotización plainly is
+not; and your delegate CUIT must already have `wsfe` adhered for §10 to work at all, so a ticket you sign
+naming yourself needs nobody's permission. But `/taxpayers/lookup` is a *padrón* precedent, not a WSFEv1 one,
+and §10's own warning that a missing representación surfaces as an overloaded `600` is exactly why we are
+asking instead of assuming. See the verification case below.
+
+If ARCA does refuse the delegate CUIT, our reading is that the fix belongs inside the provider rather than on
+the wire. **On absence** — if it truly cannot be done — core falls back to caching per
+`(integration_entity, environment)` populated by whichever tenant happens to trigger a refresh. Stated so it
+is nobody's surprise: a rate would then only be as fresh as the last tenant who sold something, and a tenant
+onboarding during an outage would have no band at all.
+
+**Also worth confirming while you are in there:** does **homologación** answer `FEParamGetCotizacion`, or
+`602` everything? Core caches per environment — validating a testing sale against a production band is wrong
+in both directions — and if homologación has no data, core will skip the check there rather than fail every
+foreign-currency test sale.
+
+---
+
+### Ask 10 — the band is yours, and the reference currency must never need the network
+
+**Ask:** always return `lowerLimit` and `upperLimit`, plus a `bandBasis` naming the rule
+(`EXACT` | `TOLERANCE` | `REFERENCE`). And answer the entity's own currency **locally**, with no authority
+call, as `rate = lowerLimit = upperLimit = 1`, `bandBasis: "REFERENCE"`.
+
+**Why here.** ARCA publishes a point cotización, not a band. A band is therefore an *interpretation* of a legal
+rule — the voucher must use the cotización of the last published business day before issue — and that
+interpretation is Argentine tax policy. If core invented `±0.5%` it would be hardcoding exactly the class of
+thing §9 exists to keep inside `src/providers/arca/`, and the constant would then apply, wrongly, to the next
+entity. **Core encodes zero band policy.** Its entire check is `lowerLimit ≤ negotiatedRate ≤ upperLimit` —
+please confirm inclusive is what you mean.
+
+If the honest answer for ARCA is that the band is a single point, say `lower = upper = rate` with
+`bandBasis: "EXACT"`. That is a fine answer and core will enforce it strictly. What core cannot do is guess
+which of the two you meant.
+
+**Why the reference currency is separate.** `FEParamGetCotizacion("PES")` is not a meaningful query, and — the
+real reason — core must not have a fiscal-sale path that fails because the authority was unreachable while a
+customer invoiced in pesos. That is ~99% of vouchers. Core seeds `PES` at 1/1/1 locally and never calls out
+for it; the ask is that your endpoint agrees rather than erroring, so the two do not disagree.
+
+Please also mark it on the catalogue row (`reference: true`, ask 12) so core seeds that guarantee from data
+instead of hardcoding `"PES"`, which would be an ARCA constant sitting in core.
+
+**On absence.** Core would have to either skip the band check entirely (making the feature decorative) or
+invent a tolerance (a §9 violation, in core, for Argentina). It will do neither.
+
+---
+
+### Ask 11 — `currencyCode`, and the end of the ISO→MonId table
+
+**Ask:** add optional `invoice.currencyCode` to `NeutralInvoiceDto`, carrying a canonical per-entity currency
+code from core's `common.fiscal_currency.fiscal_code` (`"PES"`, `"DOL"`, `"060"`), identity-mapped to `MonId`
+via `code-maps.ts` like the other three. Relax `currencyIso` to optional in the same release and enforce
+**exactly one of the two**. Once core confirms every instance sends the new field, drop `currencyIso`,
+`ISO_TO_ARCA_CURRENCY` and `resolveCurrencyId` as a breaking CONTRACT-CHANGES entry.
+
+**Why here.** `invoice.currencyIso` is the only row in §5's table sourced from something other than a
+`fiscal_code` — `currency.isoCode` rather than a canonical code (CONTRACT.md:516). The consequence is a
+**private three-entry const** at `invoice.mapper.ts:33-50`, not in `code-maps.ts`, not exported, mapping
+`{ARS:'PES', USD:'DOL', EUR:'060'}` and throwing `UNMAPPED_CURRENCY` for everything else. ARCA's catalogue has
+~50 entries and gained RUB and NZD in 2025. Today each addition is a change to this service; under a canonical
+code it is a seed row in core and **zero change here** — which is the entire argument that put
+`document_type.fiscal_code` on the wire in the first place.
+
+More sharply: ISO cannot express the cases the feature exists for. `DOL` and `002` ("Dólar Libre EEUU", the
+blue) are **both** `USD`, so today a tenant pricing at blue silently declares the official code. And `049`
+Gramos de Oro Fino has no ISO code at all, so it is unreachable.
+
+**On §9, which lists `MonId`.** §5 already states that `documentTypeCode`, `identificationTypeCode` and
+`fiscalConditionCode` are **identity** with `CbteTipo`, `DocTipo` and `CondicionIVAReceptorId`, and nobody
+argues those have leaked. What §9 forbids is core *interpreting* your vocabulary — reading `idProvincia`,
+deriving a condition from `idImpuesto`. Core never branches on `"DOL"`, never learns it means dollars, and
+would carry an SII code in the same column with no new code. The namespace is **yours**; for ARCA it happens to
+be the identity, exactly as the other three are. If anything this removes ARCA vocabulary from the codebase,
+since the ISO table disappears.
+
+**Please keep the membership check.** `code-maps.ts` should reject an unknown code as
+`400 ARCA_VALIDATION` / `UNKNOWN_CODE` rather than letting `"DOLL"` reach ARCA and come back a `502`. That is
+what `toCbteTipo` and `toDocTipo` already do, and it is the half of `resolveCurrencyId` worth keeping.
+
+**One asymmetry, flagged rather than hidden:** the existing three canonical codes are numeric
+(`fiscal_condition.fiscal_code` is `SMALLINT` in core); this one is a string, because `002` and `060` are
+zero-padded and the padding is part of the code. Suggest `@IsString() @Length(1, 8)` rather than
+`@Length(3,3)` — do not assume every future entity codes currencies in three characters.
+
+**Why additive first, and why the ordering is not negotiable.** This service runs `forbidNonWhitelisted: true`
+(`src/index.ts:47-48`), so core **cannot** send `currencyCode` until the DTO declares it — any "lockstep" plan
+is really "you first" with extra downtime. One optional field plus an exactly-one-of validator buys a clean
+window. Please make it exactly-one-of rather than prefer-`currencyCode`: silently preferring one would let a
+core bug send `{currencyIso:"USD", currencyCode:"PES"}` and produce a peso voucher for a dollar sale, which is
+the precise failure `UNMAPPED_CURRENCY` was written to prevent. `InvoiceCarriesAmount` (`invoice.dto.ts:171`)
+is the class-level pattern.
+
+> **Status on core's side:** the switch is already written and merged behind the release ordering — core sends
+> `currencyCode` and no longer has an ISO code to fall back on. So core is holding at "cannot issue a
+> foreign-currency voucher" until this lands, which is the intended state, not an outage.
+
+---
+
+### Ask 12 — the currency list, as a seed source and not a server
+
+**Ask:** `POST /api/currencies` → `{entityCode, environment, currencies: [{code, name, reference}]}`, from
+`FEParamGetTiposMonedas`. **Not blocking**, and a plain table in CONTRACT.md §5 would satisfy it completely.
+
+**Why core is not asking you to be a currency server.** §5 already says an endpoint serving a catalogue is the
+wrong shape, and core agreed with that reasoning about geography and vendored INDEC instead
+(`scripts/build-indec-cities.mjs`). The same answer applies here: core has already seeded
+`common.fiscal_currency` itself, from ARCA's published table, with the same discipline the INDEC catalogue
+uses.
+
+**The one difference, stated plainly:** georef is a public API core could read on its own.
+`FEParamGetTiposMonedas` is behind a WSAA ticket, so core has no independent source and the seed is
+hand-transcribed. This is therefore a request for a **build-time source read once a year by a script**, never
+on a request path — a seed, not a server. If you would rather not expose it at all, publish the ~50 rows in
+CONTRACT.md §5 with the reference row marked, and core will diff against that; the shape core needs is the
+same either way.
+
+**On absence.** Core keeps the hand-seeded catalogue and accepts drift. The risk is real but small and it
+fails safely: a code core does not hold is a currency nobody can select, which surfaces at binding time rather
+than silently at issuance. (The sync already logs a warning when you publish a code core has never heard of,
+which is the drift detector we have in the meantime.)
+
+---
+
+### A verification case, so none of this rests on agreement
+
+Two experiments, both falsifiable, both cheap.
+
+**1. Is the band real?** For a CUIT in homologación, on a day when your endpoint reports `DOL` at `rate = R`:
+
+- issue a Factura A in USD with `MonCotiz = R` → must be authorized;
+- issue the identical voucher with `MonCotiz = upperLimit + 0.01` → **if ARCA also authorizes that**, your
+  band is advisory rather than enforced, and `bandBasis` must say so (`TOLERANCE` with a documented width, or
+  a new `ADVISORY`). Core will still warn on it — the legal rule binds whether or not the XSD does — but core
+  must not tell an operator the authority will reject something the authority accepts.
+
+**2. Does ask 9 hold?** Call `FEParamGetCotizacion` for `MonId=DOL` with `Auth.Cuit` = your delegate CUIT and
+no representación, in homologación. Report the outcome: a rate (ask 9 is granted as written), or an ARCA code
+— `600` vs `601` distinguishes "not authorized for this operation" from "CUIT representada no incluida", and
+the two imply different fallbacks for core.
+
+Publishing both outcomes in CONTRACT.md is worth more than either endpoint, because it settles what
+`lowerLimit`/`upperLimit` *mean* for anyone reading them later.
+
+---
+
+### What core built in the meantime
+
+None of this is speculative — the whole core-side half is merged, and only the tax-service call is stubbed out
+by your 404.
+
+- **`common.fiscal_currency`** — surrogate id + `fiscal_code` + `integration_entity_id` + optional
+  `currency_id`, with an `is_reference` flag and one default per `(entity, real currency)`. Seeded with ARCA's
+  49 codes. Same shape as `common.fiscal_condition` and `common.document_type`, which is the point: currency
+  joins the canonical-code family instead of being the exception. `DOL` and `002` both map to USD, with `DOL`
+  default; `049` is deliberately unmapped and is therefore unselectable, enforced by a composite foreign key
+  rather than a rule.
+- **`common.fiscal_currency_rate`**, keyed `(fiscal_currency_id, environment)` — the durable cache for ask 8's
+  response. Keyed by environment deliberately: a testing sale must not be validated against a production band.
+  Latest-only; the per-date case is ask 8's `date` parameter.
+- **`common.fiscal_rate_sync_state`** — schedule and lease per `(entity, environment)`, with `refresh_after`
+  stored exactly as you return it.
+- **The sync.** Core had no scheduler either; this is the first. Practical consequence for you: core will call
+  ask 8 **roughly once per fiscal entity per publication**, not once per tenant and not once per sale —
+  *provided* ask 9 is granted. If it is not, multiply by the tenant count.
+- **The sale-create check**, which **records** rather than blocks: `VERIFIED`, `OUT_OF_BAND`, or one of three
+  `UNVERIFIED_*` reasons, snapshotted on the authorization row. Core refuses only what it is certain about —
+  a rate with no fiscal binding, or one bound to another authority. An out-of-band rate is a warning in the
+  sale form and a recorded verdict, never a refusal: your service's band is a cached, possibly stale value,
+  and turning it into a till outage would be the wrong trade.
+- **A rule core adopted because of `MonCotiz`:** a tenant's base currency must be the reference currency of
+  every entity it issues through, enforced when a rate is bound rather than when a sale is made. Core's rate
+  convention is base-units-per-foreign-unit; `MonCotiz` is ARS-per-foreign-unit. Those agree only under that
+  rule. It has silently held for every tenant to date, and nothing in either repo said so until now.
+
+---
+
 ## 2026-08-25 (later) — Locality catalog provenance, and a status update from core
 
 > **DELIVERED 2026-08-26** — both asks, on branch `feature/padron`. See
