@@ -1,28 +1,25 @@
 import type {Response} from 'express';
 import {Body, JsonController, Post, Res} from 'routing-controllers';
-import {getProvider} from '../../providers/registry.js';
+import {getProvider} from '../../providers/registry/registry.js';
 import type {TaxpayerResultDto} from '../dto/neutral-result.dto.js';
 import {TaxpayerLookupRequestDto} from '../dto/taxpayer.dto.js';
-import {sendError} from '../error-mapper.js';
+import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
- * Neutral taxpayer-registry lookup. Dispatches on `entityCode`; the provider resolves the level-specific
- * ticket (`409 CREDENTIALS_REQUIRED` on a miss) and calls the tax authority.
- *
- * NOTE: the ARCA SDK's padrón `parseTaxpayer` is still a SEED for every level, so this currently throws
- * `NotImplementedError` (→ `501`) after the SOAP call. It returns real data once the SDK level is
- * implemented; no change is needed here.
+ * Neutral taxpayer-registry lookup. Dispatches on `entityCode`; the provider routes on the
+ * identification type, signs with this service's own delegated credentials, and reports which registry
+ * answered via the result's `detail`. No taxpayer registered under the identifier is a
+ * `404 TAXPAYER_NOT_FOUND`, never an empty list.
  */
 @JsonController('/taxpayers')
 export class TaxpayersController {
     @Post('/lookup')
     async lookup(@Body() body: TaxpayerLookupRequestDto, @Res() res: Response): Promise<Response> {
         try {
-            const {entity} = body;
-            const result: TaxpayerResultDto = await getProvider(entity.entityCode).lookupTaxpayer(
-                entity,
-                body.taxpayerId,
-                body.level,
+            const result: TaxpayerResultDto = await getProvider(body.entityCode).lookupTaxpayers(
+                body.environment,
+                body.identificationTypeCode,
+                body.identificationNumber,
             );
             return res.json(result);
         } catch (err) {

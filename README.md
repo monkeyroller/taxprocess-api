@@ -77,28 +77,46 @@ see the **Neutral field glossary** in [docs/CONTRACT.md](docs/CONTRACT.md) for w
 | `POST /invoices/authorize` | ✅ wired | neutral invoice (core ids) → authorization code (+ RG-4892 QR) |
 | `POST /invoices/last-authorized` | ✅ wired | last authorized voucher number |
 | `POST /invoices/query` | ✅ wired | idempotency backstop |
-| `POST /taxpayers/lookup` | 🚧 501 | plumbing wired; ARCA SDK padrón parser is a seed |
+| `POST /taxpayers/lookup` | ✅ wired | registry lookup by identification type; uses this service's own delegated identity (no `entity` block) |
 
 Authenticated endpoints reply `409 CREDENTIALS_REQUIRED` on a ticket-cache miss; core re-sends with
-`entity.credentials` attached (see the contract doc).
+`entity.credentials` attached (see the contract doc). `POST /taxpayers/lookup` is the exception: it signs with
+this service's own delegate certificate, so it carries no issuer and never asks for credentials — it does
+require that certificate to be enrolled in `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` at ARCA.
 
 ## Layout
+
+A module that has unit tests lives in a folder named after it, holding the module and its test —
+`mapping/geography/{geography.ts, geography.test.ts}`. The folder name is kebab-case even where the
+filename keeps a dotted suffix: `mapping/invoice-mapper/invoice.mapper.ts`. Modules with no test of
+their own stay as plain files next to their siblings. The `/` suffixes below mark the folders that
+convention creates.
 
 ```
 src/
 ├── index.ts               # bootstrap (Express 5 + routing-controllers)
 ├── config/env.ts          # typed, frozen env (no secrets, no master key)
 ├── providers/
-│   ├── provider.ts        # abstract TaxEntityProvider + neutral request/result types
-│   ├── registry.ts        # entityCode → provider dispatch
+│   ├── provider/          # abstract TaxEntityProvider + neutral request/result types
+│   ├── registry/          # entityCode → provider dispatch
 │   └── arca/              # the ARCA provider (sole owner of AR specifics)
-│       ├── arca.provider.ts
-│       ├── clients.ts     # shared SDK clients
-│       ├── code-maps.ts   # id → ARCA code maps (documentTypeId→CbteTipo, …)
-│       ├── ar-invoice.mapper.ts
-│       ├── ticket-store.ts    # WSAA ticket cache + CREDENTIALS_REQUIRED signal
-│       ├── credentials.ts     # PEM/CUIT credential validation
-│       ├── environment.ts     # production/testing ↔ produccion/homologacion
-│       └── sdk/           # copied ARCA SDK (verbatim; WSAA + WSFEv1 + padrón)
+│       ├── arca-provider/          # orchestration: resolve a ticket, call the SDK, map the answer
+│       ├── clients.ts              # shared SDK clients
+│       ├── faults/                 # what an ARCA failure IS (pure classification)
+│       ├── voucher-recovery.ts     # already-authorized (10016) reconciliation
+│       ├── auth/                   # who we sign as
+│       │   ├── ticket-store/           # WSAA ticket cache + CREDENTIALS_REQUIRED signal
+│       │   ├── credentials/            # PEM/CUIT credential validation
+│       │   ├── delegate-credentials/   # this service's own delegate cert (padrón lookups)
+│       │   └── environment/            # production/testing ↔ produccion/homologacion
+│       ├── mapping/                # canonical/neutral ↔ ARCA translation
+│       │   ├── code-maps/              # canonical code → ARCA code (documentTypeCode→CbteTipo, …)
+│       │   ├── identifiers.ts          # CUIT/id parsing + canonicalization
+│       │   ├── invoice-mapper/         # neutral invoice ↔ WSFEv1 request/result
+│       │   ├── taxpayer-mapper/        # SDK padrón data → neutral taxpayer DTOs
+│       │   ├── fiscal-condition/       # ARCA impuestos → canonical fiscalConditionCode
+│       │   ├── geography/              # idProvincia → ISO 3166-2, localidad → INDEC code
+│       │   └── indec/                  # the vendored INDEC catalog + the folding applied to it
+│       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
 ```

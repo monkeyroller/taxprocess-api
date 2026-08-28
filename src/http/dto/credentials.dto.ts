@@ -1,6 +1,6 @@
 import {Type} from 'class-transformer';
 import {IsIn, IsNotEmpty, IsObject, IsString, ValidateNested} from 'class-validator';
-import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider.js';
+import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider/provider.js';
 import {IssuerCredentialsDto} from './entity-auth.dto.js';
 
 /**

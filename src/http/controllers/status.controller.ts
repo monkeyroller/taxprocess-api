@@ -1,8 +1,8 @@
 import type {Response} from 'express';
 import {Body, Get, JsonController, Post, Res} from 'routing-controllers';
-import {getProvider} from '../../providers/registry.js';
+import {getProvider} from '../../providers/registry/registry.js';
 import {AuthorityStatusDto} from '../dto/entity-auth.dto.js';
-import {sendError} from '../error-mapper.js';
+import {sendError} from '../error-mapper/error-mapper.js';
 
 interface HealthResponse {
     readonly status: 'ok';

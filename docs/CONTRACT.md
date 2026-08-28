@@ -309,9 +309,150 @@ while active the key is omitted. An issuer with no registered points returns `{ 
 this as a `602 "Sin Resultados"` error, which the provider normalizes to the empty list — never a `502`).
 
 ### `POST /api/taxpayers/lookup`
-Body `{ "entity": {...}, "taxpayerId": "20111111112", "level": "A5" }` → `200 { "idPersona":…, "taxId":…,
-"name":… }`. `level` ∈ `A4|A5|A10|A13` (default `A5`). NOTE: the ARCA SDK's padrón `parseTaxpayer` is still a
-seed, so this currently returns `501` after the SOAP call until the SDK level is implemented.
+Looks up whoever the authority's registry holds under an identifier. **No `entity` block and no credentials:**
+registry lookups are made under this service's own delegated identity, so this endpoint never returns
+`409 CREDENTIALS_REQUIRED` and no taxpayer has to delegate anything to us (§10).
+
+```jsonc
+{ "entityCode": "ARCA",
+  "environment": "testing",
+  "identificationTypeCode": 80,            // canonical code — the same one invoice.receiver carries
+  "identificationNumber": "20111111112" }  // digits as a string
+```
+
+**The identification type picks the registry**, which is why there is no "which service / how much detail"
+knob on the wire. For ARCA:
+
+| `identificationTypeCode` | what happens | resulting `detail` |
+| --- | --- | --- |
+| 80 CUIT, 86 CUIL, 87 CDI | the identifier **is** a clave — looked up directly | `REGISTRATION`, or `IDENTITY` — see below |
+| 96 DNI, 89 LE, 90 LC | the document is resolved to the claves issued for it, then each is read | `IDENTITY` |
+| 91 CI extranjera, 94 pasaporte, 99 sin identificar | refused — no registry can answer for these | — |
+
+**A clave lookup can be answered by either registry, so `detail` is not implied by what you sent.** AR has
+two registries and they hold different populations: one knows only claves with an *inscripción* (registered
+taxes, a simplified-regime category), the other knows every clave the authority has issued — a superset. A
+clave is asked of the first, because it is the richer picture, and falls back to the second whenever the
+first will not report an inscripción for it — either it holds no such clave, or the clave is **inactive or
+cancelled**, which it reports as no registration at all. So `detail` is `REGISTRATION` for a taxpayer with a
+current inscripción and `IDENTITY` for a clave that exists without one, including one whose registration has
+lapsed (`registrationStatus: "INACTIVE"`), and a `404` means **both** registries missed. Read the key set
+off `detail` (the table below), never off the identification type in your request.
+
+Response:
+
+```jsonc
+{ "entityCode": "ARCA",
+  "detail": "REGISTRATION",     // which registry answered — see the field table below
+  "taxpayers": [ { "taxId": "20111111112", … } ] }
+```
+
+`taxpayers` is **always a list and never empty on a `200`**: a document lookup can legitimately match several
+taxpayers (one DNI commonly carries both a CUIL and a CUIT), and no match at all is a `404 TAXPAYER_NOT_FOUND`.
+A tax-id lookup returns exactly one entry.
+
+#### Which fields you get, per `detail`
+
+The two registries are **complementary, not nested** — one knows the tax picture, the other knows the person —
+so `detail` is what tells you the possible key set. ✔ = always present, ○ = present when the authority returns
+it, — = never present for that detail.
+
+| field | `REGISTRATION` | `IDENTITY` | notes |
+| --- | :---: | :---: | --- |
+| `taxId` | ✔ | ✔ | the taxpayer's tax id (AR: CUIT/CUIL/CDI) |
+| `identificationNumber` | ✔ | ✔ | repeats `taxId`, so each row states the id it is keyed by |
+| `addresses[]` | ✔ | ✔ | see the address shape below |
+| `activities[]` | ✔ | ✔ | `{code, description, period, primary}`; `period` is an ISO year-month (`"2014-09"`) |
+| `providerMetadata` | ✔ | ✔ | entity-specific extras, opaque to core; always an object |
+| `taxes[]` | ✔ | — | `{code, description, period, status, reason}` |
+| `simplifiedRegimeCategory` | ○ | — | small-taxpayer regime category (AR: monotributo) |
+| `fiscalConditionCode` | ○ | — | the taxpayer's VAT condition, **in the same code space as `invoice.receiver.fiscalConditionCode`** (§5) |
+| `identificationTypeCode` | ○ | ○ | canonical code behind `taxIdType` (AR: 80 CUIT / 86 CUIL / 87 CDI). **○ is the truth, not a gap we intend to close** — see below |
+| `taxIdType` | ○ | ○ | AR: `"CUIT"` / `"CUIL"` / `"CDI"` |
+| `personType` | ○ | ○ | `"INDIVIDUAL"` \| `"LEGAL_ENTITY"` |
+| `name`, `firstName`, `lastName` | ○ | ○ | `name` is the legal name for an entity, the full name for a person |
+| `registrationStatus` | ○ | ○ | `"ACTIVE"` \| `"INACTIVE"` |
+| `fiscalAddress` | ○ | ○ | the address the authority holds as fiscal; also present in `addresses[]` |
+| `fiscalYearEndMonth`, `incorporationDate` | ○ | ○ | month 1–12; ISO date |
+| `documentType`, `documentNumber` | — | ○ | the identity document behind the clave |
+| `birthDate`, `registrationDate`, `legalForm` | — | ○ | ISO dates; `legalForm` is free text |
+
+**Why `identificationTypeCode` is ○ while `identificationNumber` is ✔.** The number repeats `taxId`, which
+the registry always states, so it costs nothing to guarantee. The *type* is the authority's own statement of
+what kind of clave it issued (AR: `tipoClave`), it is optional in the authority's schema, and it cannot be
+recovered from the number: in AR, CUIT, CUIL and CDI all draw from the same `20`/`23`/`24`/`27` prefixes, so
+the digits do not name their own kind. Every response recorded against the padrones so far carries it, so in
+practice the key is there — but this service will not state a type the authority did not, and inferring one
+would be worse than the caller's own fallback. Keep a fallback for it; ✔ is not coming.
+
+**Absence rule.** Optional scalars are **omitted, never `null`** — the same convention as `qr` /
+`dischargeDate` elsewhere in this contract. The arrays a detail covers are **always present**, `[]` when the
+authority reports none, so "none registered" is distinguishable from "this detail cannot report it". That is
+why `taxes` is `[]` on a `REGISTRATION` result with no registered taxes, and **absent entirely** on every
+`IDENTITY` result. Given `detail`, the key set is fully predictable from the table above.
+
+#### The address shape
+
+Every geographic level reads the same way — **a name from the authority, a code, and the standard that code
+belongs to**:
+
+| level | authority's name | code | standard | catalog snapshot |
+| --- | --- | --- | --- | --- |
+| country | — | `countryCode` | `countryCodeScheme` | — |
+| region | `region` | `regionCode` | `regionCodeScheme` | — |
+| city | `city` | `cityCode` | `cityCodeScheme` | `cityCodeSchemeVersion` |
+
+Plus `street`, `postalCode`, and `kind`/`status` in the authority's own wording (AR: tipo/estado de
+domicilio). A Córdoba fiscal address:
+
+```jsonc
+{ "street": "SANTA FE 7516", "postalCode": "5000",
+  "region": "CORDOBA",   "city": "CORDOBA",
+  "countryCode": "AR",         "countryCodeScheme": "ISO-3166-1-ALPHA-2",
+  "regionCode":  "AR-X",       "regionCodeScheme":  "ISO-3166-2",
+  "cityCode":    "14014010",   "cityCodeScheme":    "INDEC",
+                               "cityCodeSchemeVersion": "2026-08-25",
+  "kind": "FISCAL" }
+```
+
+**Resolve a level by matching the pair `(code, codeScheme)`, not the code alone.** A code means nothing
+without the catalog it was drawn from — `"AR"` is an ISO 3166-1 alpha-2 country here, and the same two
+letters index something else in another coding system. Scheme values come from the closed vocabulary in §5,
+so they are safe to store and match on directly.
+
+The authority's own catalog ids are **not** on the wire — AR's `idProvincia` is meaningless outside ARCA (§9)
+and does not appear. `region` and `city` are the authority's *names*, and they are the fallback for a level
+that did not resolve.
+
+A scheme is present **exactly** when its code is, never alone. Each pair follows the absence rule
+independently, so a partially-coded address is normal rather than a fault — and one specific gap is worth
+planning for: **AR locality codes do not cover barrios of interior cities.** ARCA regularly reports one as
+the locality (`BARRIO YAPEYU` for a Córdoba address), the national catalog does not code neighbourhoods, and
+that address therefore arrives with a `regionCode` and no `cityCode`, keeping only `city` as free text. CABA
+is the exception — its barrios all resolve to the single CABA locality.
+
+`cityCodeSchemeVersion` is on the same footing as the scheme rather than optional in its own right: it is
+present **exactly** when `cityCode` is, because what it dates is that code. It says which snapshot of the
+national catalog the code was drawn from, and it exists for one specific ambiguity — a caller resolving our
+codes against its own copy of the same *live* dataset gets nothing back both for a code minted from a newer
+snapshot than its own and for the barrio gap above, and those need opposite responses. See §5 for what the
+value is and how to read it. Only the city level carries one; the ISO levels have no snapshot behind them.
+
+`providerMetadata` is the escape hatch for data with no cross-country meaning; core should persist it opaquely
+and never branch on it. For ARCA it names the padrón service that answered and may carry `caracterizaciones`
+(including the 2026 *ganancias simplificada* flag), `esSucesion`, `deceasedDate`, `dependencia`, `regimenes`,
+`categoriasAutonomo`, and the authority's own per-block constancia errors.
+
+**Errors:** `404 TAXPAYER_NOT_FOUND` (no registry will report a taxpayer under the identifier — nobody is
+registered under it, or the clave has been cancelled and neither registry still holds the person),
+`400 ARCA_VALIDATION` with `details.code: "UNSUPPORTED_IDENTIFICATION_TYPE"` (an identification type no
+registry can answer for) or `"UNKNOWN_CODE"` / `"INVALID_ID"` (unknown canonical code / non-numeric
+identifier), `500 DELEGATION_NOT_CONFIGURED` (this service has no usable delegate certificate for the
+environment, **or it is not enrolled in the registry web service** — see §10; a clave lookup can touch both
+AR registries, so both enrolments have to be in place). A fallback that cannot reach the second registry
+fails with that error rather than degrading to a `404`: with the superset unread, "nobody is registered" is
+not something this service can state.
+
 
 ---
 
@@ -339,7 +480,9 @@ fails fast here instead of minting a ticket under the wrong identity and surfaci
 token rejection. Formatting (dashes, a `CUIT ` prefix) is not significant; both sides are canonicalized to 11
 digits. Core should send the CUIT that owns the certificate.
 
-`service` values (in `details`, ARCA): `wsfe` (invoicing) and `ws_sr_padron_a4|a5|a10|a13` (lookups). This
+`service` values (in `details`, ARCA): `wsfe` (invoicing); the registry services
+(`ws_sr_constancia_inscripcion`, `ws_sr_padron_a13`) never appear here, since lookups use this service's own
+delegated identity and so never raise `CREDENTIALS_REQUIRED`. This
 service caches tickets keyed by the **signing certificate's identity**, shared across core instances, so after
 a refresh most requests are served identity-only for ~12h. Tenant and delegate signers occupy **separate
 partitions**:
@@ -360,7 +503,7 @@ delegate certificate — provably the same physical certificate, hence the same 
 ## 5. Canonical codes the caller supplies
 
 Core sends **provider-agnostic canonical codes** (from its `common.*.fiscal_code` columns — no longer its DB
-primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/code-maps.ts`,
+primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/mapping/code-maps/code-maps.ts`,
 where the three translations are the identity — canonical code == ARCA code).
 
 | Request field | Source in webprocess-api | ARCA target code |
@@ -376,6 +519,78 @@ where the three translations are the identity — canonical code == ARCA code).
 
 This service owns the canonical-code→code translation plus the mechanical mapping: ISO→`MonId`, tax%→id +
 subtotal grouping, perceptions→`Tributos`, date formatting/clamping, and the RG-4892 QR.
+
+### Address code schemes (a closed vocabulary this service returns)
+
+The other direction: on a taxpayer lookup, every coded value on an address is returned **with the standard it
+belongs to**, so a caller resolves the level by matching the pair `(code, codeScheme)` against its own
+catalogs. These are the only values that can appear in a `*CodeScheme` field, across every entity:
+
+| `codeScheme` | what the paired code is | example |
+| --- | --- | --- |
+| `ISO-3166-1-ALPHA-2` | country, ISO 3166-1 **alpha-2** | `"AR"` |
+| `ISO-3166-2` | principal subdivision, ISO 3166-2 | `"AR-X"` (Córdoba) |
+| `INDEC` | AR locality — INDEC localidad censal, 8 digits (provincia 2 + departamento 3 + localidad 3). The one scheme whose catalog is vendored, so the one that states a snapshot — see below | `"14014010"` |
+
+Three properties this contract guarantees, because a caller keys on these:
+
+- **Stable.** The strings are the contract; a value never changes meaning or spelling. Adding a scheme (a new
+  country's national catalog — `IBGE`, `INSEE`) is additive; changing one is breaking and gets its own
+  CONTRACT-CHANGES entry.
+- **Unique.** No two coding systems share a token, so the pair alone identifies the catalog without the
+  caller needing to know which level it came from. This is why the two ISO forms are named separately rather
+  than both as `ISO`: 3166-1 defines three codes for the same country (alpha-2 `AR`, alpha-3 `ARG`, numeric
+  `032`), and a shared token would make country and region collide.
+- **Key-safe.** Uppercase, digits and hyphens only — no spaces, no case variation, nothing that differs
+  between two spellings of the same thing. A near-miss would not error anywhere; it would simply match no
+  row.
+
+Seed them as constants rather than retyping them, and treat an unrecognized scheme as "cannot resolve this
+level" rather than as a failure — that is exactly how a caller stays forward-compatible when a new entity
+lands.
+
+#### The `INDEC` code space: localidades censales, and nothing finer
+
+**Every `INDEC` code this service emits is a *localidad censal*** — 8 digits, provincia 2 + departamento 3 +
+localidad 3. INDEC's geography has levels below that one and the resolver reads them: a rural entidad or
+paraje named in BAHRA is matched by name, then **projected up** to the localidad censal containing it, and
+the localidad's code is what goes on the wire. No asentamiento id, departamento id or barrio id is ever
+emitted.
+
+This is a **guarantee, not an implementation detail**, and it is stated here because a caller relies on it
+whether it knows or not: catalog the localidades-censales layer alone and every code we send resolves. A
+build-time assertion in the index generator holds us to it — the distinct codes it emits must equal the
+number of localidades censales it read, so a finer level cannot leak in silently. Emitting one anyway would
+be **breaking**, with its own CONTRACT-CHANGES entry, never an internal change: a caller would resolve none
+of it, and the failure would be indistinguishable from the barrio gap in §3.
+
+#### `cityCodeSchemeVersion` — which snapshot the code came from
+
+`INDEC` is the one scheme here with a version, because it is the one whose catalog this service **vendors a
+snapshot of**. The value is the ISO date that catalog was read:
+
+| | |
+| --- | --- |
+| Current snapshot | **`2026-08-25`** |
+| Source | georef-ar (`apis.datos.gob.ar/georef`), Ministerio del Interior |
+| Read from it | 4027 localidades censales, 14673 BAHRA asentamientos |
+| Emittable distinct codes | **4027** — the localidades censales, per the guarantee above |
+
+The dataset is live: INDEC adds localidades, so a caller resolving these codes against its own copy of the
+same source is holding a snapshot too, and the two can drift. **What the version is for is telling drift
+from a genuine gap.** Both arrive as a code that matches no row:
+
+- **Same version as your own snapshot** → the catalogs agree. The code names something your copy does not
+  hold either, i.e. the gap is real. Accept it and fall back to `city`.
+- **Version newer than your own** → re-seed your catalog. This is the case that is otherwise invisible.
+
+Read it, never match on it, and never reject a code for carrying a version you do not recognize. The ISO
+levels carry no version and never will: there is no snapshot behind them — the country is a constant, and
+the 24 AR subdivisions are a fixed table whose last change was Tierra del Fuego becoming a province in 1990.
+
+**Not offered, deliberately: an endpoint serving the catalog.** It would remove the drift by construction and
+it is the wrong shape — it makes a tax service a geography server. A caller carrying its own catalog is fine
+as long as it can date a mismatch, which is what the version is.
 
 ---
 
@@ -459,23 +674,34 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | --- | --- | --- |
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`) when known |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`, `UNSUPPORTED_IDENTIFICATION_TYPE`, `UNKNOWN_CODE`, `INVALID_ID`) when known |
 | 400 | `RECEIVER_MATCHES_ISSUER` | the authority rejected the voucher because the receiver's identification number equals the issuer's own (ARCA `10069`). Stable and caller-fixable, so it is a `400` — **not** the `502 ARCA_SERVICE` an unclassified rejection gets; `details: { arcaCode, arcaErrors }` |
 | 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
+| 404 | `TAXPAYER_NOT_FOUND` | `taxpayers/lookup` only — no registry will report a taxpayer under the identifier (an unregistered tax id, a cancelled clave, or a document matching no clave); `details: { entityCode, identificationTypeCode, identificationNumber }`. `message` carries the authority's own wording where it gave one. Stable outcome, **never** a `502`, and the reason a successful lookup never returns an empty list |
 | 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
-| 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented (e.g. padrón parse) |
+| 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented |
 | 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure. `ARCA_SERVICE` now carries `details.arcaErrors` — the authority's full `[{ code, message }]` list, previously dropped — so core can log or branch on the underlying rejection |
-| 500 | `DELEGATION_NOT_CONFIGURED` | `delegated:true` but this service has no valid delegate certificate configured for that `environment` (server misconfiguration); `details: { environment, reason }` |
+| 500 | `DELEGATION_NOT_CONFIGURED` | this service has no valid delegate certificate for that `environment`, or (registry lookups) its certificate is not enrolled in the web service at the authority — a server misconfiguration either way; `details: { environment, reason }` |
 | 500 | `ARCA_ERROR` / `INTERNAL` | unexpected |
 
 ---
 
 ## 9. What stays inside the ARCA provider (do NOT leak into the contract)
 CAE / CAEFchVto, RG-4892 QR, MonId, tax-rate id, CbteTipo, DocTipo, CondicionIVAReceptor, ±5-day window,
-WSAA/CMS signing, `homologacion`/`produccion` — all inside `src/providers/arca/`. The neutral result already
+WSAA/CMS signing, `homologacion`/`produccion`, the padrón service ids (`ws_sr_constancia_inscripcion`,
+`ws_sr_padron_a13`) and their `personaReturn`/`datosGenerales`/monotributo vocabulary — all inside
+`src/providers/arca/`. The neutral result already
 abstracts CAE → `authorizationCode`.
+
+Registry lookups add three of the same kind, and each one is why the corresponding neutral field exists:
+ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `mapping/geography/geography.ts`), the **free-text
+`localidad`** (resolved to an INDEC code against a vendored national catalog, same module — the catalog is
+internal, but *which snapshot of it* is published, §5), and the
+**`idImpuesto`** table — 30 IVA, 32 IVA exento, 20 monotributo — which is what `fiscalConditionCode` is
+derived from (`mapping/fiscal-condition/fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
+table; that is this service's job, and the neutral field is the whole point of doing it here.
 
 ---
 
@@ -527,3 +753,26 @@ the one cached ticket automatically. Otherwise each certificate holds its own, a
 When ARCA rejects a delegate ticket with a genuine token fault, only that **service's** delegate ticket is
 dropped — the delegate identity's other tickets (e.g. padrón) are still valid and ARCA would not re-issue them
 for ~12h.
+
+### Registry lookups use our delegate *identity*, not a representación
+
+`POST /api/taxpayers/lookup` (§3) also signs with our delegate certificate, but it is **not** a delegated call
+in the sense above and none of this section's rules apply to it. ARCA's padrón services only require that
+`cuitRepresentada` appear in the token's `relations` — which, for a login we signed ourselves, is our own
+CUIT. So the service acts as **itself**: no `issuerTaxId`, no represented taxpayer, no
+`DELEGATION_NOT_AUTHORIZED`, and nobody has to grant us anything in *Administrador de Relaciones*.
+
+The one prerequisite is on **our** side: our delegate certificate must be adhered to each registry web
+service — `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` — in ARCA's WSASS (homologación) or
+Administrador de Relaciones (production). Until it is, WSAA refuses the login with `coe.notAuthorized` /
+"Computador no autorizado a acceder al servicio". On this path that is deterministic and permanent, so it is
+reported as `500 DELEGATION_NOT_CONFIGURED` naming the missing service in `details.reason` — deliberately not
+the `502` the raw transport error would suggest, because retrying cannot enrol a certificate. **Core action:
+none** — it is a deployment task on this service.
+
+Because no representación is involved, a lookup can never answer `403 DELEGATION_NOT_AUTHORIZED` — there is no
+second party to have failed to authorize us. If ARCA rejects the delegate *ticket* itself (token, signature or
+certificate), that lookup returns `502 ARCA_AUTH` and the cached ticket for that registry service is dropped so
+the next lookup re-mints; one ticket serves every lookup, so a bad one left cached would fail all of them until
+it expired. A refusal that names the *enrolment* rather than the ticket leaves the cached ticket alone — it is
+valid, and ARCA would not re-issue it for ~12h. **Core action: none** — retry as with any `502`.

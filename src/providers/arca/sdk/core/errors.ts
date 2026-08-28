@@ -47,3 +47,16 @@ export class NotImplementedError extends ArcaError {
         super(`${what} is not implemented yet`, 'NOT_IMPLEMENTED');
     }
 }
+
+/**
+ * A padrón lookup for an identifier ARCA has no person registered under. Deliberately its own class and
+ * NOT an {@link ArcaServiceError}: the padrón services report it as a perfectly successful `200` (the
+ * constancia service nests `errorConstancia › error: "No existe persona con ese Id"`, A13 answers with
+ * the documented `"La Clave (CUIT/CUIL) consultada es inexistente"`), and it is a stable, caller-visible
+ * outcome — a `404` — never the retryable authority failure a service error implies.
+ */
+export class ArcaTaxpayerNotFoundError extends ArcaError {
+    constructor(readonly taxpayerId: string, message?: string) {
+        super(message ?? `No taxpayer registered under id ${taxpayerId}`, 'TAXPAYER_NOT_FOUND');
+    }
+}

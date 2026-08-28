@@ -17,9 +17,9 @@
     "noFallthroughCasesInSwitch": true,
     // DEFERRED: noUncheckedIndexedAccess, exactOptionalPropertyTypes, and
     // noPropertyAccessFromIndexSignature are the target for new code but cannot be enabled
-    // repo-wide yet — the copied-verbatim src/arca SDK (temporary; validated by its own tests)
-    // was written under the parent's baseline `strict` and does not satisfy them. Enable once the
-    // SDK is refactored to satisfy them or retired. New code is already written to comply, and
+    // repo-wide yet — the copied SDK under src/providers/arca/sdk (temporary; validated by its own
+    // tests) was written under the parent's baseline `strict` and does not satisfy them. Enable once
+    // the SDK is refactored to satisfy them or retired. New code is already written to comply, and
     // ESLint's strict-type-checked config enforces strong typing on new code in the meantime.
 
     "skipLibCheck": true,

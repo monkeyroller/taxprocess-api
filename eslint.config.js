@@ -10,6 +10,7 @@ export default tseslint.config(
       'node_modules/**',
       'coverage/**',
       '.claude/**', // transient agent worktrees / scratch — never lint
+      'scripts/**', // build-time codegen, outside tsconfig's `src` — run by hand, never shipped
       'src/providers/arca/sdk/**',
       '**/*.test.ts',
       '*.config.js',

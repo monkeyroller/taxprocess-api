@@ -1,6 +1,6 @@
 import {Type} from 'class-transformer';
 import {IsBoolean, IsIn, IsOptional, IsString, MinLength, ValidateNested} from 'class-validator';
-import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider.js';
+import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider/provider.js';
 
 /**
  * Issuer credentials, attached ONLY when core re-sends after a `CREDENTIALS_REQUIRED` (never on a first
