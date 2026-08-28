@@ -6,6 +6,7 @@ import {
     address,
     asArray,
     fiscalAddressOf,
+    identifiesNoTaxpayer,
     integer,
     isoDate,
     isoPeriod,
@@ -60,18 +61,14 @@ export class TaxpayerIdentityService extends TaxpayerRegistryService {
     }
 
     protected override parseTaxpayer(result: Record<string, unknown>, taxpayerId: number): TaxpayerData {
-        const persona = firstOf(firstOf(result.personaReturn)?.persona);
-        if (persona === undefined) {
-            // A 200 with no `persona` block is A13's silent form of "no such clave".
-            throw new ArcaTaxpayerNotFoundError(String(taxpayerId));
-        }
+        const persona = firstOf(firstOf(result.personaReturn)?.persona) ?? {};
 
         const addresses = asArray(persona.domicilio).map(address);
         const legalName = text(persona.razonSocial);
         const firstName = text(persona.nombre);
         const lastName = text(persona.apellido);
 
-        return {
+        const data: TaxpayerData = {
             detail: 'IDENTITY',
             taxId: text(persona.idPersona) ?? String(taxpayerId),
             taxIdType: text(persona.tipoClave),
@@ -94,6 +91,23 @@ export class TaxpayerIdentityService extends TaxpayerRegistryService {
             // "none registered" (see the per-detail table in docs/CONTRACT.md).
             providerMetadata: buildMetadata(persona),
         };
+
+        // A `200` that names no taxpayer is A13's silent form of "no such clave", and it has more than one
+        // spelling: no `persona` block at all, an empty `<persona/>` container, or one carrying nothing but
+        // the `idPersona` we asked with. All three used to map to a record holding that echo and nothing
+        // else — the empty draft the customer form auto-applies — and only the first was caught, by testing
+        // that the container was *present*. Presence is not an answer, so the same shape test the constancia
+        // uses decides it here: what matters is whether the MAPPED record identifies anybody.
+        //
+        // A13 has no fallback behind it, so this miss is the authoritative `404` rather than a reason to ask
+        // elsewhere. That is the right reading all the same: a persona block ARCA populates carries
+        // `estadoClave` and the names in every §3.4 example, and a record with none of them says nothing a
+        // caller could act on anyway.
+        if (identifiesNoTaxpayer(data)) {
+            throw new ArcaTaxpayerNotFoundError(String(taxpayerId));
+        }
+
+        return data;
     }
 }
 

@@ -409,6 +409,15 @@ export class ArcaProvider extends TaxEntityProvider {
      * fallback the other way: a clave the constancia holds is by definition in A13, so that lookup could
      * only ever come back empty-handed.
      *
+     * A constancia "miss" is deliberately WIDE, and it has to be: the service reports having nothing as a
+     * successful `200` whose body is empty, in several spellings (no `datosGenerales`, a `datosGenerales`
+     * carrying only an `idPersona` echo, a recognizable complaint, an unrecognizable one, none at all, a
+     * dangling `impuesto` with no one attached to it). `constancia-inscripcion.service.ts` raises its
+     * not-found for every answer that names no taxpayer, whatever the wording or the leftovers beside it.
+     * That cannot manufacture a false negative — the widened miss lands HERE, on a fallback, not on a `404`
+     * — and its only cost is one extra A13 round trip for a clave the constancia genuinely could not
+     * describe.
+     *
      * A fallback that never *reached* A13 (no enrolment, token or transport fault) throws rather than
      * degrading to the constancia's not-found: with the superset unread we do not know that nobody is
      * registered, and a `404` would state something we cannot stand behind.
@@ -428,8 +437,10 @@ export class ArcaProvider extends TaxEntityProvider {
             } catch (fallbackErr) {
                 if (fallbackErr instanceof ArcaTaxpayerNotFoundError) {
                     // Both padrones missed, so this is a real not-found. The constancia's error is the one
-                    // rethrown: it carries the authority's own wording ("No existe persona con ese Id"),
-                    // where an A13 miss is a silent empty response with nothing but the SDK's default text.
+                    // rethrown: when it carries the authority's own wording ("No existe persona con ese Id")
+                    // that is the only sentence either service gave us, since an A13 miss is a silent empty
+                    // response. When it does not — the constancia can miss on an answer that says nothing at
+                    // all — both errors read the same, so rethrowing it costs nothing either.
                     throw err;
                 }
                 throw fallbackErr;

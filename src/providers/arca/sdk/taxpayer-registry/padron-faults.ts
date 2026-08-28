@@ -36,8 +36,9 @@ const TAXPAYER_MISSING =
  * Subject and verdict must appear together, as above — but unlike `no existe`, "cancelada"/"inactiva" is
  * vocabulary the data-quality channel shares ("La CUIT registra impuestos cancelados" is a complaint about a
  * live taxpayer), and no proximity rule separates the two readings. The caller is what makes this safe: the
- * constancia service consults it only for a response with NO `datosGenerales`, where there is no
- * registration to throw away. Do not reuse it against a populated response.
+ * constancia service consults it only for an answer that reports nothing about the taxpayer, where there is
+ * no registration to throw away — and only to pick the error's MESSAGE, never to decide that it is one. Do
+ * not reuse it against a populated response.
  */
 const CLAVE_INACTIVE =
     /(?:persona|clave|cuit|cuil|cdi|contribuyente)\b[^.]{0,40}\b(?:inactiv[ao]|cancelad[ao])|claves?\s+inv[aá]lidas?/i;
@@ -64,25 +65,51 @@ const ID_SUBJECT = /clave|cuit|cuil|cdi|documento|persona|\bid\b/i;
 /**
  * Why an EMPTY constancia response is empty: either nobody is registered under the clave we asked about
  * ({@link TAXPAYER_MISSING}) or the clave is inactive/cancelled ({@link CLAVE_INACTIVE}). Ask it only of a
- * response that carries no `datosGenerales` — see {@link CLAVE_INACTIVE} for why the wording alone does not
- * settle it.
+ * response that names no taxpayer — see {@link CLAVE_INACTIVE} for why the wording alone does not settle it.
+ *
+ * **This no longer decides whether an empty answer is a miss; it only names it** — which is why it is not
+ * exported: {@link registrationUnavailableMessage} is the whole of what a caller may do with it. The
+ * constancia service raises its not-found on the shape of the mapped record (`identifiesNoTaxpayer`), so a
+ * wording ARCA changes without notice costs the operator a sentence, not the fallback. A match is still
+ * worth having: it is the authority's own words, and the frontend renders them to tell "nobody registered"
+ * from "clave cancelada".
  *
  * The two verdicts share a treatment because they share a remedy: the constancia has no answer and A13 does.
- * The `ArcaTaxpayerNotFoundError` this raises is read by the provider as "ask the other padrón", not as a
- * `404` — only an A13 miss is authoritative (`arca.provider.ts`, `claveFor`). Left unclassified, an inactive
- * clave comes back as a `200` carrying a taxpayer with no name, no `personType` and no `registrationStatus`:
- * an answer about the taxpayer that the authority never gave.
+ * The `ArcaTaxpayerNotFoundError` this names is read by the provider as "ask the other padrón", not as a
+ * `404` — only an A13 miss is authoritative (`arca.provider.ts`, `claveFor`). Unraised, an inactive clave
+ * comes back as a `200` carrying a taxpayer with no name, no `personType` and no `registrationStatus`: an
+ * answer about the taxpayer that the authority never gave.
  *
  * Deliberately NOT extended to the SOAP-fault path ({@link translatePadronFault}). The inactive/cancelled
  * wording has only ever been seen in constancia's `errorConstancia` payload, and A13 — the service that
  * reports through faults — answers for an inactive clave rather than refusing, which is why the SDK calls
  * `getPersonaV2`. Classifying a fault we have never observed would assert "nobody" about a clave that exists.
  */
-export function isRegistrationUnavailable(message: string): boolean {
+function isRegistrationUnavailable(message: string): boolean {
     if (CREDENTIAL_FAULT.test(message)) {
         return false;
     }
     return TAXPAYER_MISSING.test(message) || CLAVE_INACTIVE.test(message);
+}
+
+/**
+ * ARCA's own sentence for a constancia answer that names no taxpayer, to carry into the not-found — or
+ * `undefined` when there is nothing quotable and the SDK's default text should stand.
+ *
+ * A recognized verdict ({@link isRegistrationUnavailable}) is preferred because it is the one wording a
+ * caller can act on. But an UNRECOGNIZED complaint is still the authority's own words and the only
+ * diagnostic that survives being raised — the record it arrived on, `providerMetadata.constanciaErrors` and
+ * all, is discarded — so it is quoted rather than dropped. That matters most for a wording that is not a
+ * verdict at all ("Servicio no disponible momentaneamente"): the miss is unavoidable, and the message is
+ * what tells an operator the constancia was unhappy rather than empty.
+ *
+ * A complaint about our CREDENTIALS is the one thing never quoted here. It would tell the caller a clave is
+ * unknown when the ticket was the problem, and the provider's `padronCall` classifies by message text
+ * (`isPadronTicketFault`) — quoting one would evict a delegate ticket ARCA will not re-issue for ~12h, on
+ * the strength of a sentence we merely copied.
+ */
+export function registrationUnavailableMessage(errors: ReadonlyArray<string>): string | undefined {
+    return errors.find(isRegistrationUnavailable) ?? errors.find((message) => !CREDENTIAL_FAULT.test(message));
 }
 
 /**

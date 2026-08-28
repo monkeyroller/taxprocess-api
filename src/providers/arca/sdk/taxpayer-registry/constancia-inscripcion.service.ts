@@ -1,11 +1,12 @@
 import {TaxpayerRegistryService} from './taxpayer-registry.service.base.js';
 import {ENDPOINTS, Namespaces, ServiceId} from '../core/constants.js';
 import {ArcaTaxpayerNotFoundError} from '../core/errors.js';
-import {isRegistrationUnavailable} from './padron-faults.js';
+import {registrationUnavailableMessage} from './padron-faults.js';
 import {firstOf} from '../invoicing/common/common-helpers.js';
 import {
     address,
     asArray,
+    identifiesNoTaxpayer,
     integer,
     isoDate,
     isoPeriod,
@@ -42,23 +43,6 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
         const persona = firstOf(result.personaReturn) ?? {};
         const errors = asArray(persona.errorConstancia).flatMap((e) => asArray(e.error).map(String));
         const general = firstOf(persona.datosGenerales) ?? {};
-        // `errorConstancia` doubles as the no-answer channel AND as a list of data-quality complaints about
-        // an existing taxpayer (manual §5.3: "Domicilio Incompleto", "Nombre erróneo", …). Only a complaint
-        // that the service cannot report this CLAVE is a not-found — nobody registered under it, or a clave
-        // that is inactive/cancelled.
-        //
-        // A MISSING `datosGenerales` is what makes that reading safe, so it is checked first rather than
-        // trusting the wording alone. The verdicts share their vocabulary with the data-quality channel —
-        // "cancelada" reads the same in "La CUIT fue cancelada" as in a complaint about some cancelled tax
-        // of a perfectly live taxpayer — and only the empty response distinguishes them. With a registration
-        // in hand there is nothing to fall through to A13 FOR: `estadoClave` already carries the inactive or
-        // cancelled state into `registrationStatus`, so the complaint rides along as metadata like the rest.
-        if (Object.keys(general).length === 0) {
-            const unavailable = errors.find(isRegistrationUnavailable);
-            if (unavailable !== undefined) {
-                throw new ArcaTaxpayerNotFoundError(String(taxpayerId), unavailable);
-            }
-        }
 
         const regimeGeneral = firstOf(persona.datosRegimenGeneral) ?? {};
         const monotributo = firstOf(persona.datosMonotributo) ?? {};
@@ -72,7 +56,7 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
 
         const category = currentCategory(monotributo);
 
-        return {
+        const data: TaxpayerData = {
             detail: 'REGISTRATION',
             // `datosGenerales.idPersona` is optional in the schema; fall back to the clave we asked about.
             taxId: text(general.idPersona) ?? String(taxpayerId),
@@ -92,6 +76,38 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
             simplifiedRegimeCategory: text(category?.descripcionCategoria) ?? text(category?.idCategoria),
             providerMetadata: buildMetadata(general, regimeGeneral, persona, errors),
         };
+
+        // This service only reports claves with a CURRENT inscripción. A clave ARCA issued with nothing
+        // registered against it, and one that is inactive or cancelled, both come back as a perfectly
+        // successful `200` in which every reported field is empty — so what decides a no-answer is whether
+        // the MAPPED record names a taxpayer at all ({@link identifiesNoTaxpayer}), and nothing else.
+        // Returned as data, such a record is an answer ARCA never gave: it reached the customer form as a
+        // draft holding only the number that was asked with, and was auto-applied as if it were the
+        // taxpayer's data. Raised as a not-found it becomes what it is — "this padrón has nothing" — and
+        // `claveFor` asks A13, which routinely knows the person perfectly well.
+        //
+        // Deliberately NOT a key count on `datosGenerales`: that measures whether ARCA sent a container,
+        // not whether the container said anything, and the node can arrive present carrying only an
+        // `idPersona` echo. Nor is it gated on the complaint's wording — see below. And deliberately blind
+        // to the régimen/monotributo blocks: a cancelled clave can come back with an empty `datosGenerales`
+        // beside a dangling `impuesto`, and a tax with nobody attached to it is not a taxpayer.
+        //
+        // Safe for the same reason the narrower test was: with no registration in hand there is nothing to
+        // throw away. When a registration IS in hand — `getPersona_v2` answers for an inactive clave the v1
+        // operation refuses — a cancellation verdict beside it rides along as metadata like every other
+        // complaint, because `estadoClave` already carries that state into `registrationStatus`.
+        if (identifiesNoTaxpayer(data)) {
+            // The complaint now picks only the MESSAGE. That matters — it is the authority's own wording,
+            // which `claveFor` rethrows into the `404` and which is what lets a caller tell "nobody
+            // registered" from "clave cancelada" — but it no longer decides anything, so an unknown
+            // wording, or none at all, is still a not-found. `errorConstancia` doubles as a data-quality
+            // channel about a taxpayer who very much exists (manual §5.3: "Domicilio Incompleto", "Nombre
+            // erróneo", …) and shares its vocabulary with the verdicts, so ARCA rewording one must not turn
+            // a miss back into an empty success.
+            throw new ArcaTaxpayerNotFoundError(String(taxpayerId), registrationUnavailableMessage(errors));
+        }
+
+        return data;
     }
 }
 

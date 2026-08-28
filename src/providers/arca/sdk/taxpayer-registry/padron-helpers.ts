@@ -1,6 +1,6 @@
 // ---- Padrón wire helpers ----
 
-import type {PadronAddress, PersonType, RegistrationStatus} from './padron.types.js';
+import type {PadronAddress, PersonType, RegistrationStatus, TaxpayerData} from './padron.types.js';
 
 /**
  * The SOAP parser runs with `parseTagValue: false`, so every padrón field arrives as a string and an
@@ -114,4 +114,108 @@ export function address(node: Record<string, any>): PadronAddress {
 /** The `FISCAL`-typed address out of a parsed list, when the service reported one. */
 export function fiscalAddressOf(addresses: ReadonlyArray<PadronAddress>): PadronAddress | undefined {
     return addresses.find((a) => a.kind?.toUpperCase() === 'FISCAL');
+}
+
+// ---- Did the authority say anything? ----
+
+/**
+ * How a {@link TaxpayerData} member relates to what the AUTHORITY told us about the person we asked about.
+ *
+ * - `ECHO` — the request handed back, or a fact about which service answered. `taxId` is the very number
+ *   the caller asked with (both services fall back to it when the response omits `idPersona`), `taxIdType`
+ *   is derivable from that number, and `detail` names the padrón that replied. None of the three is
+ *   evidence that a padrón holds this taxpayer — and they are why an answer with nothing in it looks
+ *   *almost* populated rather than obviously blank.
+ * - `DIAGNOSTIC` — `providerMetadata`, which carries `errorConstancia` and is therefore populated
+ *   *precisely* when the constancia declined to report a clave. Counting it as content would invert
+ *   {@link identifiesNoTaxpayer} in the only case that matters.
+ * - `SITUATION` — what the taxpayer is registered FOR. Real authority content, but it names nobody: a
+ *   cancelled clave can come back with an empty `datosGenerales` and a dangling `impuesto` still listed in
+ *   `datosRegimenGeneral`, which is a fragment of a registration rather than an answer about a person.
+ * - `IDENTITY` — who the taxpayer is and what state their clave is in. One populated member HERE is what
+ *   makes a response an answer, because it is the only group a caller can read the taxpayer out of.
+ */
+type TaxpayerFieldOrigin = 'ECHO' | 'DIAGNOSTIC' | 'SITUATION' | 'IDENTITY';
+
+/**
+ * Every member of {@link TaxpayerData}, classified.
+ *
+ * Exhaustive by type (`Record<keyof TaxpayerData, …>`) rather than a list of the fields that count: a
+ * member added to the interface then fails to compile until it is classified here, which is the only thing
+ * that stops {@link identifiesNoTaxpayer} from silently weakening as the shape grows. A comment asking for
+ * the same discipline would be forgotten exactly once.
+ */
+const TAXPAYER_FIELD_ORIGIN: Readonly<Record<keyof TaxpayerData, TaxpayerFieldOrigin>> = {
+    detail: 'ECHO',
+    taxId: 'ECHO',
+    taxIdType: 'ECHO',
+    providerMetadata: 'DIAGNOSTIC',
+    personType: 'IDENTITY',
+    name: 'IDENTITY',
+    firstName: 'IDENTITY',
+    lastName: 'IDENTITY',
+    registrationStatus: 'IDENTITY',
+    documentType: 'IDENTITY',
+    documentNumber: 'IDENTITY',
+    birthDate: 'IDENTITY',
+    registrationDate: 'IDENTITY',
+    legalForm: 'IDENTITY',
+    incorporationDate: 'IDENTITY',
+    fiscalYearEndMonth: 'IDENTITY',
+    fiscalAddress: 'IDENTITY',
+    addresses: 'IDENTITY',
+    activities: 'SITUATION',
+    taxes: 'SITUATION',
+    simplifiedRegimeCategory: 'SITUATION',
+};
+
+/**
+ * Whether a parsed value carries anything at all.
+ *
+ * Recursive because the padrón's *containers* can arrive empty: an `<domicilioFiscal/>` element parses into
+ * a {@link PadronAddress} whose every field is `undefined`, and the constancia service copies that same
+ * address into `addresses`, so a presence-only check would read two populated members out of a response
+ * that stated nothing. Blank strings are already `undefined` by the time they reach here ({@link text}),
+ * and re-checked anyway so this holds for any value rather than only for one this module produced.
+ */
+function reportsSomething(value: unknown): boolean {
+    if (value === undefined || value === null) {
+        return false;
+    }
+    if (typeof value === 'string') {
+        return value.trim() !== '';
+    }
+    if (Array.isArray(value)) {
+        return value.some(reportsSomething);
+    }
+    if (typeof value === 'object') {
+        return Object.values(value).some(reportsSomething);
+    }
+    return true;
+}
+
+/**
+ * Whether a padrón answer names nobody — every `IDENTITY` member absent or empty, whatever the echoes,
+ * diagnostics and registered taxes beside them say. One populated member of that group makes it a real
+ * answer.
+ *
+ * This is what tells a taxpayer the authority described from a container it sent with nothing in it. A
+ * record with no name, no person type, no registration status and no address carries nothing a caller can
+ * read the taxpayer out of: it is indistinguishable from a miss on every axis anyone consumes, and
+ * returning it as a success is how an empty draft reached the customer form and was auto-applied as if it
+ * were data.
+ *
+ * `SITUATION` members deliberately do NOT rescue such a record. A tax or an activity with no one attached
+ * to it cannot be shown to a customer, and the asymmetry decides the doubtful case: a wrong miss costs one
+ * A13 round trip, where a wrong answer is the bug above. A response that really does hold a registration
+ * carries `estadoClave` — and with it `registrationStatus` — in every worked example in both manuals.
+ *
+ * Evaluated on the MAPPED record, never on the raw SOAP node. Key-counting `datosGenerales` measures
+ * whether ARCA sent a container, not whether the container said anything — and the node can arrive present
+ * carrying only an `idPersona` echo.
+ */
+export function identifiesNoTaxpayer(data: TaxpayerData): boolean {
+    return Object.entries(TAXPAYER_FIELD_ORIGIN).every(
+        ([field, origin]) => origin !== 'IDENTITY' || !reportsSomething(data[field as keyof TaxpayerData]),
+    );
 }
