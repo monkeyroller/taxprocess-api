@@ -4,13 +4,13 @@ import express, {type NextFunction, type Request, type Response} from 'express';
 import cors from 'cors';
 import {useExpressServer} from 'routing-controllers';
 import {env} from './config/env.js';
-import {delegateCredentialStore} from './providers/arca/auth/delegate-credentials.js';
+import {delegateCredentialStore} from './providers/arca/auth/delegate-credentials/delegate-credentials.js';
 import {StatusController} from './http/controllers/status.controller.js';
 import {InvoicesController} from './http/controllers/invoices.controller.js';
 import {PointsOfSaleController} from './http/controllers/points-of-sale.controller.js';
 import {TaxpayersController} from './http/controllers/taxpayers.controller.js';
 import {EntitiesController} from './http/controllers/entities.controller.js';
-import {toHttpError} from './http/error-mapper.js';
+import {toHttpError} from './http/error-mapper/error-mapper.js';
 
 /**
  * Express safety net for errors that reach the framework layer — chiefly class-validator `400`s that

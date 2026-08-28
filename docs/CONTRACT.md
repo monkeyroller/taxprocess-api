@@ -503,7 +503,7 @@ delegate certificate — provably the same physical certificate, hence the same 
 ## 5. Canonical codes the caller supplies
 
 Core sends **provider-agnostic canonical codes** (from its `common.*.fiscal_code` columns — no longer its DB
-primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/mapping/code-maps.ts`,
+primary keys); this service maps them to the entity's real codes (for ARCA, via `src/providers/arca/mapping/code-maps/code-maps.ts`,
 where the three translations are the identity — canonical code == ARCA code).
 
 | Request field | Source in webprocess-api | ARCA target code |
@@ -696,11 +696,11 @@ WSAA/CMS signing, `homologacion`/`produccion`, the padrón service ids (`ws_sr_c
 abstracts CAE → `authorizationCode`.
 
 Registry lookups add three of the same kind, and each one is why the corresponding neutral field exists:
-ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `mapping/geography.ts`), the **free-text
+ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `mapping/geography/geography.ts`), the **free-text
 `localidad`** (resolved to an INDEC code against a vendored national catalog, same module — the catalog is
 internal, but *which snapshot of it* is published, §5), and the
 **`idImpuesto`** table — 30 IVA, 32 IVA exento, 20 monotributo — which is what `fiscalConditionCode` is
-derived from (`mapping/fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
+derived from (`mapping/fiscal-condition/fiscal-condition.ts`). Core reading any of these directly would mean hardcoding an AFIP
 table; that is this service's job, and the neutral field is the whole point of doing it here.
 
 ---

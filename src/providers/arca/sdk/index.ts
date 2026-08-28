@@ -4,8 +4,8 @@
  * `ArcaAuth` — obtained from `WsaaClient` — into each call. There is no per-issuer orchestrator here;
  * auth policy (ticket caching, credential handshakes) is the consumer's concern.
  */
-export {SoapClient} from './core/soap-client.js';
-export {WsaaClient} from './core/wsaa-client.js';
+export {SoapClient} from './core/soap-client/soap-client.js';
+export {WsaaClient} from './core/wsaa-client/wsaa-client.js';
 export {ENDPOINTS, Namespaces, ServiceId} from './core/constants.js';
 export type {ArcaEnvironment, ServiceIdValue} from './core/constants.js';
 export type {ArcaConfig} from './core/arca-config.js';
@@ -31,15 +31,15 @@ export {
     canonicalizeCertificatePem,
     canonicalizePrivateKeyPem,
     keyMatchesCertificatePem,
-} from './core/pem.js';
+} from './core/pem/pem.js';
 export {
     calculateTotals, roundToTwo, type InvoiceLineTax, type InvoiceTotals, type VatSubtotal
-} from './invoicing/invoice-totals.js';
+} from './invoicing/invoice-totals/invoice-totals.js';
 export {vatRateIdForPercent, VAT_RATE_IDS} from './invoicing/vat-rate-map.js';
 export {
     buildArcaQrUrl, formatArcaDate, parseArcaDate, argentinaDateParts, type ArcaQrParams
-} from './invoicing/arca-qr.js';
-export {CommonInvoiceService} from './invoicing/common/common-invoice.service.js';
+} from './invoicing/arca-qr/arca-qr.js';
+export {CommonInvoiceService} from './invoicing/common/common-invoice-service/common-invoice.service.js';
 export type {
     CommonInvoiceRequest,
     CommonInvoiceResult,

@@ -1,4 +1,4 @@
-import {SoapClient} from '../core/soap-client.js';
+import {SoapClient} from '../core/soap-client/soap-client.js';
 import {ArcaServiceError, NotImplementedError, type ArcaErrorEntry} from '../core/errors.js';
 import type {ArcaEnvironment} from '../core/constants.js';
 import type {ArcaAuth, PointOfSaleInfo, ServerStatus} from '../core/types.js';

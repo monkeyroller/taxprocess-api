@@ -1,5 +1,5 @@
 import {IsIn, IsInt, IsString, MinLength} from 'class-validator';
-import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider.js';
+import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider/provider.js';
 
 /**
  * Body for `POST /taxpayers/lookup`.

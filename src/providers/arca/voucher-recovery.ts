@@ -1,9 +1,9 @@
 import {ArcaServiceError, ArcaValidationError} from './sdk/index.js';
 import type {ArcaAuth, CommonInvoiceRequest, CommonInvoiceResult} from './sdk/index.js';
 import type {commonInvoiceService} from './clients.js';
-import {buildQrUrl, toNeutralResult} from './mapping/invoice.mapper.js';
-import {toCbteTipo} from './mapping/code-maps.js';
-import type {NeutralInvoice, TaxAuthorizationResult} from '../provider.js';
+import {buildQrUrl, toNeutralResult} from './mapping/invoice-mapper/invoice.mapper.js';
+import {toCbteTipo} from './mapping/code-maps/code-maps.js';
+import type {NeutralInvoice, TaxAuthorizationResult} from '../provider/provider.js';
 
 /**
  * Idempotent recovery of a voucher ARCA has already authorized.

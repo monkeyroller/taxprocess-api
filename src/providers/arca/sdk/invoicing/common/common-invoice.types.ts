@@ -1,4 +1,4 @@
-import type {VatSubtotal} from '../invoice-totals.js';
+import type {VatSubtotal} from '../invoice-totals/invoice-totals.js';
 
 /**
  * SDK-facing request/response types for WSFEv1 (facturación electrónica común).

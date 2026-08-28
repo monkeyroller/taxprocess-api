@@ -1,8 +1,8 @@
 import type {Response} from 'express';
 import {Body, JsonController, Param, Post, Res} from 'routing-controllers';
-import {getProvider} from '../../providers/registry.js';
+import {getProvider} from '../../providers/registry/registry.js';
 import {ValidateCredentialsRequestDto} from '../dto/credentials.dto.js';
-import {sendError} from '../error-mapper.js';
+import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
  * Entity credential validation (H3). Core calls this synchronously during `POST /integrations` so bad

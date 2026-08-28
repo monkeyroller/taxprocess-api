@@ -86,30 +86,36 @@ require that certificate to be enrolled in `ws_sr_constancia_inscripcion` and `w
 
 ## Layout
 
+A module that has unit tests lives in a folder named after it, holding the module and its test —
+`mapping/geography/{geography.ts, geography.test.ts}`. The folder name is kebab-case even where the
+filename keeps a dotted suffix: `mapping/invoice-mapper/invoice.mapper.ts`. Modules with no test of
+their own stay as plain files next to their siblings. The `/` suffixes below mark the folders that
+convention creates.
+
 ```
 src/
 ├── index.ts               # bootstrap (Express 5 + routing-controllers)
 ├── config/env.ts          # typed, frozen env (no secrets, no master key)
 ├── providers/
-│   ├── provider.ts        # abstract TaxEntityProvider + neutral request/result types
-│   ├── registry.ts        # entityCode → provider dispatch
+│   ├── provider/          # abstract TaxEntityProvider + neutral request/result types
+│   ├── registry/          # entityCode → provider dispatch
 │   └── arca/              # the ARCA provider (sole owner of AR specifics)
-│       ├── arca.provider.ts        # orchestration: resolve a ticket, call the SDK, map the answer
+│       ├── arca-provider/          # orchestration: resolve a ticket, call the SDK, map the answer
 │       ├── clients.ts              # shared SDK clients
-│       ├── faults.ts               # what an ARCA failure IS (pure classification)
+│       ├── faults/                 # what an ARCA failure IS (pure classification)
 │       ├── voucher-recovery.ts     # already-authorized (10016) reconciliation
 │       ├── auth/                   # who we sign as
-│       │   ├── ticket-store.ts         # WSAA ticket cache + CREDENTIALS_REQUIRED signal
-│       │   ├── credentials.ts          # PEM/CUIT credential validation
-│       │   ├── delegate-credentials.ts # this service's own delegate cert (padrón lookups)
-│       │   └── environment.ts          # production/testing ↔ produccion/homologacion
+│       │   ├── ticket-store/           # WSAA ticket cache + CREDENTIALS_REQUIRED signal
+│       │   ├── credentials/            # PEM/CUIT credential validation
+│       │   ├── delegate-credentials/   # this service's own delegate cert (padrón lookups)
+│       │   └── environment/            # production/testing ↔ produccion/homologacion
 │       ├── mapping/                # canonical/neutral ↔ ARCA translation
-│       │   ├── code-maps.ts            # canonical code → ARCA code (documentTypeCode→CbteTipo, …)
+│       │   ├── code-maps/              # canonical code → ARCA code (documentTypeCode→CbteTipo, …)
 │       │   ├── identifiers.ts          # CUIT/id parsing + canonicalization
-│       │   ├── invoice.mapper.ts       # neutral invoice ↔ WSFEv1 request/result
-│       │   ├── taxpayer.mapper.ts      # SDK padrón data → neutral taxpayer DTOs
-│       │   ├── fiscal-condition.ts     # ARCA impuestos → canonical fiscalConditionCode
-│       │   ├── geography.ts            # idProvincia → ISO 3166-2, localidad → INDEC code
+│       │   ├── invoice-mapper/         # neutral invoice ↔ WSFEv1 request/result
+│       │   ├── taxpayer-mapper/        # SDK padrón data → neutral taxpayer DTOs
+│       │   ├── fiscal-condition/       # ARCA impuestos → canonical fiscalConditionCode
+│       │   ├── geography/              # idProvincia → ISO 3166-2, localidad → INDEC code
 │       │   └── indec/                  # the vendored INDEC catalog + the folding applied to it
 │       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)

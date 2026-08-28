@@ -1,9 +1,9 @@
 import type {Response} from 'express';
 import {Body, JsonController, Post, Res} from 'routing-controllers';
-import {getProvider} from '../../providers/registry.js';
+import {getProvider} from '../../providers/registry/registry.js';
 import type {TaxpayerResultDto} from '../dto/neutral-result.dto.js';
 import {TaxpayerLookupRequestDto} from '../dto/taxpayer.dto.js';
-import {sendError} from '../error-mapper.js';
+import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
  * Neutral taxpayer-registry lookup. Dispatches on `entityCode`; the provider routes on the

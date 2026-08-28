@@ -1,6 +1,6 @@
 // Type-only: the enum is used here purely to constrain the address scheme fields, so nothing is imported
 // at runtime and `provider.ts` importing these DTOs back stays a compile-time-only relationship.
-import type {AddressCodeScheme} from '../../providers/provider.js';
+import type {AddressCodeScheme} from '../../providers/provider/provider.js';
 
 /** Neutral authorization status — country-agnostic. AR `Resultado` A/P/R maps onto these. */
 export type NeutralAuthorizationStatus = 'AUTHORIZED' | 'PARTIAL' | 'REJECTED';

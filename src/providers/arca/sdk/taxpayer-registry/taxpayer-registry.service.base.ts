@@ -1,4 +1,4 @@
-import {SoapClient} from '../core/soap-client.js';
+import {SoapClient} from '../core/soap-client/soap-client.js';
 import {NotImplementedError} from '../core/errors.js';
 import {translatePadronFault} from './padron-faults.js';
 import type {ArcaEnvironment, ServiceIdValue} from '../core/constants.js';

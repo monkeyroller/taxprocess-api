@@ -19,7 +19,7 @@ import {
     type ValidationArguments,
     type ValidatorConstraintInterface,
 } from 'class-validator';
-import type {NeutralInvoiceConcept} from '../../providers/provider.js';
+import type {NeutralInvoiceConcept} from '../../providers/provider/provider.js';
 import {EntityAuthDto} from './entity-auth.dto.js';
 
 /**

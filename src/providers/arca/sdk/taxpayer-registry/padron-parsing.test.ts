@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from '@jest/globals';
-import {SoapClient} from '../core/soap-client.js';
+import {SoapClient} from '../core/soap-client/soap-client.js';
 import {ArcaSoapError, ArcaTaxpayerNotFoundError, ArcaValidationError} from '../core/errors.js';
 import {ConstanciaInscripcionService} from './constancia-inscripcion.service.js';
 import {TaxpayerIdentityService} from './taxpayer-identity.service.js';

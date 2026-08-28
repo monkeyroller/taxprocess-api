@@ -1,7 +1,7 @@
 import {describe, expect, it} from '@jest/globals';
 import {ArcaServiceError, ArcaValidationError} from '../providers/arca/sdk/index.js';
-import {toProviderFault} from '../providers/arca/faults.js';
-import {toHttpError, type HttpErrorResult} from './error-mapper.js';
+import {toProviderFault} from '../providers/arca/faults/faults.js';
+import {toHttpError, type HttpErrorResult} from './error-mapper/error-mapper.js';
 
 /**
  * The composed error contract: an ARCA SDK failure, through the provider's translation and this layer's

@@ -1,6 +1,6 @@
 import type {Response} from 'express';
 import {Body, JsonController, Post, Res} from 'routing-controllers';
-import {getProvider} from '../../providers/registry.js';
+import {getProvider} from '../../providers/registry/registry.js';
 import {
     AuthorizeInvoiceRequestDto,
     LastAuthorizedRequestDto,
@@ -8,7 +8,7 @@ import {
     QueryVoucherRequestDto,
 } from '../dto/invoice.dto.js';
 import type {LastAuthorizedResultDto} from '../dto/neutral-result.dto.js';
-import {sendError} from '../error-mapper.js';
+import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
  * Invoicing endpoints. Each dispatches on the request's `entityCode` to a provider, which resolves a
