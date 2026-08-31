@@ -9,6 +9,91 @@ than in core, and whether core is blocked on it.
 
 ## 2026-08-28 — The cotización: a rate, a band, and who is allowed to ask for it
 
+> **DELIVERED 2026-08-31** — all five asks, on branch `feature/foreign-currency-electronic-sales`. See
+> [CONTRACT-CHANGES.md](CONTRACT-CHANGES.md). Ask 11 is additive; one narrow date-format tightening is
+> flagged there and does not affect a caller sending `YYYY-MM-DD`.
+>
+> | # | Answer |
+> | --- | --- |
+> | 8 | **Granted as specified.** `POST /api/currencies/rates`, CONTRACT §3. Whole table when `currencyCodes` is omitted; `date` → the authority's own calendar day. The per-date traffic is fine — do not build a per-date calendar on our account. |
+> | 9 | **Granted as written, and verified against homologación 2026-08-31** — `FEParamGetCotizacion` answered under our own delegate CUIT with no representación (no `600`, no `601`). Credential-free, no `entity` block. Also answers your second question: homologación serves live cotización data. |
+> | 10 | **Granted as `TOLERANCE`**, both bounds inclusive. But read the next paragraph before you ship the warning — it changes what the feature catches. |
+> | 11 | **Granted**, additive-first in the order you specified, exactly-one-of enforced, membership check kept. |
+> | 12 | **As a table**, CONTRACT §5 — all forty-nine codes with the reference row marked. No endpoint; §5's own argument applies. |
+>
+> **The one thing you should act on.** Your verification case asked what happens if ARCA authorizes a rate
+> outside the band, and the answer from the manual is worse than that: the band ARCA *documents* is already
+> wide enough to contain your own worked example. Validation 10119 permits a rate from 2% to 400% of the
+> published cotización, so **USD at 900 on a day ARCA published 1465.5 will be authorized**. `OUT_OF_BAND`
+> will almost never fire. We are reporting the real width rather than a narrower one for the reason you
+> gave — core must not tell an operator the authority will reject something it accepts — and suggesting the
+> deviation warning key off `rate`, which is already in the response, under its own verdict. Details and the
+> suggested shape are in the CONTRACT-CHANGES entry.
+>
+> **Experiment 1 is done too: the band is `[0.02 × rate, 5 × rate]`**, measured against homologación on
+> 2026-08-31 with 23 vouchers. `0.0199R` rejected, `0.02R` authorized, `4.9997R` authorized, `5.0002R`
+> rejected — every rejection under validation 10119. **Neither of the two readings we flagged was right:**
+> ARCA's sentence names two rules in different forms ("inferior **al** 2%" is a fraction *of* the rate,
+> "superior **en** un 400%" is an excess *over* it), so the bounds do not share a form. And 10240 does not
+> bind ordinary vouchers — `R + 1.5` was authorized. The full ladder is in the CONTRACT-CHANGES entry.
+>
+> You were right that publishing these outcomes is worth more than either endpoint: they settle what
+> `lowerLimit`/`upperLimit` mean, and they say plainly that at a rate of 1465.5 the accepted range is
+> `[29.31, 7327.50]` — so the band check will essentially never fire on a commercially wrong rate.
+>
+> Two answers to your other open questions: **`rateDate`** is the day the rate is *for* and may precede the
+> day requested, so store it rather than your request date; and `common.fiscal_entity.rateTolerancePercent`
+> should stay unused while we return a real band, since two tolerances in series are nobody's rule.
+>
+> **CORE ACKNOWLEDGED 2026-08-31.** All five answers taken; core is on branch
+> `feature/foreign-currency-electronic-sales`.
+>
+> **You can schedule the breaking removal.** Core sends **only** `currencyCode` — `currencyIso` is gone from
+> the payload builder and from `TaxInvoicePayload`, and there is no ISO code left to fall back on. Nothing
+> here will ever send both, so the exactly-one-of validator will only ever see the new field from us.
+>
+> **Ask 12: the seed matches your §5 table exactly.** Diffed programmatically — 49 codes, 49 names, zero
+> differences in either direction, including the accents. A table was the right call; no endpoint needed.
+>
+> **Ask 10: thank you for measuring it, and you were right that it changes the feature.** `OUT_OF_BAND` stays,
+> because a rate outside `[0.02 × rate, 5 × rate]` really is refused and that is worth predicting — but it is
+> no longer the signal the sale form is built around. We took your suggestion and added a separate verdict,
+> `OFF_OFFICIAL_RATE`, comparing against `rate`. It is an **exact match**: any rate that is not the published
+> one is flagged, with no tolerance of our own, precisely because a second tolerance in series would be nobody's
+> rule. That only works because the frontend now pre-fills `rate` on the sale form, so `VERIFIED` means
+> "equality to the last decimal" and a flag means somebody deliberately overrode it.
+>
+> To be explicit about what core does with your band: it is consumed, never reinterpreted. The width is not
+> copied into core in any form, and `rateTolerancePercent` has been **dropped** rather than left unused — a
+> dead column whose name asserts core may widen your band was a trap for whoever found it next.
+>
+> **Your §2 caught a real bug on our side, and it was worse than a band check.** Core derived every calendar
+> day with `toISOString().slice(0, 10)` — the UTC day — from a `timestamptz`. So a sale rung up at 22:00 ART
+> was dated to the **following day**, and that day is `CbteFch`. Fixed by resolving the day in the entity's own
+> zone, which is now `common.fiscal_entity.time_zone_id` (renamed from `rate_sync_time_zone_id`, since it turned
+> out to answer all four of the questions your table lists rather than only the cron). The regression test
+> asserts `2026-08-25T22:00:00-03:00` → `2026-08-25`.
+>
+> **Two of your notes we acted on directly:** `rateDate` is what we store, not the request date; and we mark
+> the reference row in the seed (`is_reference`) rather than hardcoding `"PES"`. Your `602 Sin Resultados` for
+> `PES` also settled a question we had left open — answering it locally at `1/1/1` is required, not an
+> optimisation, so a peso till cannot be taken down by an unreachable authority.
+>
+> **`unavailable[].reason` is now read rather than collapsed.** `NO_PUBLICATION` and `UNKNOWN_CODE` record
+> `UNVERIFIED_UNAVAILABLE`; only a transport failure or your 502 records `UNVERIFIED_UPSTREAM`. Reporting "the
+> tax service did not answer" for a currency you answered about would have sent someone to check a healthy
+> service. `UNKNOWN_CODE` additionally logs a seed-drift warning, since it means our catalogue holds a code
+> ARCA does not.
+>
+> **Two things we are not asking for, recorded so they are not open questions:** homologación serving live
+> cotizaciones means we run the same check in testing rather than skipping it, and we are not building a
+> per-date calendar — one single-code call per backdated sale, as you sized it.
+>
+> **One we will take you up on later.** The `expiration` / `dischargeDate` UTC-instant inconsistency is real on
+> our side too: core persists `authorizationExpiration` as a timestamp built from a day, so a non-AR viewer
+> renders the previous date. We would rather take it with your window than patch around it — propose it when
+> you are ready.
+
 Requested by `webprocess-api` while building foreign-currency electronic sales. **Asks 8, 9, 10 and 11 are
 blocking** — core cannot issue a compliant foreign-currency voucher without them, and today it does not try:
 every sale it authorizes is in the entity's own currency. Ask 12 is not blocking and has a fallback we will
