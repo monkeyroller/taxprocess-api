@@ -1,17 +1,11 @@
 /**
- * ARCA SOAP endpoints and namespaces, split by environment.
+ * ARCA SOAP endpoints and namespaces, split by environment. The single place to switch hosts; nothing else
+ * in the SDK hardcodes a URL, so verify an unexpected 404 against the live WSDL and update it here.
  *
- * NOTE: the web-service HOSTNAMES below intentionally remain on `afip.gov.ar` — that is where ARCA
- * (ex-AFIP) physically runs the SOAP services; the `arca.gov.ar` equivalents do not resolve. Like
- * the SOAP namespaces, these are ARCA's actual server addresses, not app naming. This is the single
- * place to switch hosts — if a call unexpectedly returns 404, verify against the live WSDL
- * (`<endpoint>?WSDL`) and update it here. Nothing else in the SDK hardcodes a URL.
- *
- * Re-verified 2026-08-21 against the padrón manuals: the constancia manual v4.1 rewrote its documented
- * URLs from `afip.gov.ar` to `arca.gob.ar`, but `awshomo.arca.gob.ar` does not resolve at all, while
- * `awshomo.afip.gov.ar` (testing) and `aws.arca.gob.ar` (production) both answer. The A13 manual v1.4
- * still documents `afip.gov.ar` for both environments. So the `afip.gov.ar` spellings below stay —
- * do NOT "modernize" them to match the constancia manual.
+ * The hostnames stay on `afip.gov.ar`, which is where ARCA physically runs the SOAP services. Verified
+ * 2026-08-21: the constancia manual v4.1 rewrote its documented URLs to `arca.gob.ar`, but
+ * `awshomo.arca.gob.ar` does not resolve while `awshomo.afip.gov.ar` answers, and the A13 manual still
+ * documents `afip.gov.ar` for both environments. Do not modernize these to match the constancia manual.
  */
 
 export type ArcaEnvironment = 'homologacion' | 'produccion';
@@ -19,10 +13,9 @@ export type ArcaEnvironment = 'homologacion' | 'produccion';
 /**
  * ARCA service identifiers used to request a per-service WSAA access ticket.
  *
- * `CONSTANCIA_INSCRIPCION` is the padrón service formerly registered as `ws_sr_padron_a5`: ARCA renamed
- * it and marks the old alcance-5 id as deprecated in its service catalog. The endpoint and namespace are
- * unchanged by the rename (still `personaServiceA5` / `a5.soap.ws.server.puc.sr`) — only the WSAA service
- * id moved, and the certificate must be enrolled under the NEW id.
+ * `CONSTANCIA_INSCRIPCION` is the padrón service formerly registered as `ws_sr_padron_a5`, which ARCA now
+ * marks deprecated. The rename moved only the WSAA service id, leaving the endpoint and namespace on their
+ * alcance-5 spellings, and the certificate must be enrolled under the new id.
  */
 export const ServiceId = {
     WSFEV1: 'wsfe',

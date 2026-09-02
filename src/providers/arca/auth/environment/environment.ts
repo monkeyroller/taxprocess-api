@@ -1,15 +1,15 @@
-import type {ArcaEnvironment} from '../../sdk/index.js';
-import type {GenericEnvironment} from '../../../provider/provider.js';
+import type {ArcaEnvironment} from '../../sdk/core/constants.js';
+import type {GenericEnvironment} from '../../../provider/environment.js';
 
 /**
- * Maps the neutral wire environment to ARCA's own vocabulary — kept inside the AR provider so
- * `homologacion`/`produccion` never leak into the contract (which speaks `production`/`testing`).
+ * Maps the neutral wire environment to ARCA's own vocabulary, kept inside the provider so
+ * `homologacion`/`produccion` never leak into the contract.
  */
 export function toArcaEnvironment(environment: GenericEnvironment): ArcaEnvironment {
     return environment === 'production' ? 'produccion' : 'homologacion';
 }
 
-/** Inverse of {@link toArcaEnvironment}. */
+/** The inverse mapping. */
 export function toGenericEnvironment(environment: ArcaEnvironment): GenericEnvironment {
     return environment === 'produccion' ? 'production' : 'testing';
 }

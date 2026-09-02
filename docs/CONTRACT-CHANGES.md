@@ -6,6 +6,445 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-01 — Which day a cotización is for, the end of the publication hour, and `next-numbers` duplicates
+
+Branch `feature/foreign-currency-electronic-sales`. Answers both asks core raised on 2026-09-01. **Ask 13 is your row 2**, settled against
+production: ARCA's rows are working-day closes, so `date` no longer reaches `FchCotiz` verbatim — **`date` is
+the day that needs a valid rate, and what is valid for it is the previous working day's close.** Nothing core
+sends changes.
+
+Carried in the same branch is one change **nobody asked for**, on an endpoint unrelated to currency:
+`/invoices/next-numbers` now de-duplicates. It is last in the table because it is the only item here that can
+alter a response you already consume.
+
+| # | Ask | Answer | Core action |
+| --- | --- | --- | --- |
+| 13 | `date` should mean the day of the voucher, immutably | **Granted, and it is your row 2.** Measured against **production**: every Saturday, Sunday and feriado answers `602`, so a row is the close *of* a working day. `date` stays the day needing a rate; this service resolves it to the previous working day's close — weekends skipped, feriados discovered via `602` — plus a future-date clamp per the second clause of 10038. The rule is production's in **every** environment. **Note the correction below on what 10038 does and does not require** | **None.** Keep sending the voucher's day |
+| 14 | Retire the publication-hour `refreshAfter` | **Granted as asked.** `PUBLICATION_HOUR_ART` and the publication-hour arithmetic are deleted; the field is now the next authority midnight and documented as **advisory** | None — you already ignore it. Keep storing it |
+| — | *Not an ask — raised by us* | `/invoices/next-numbers` de-duplicates `documentTypeCodes`, so `numbers` carries **one entry per distinct code**. `[1, 6, 1, 1]` answers with two entries, not four | **None if you map back by `documentTypeCode`**, as the contract has always specified. **Required if you zip `numbers` against your request positionally, or check the two have equal length** — see below |
+
+---
+
+### The verification case — which day is a rate FOR
+
+You were right that this was ours to measure, and right that publishing the outcome is worth more than the
+answer itself. It took **two** environments, and the reason is the finding we would most want the next person
+to have: **homologación cannot answer this question.**
+
+**Run 1 — homologación, 2026-09-01, every call at 11:52 ART**, `MonId = DOL`, read-only:
+
+| # | `FchCotiz` sent | result |
+| --- | --- | --- |
+| 1 | `20260901` (today, Tue) | **`602 Sin Resultados`** |
+| 2 | `20260831` (Mon) | `MonCotiz 1158.439`, `FchCotiz 20260831` |
+| 3 | *omitted* | `MonCotiz 1158.439`, `FchCotiz 20260831` |
+| 4a | `20260829` (Sat) | `MonCotiz 1157.952`, `FchCotiz 20260829` |
+| 4b | `20260830` (Sun) | `MonCotiz 1158.195`, `FchCotiz 20260830` |
+| 5 | `20260817` (a feriado, Mon) | `MonCotiz 1155.114`, `FchCotiz 20260817` |
+
+Read on its own that table is genuinely ambiguous, and it is worth saying so plainly because we first read it
+as settled. Every calendar day has a row; today does not. That fits "rows are dated by close, today has not
+closed" and it fits "rows are dated by the day they apply to, today's is not loaded yet at 11:52" equally
+well. Nor do the values discriminate: fetched for all 24 days from `20260808`, homologación's series
+**compounds smoothly** — deltas `+0.222` rising to `+0.244`, no repeat across either weekend or the feriado. A
+real reference rate must carry *something* forward over a Saturday, so that series is generated. **No
+measurement taken in homologación can decide this**, and the numbers there are not market data.
+
+**Run 2 — PRODUCTION, 2026-09-01 at 13:55 ART**, same six calls plus the same 24-day series. Different
+answer, and decisive:
+
+| `FchCotiz` sent | result |
+| --- | --- |
+| Mon `20260831` | `MonCotiz 1508.5` |
+| *omitted* | `MonCotiz 1508.5` — the same row |
+| Fri `20260828`, Thu `20260827`, Wed `20260826` | `1512`, `1512`, `1514` |
+| **every Saturday and Sunday** | **`602 Sin Resultados`** |
+| **Mon `20260817` — a feriado** | **`602 Sin Resultados`** |
+| `20260901` — today | **`602 Sin Resultados`** |
+
+**Rows are business-day CLOSES.** The weekend settles it: if a row were the rate *in force on* its day, a
+Saturday would have to carry one — the rate in force on a Saturday is Friday's close, and a voucher issued on
+a Saturday has to declare something. ARCA has no Saturday row at all. Under close-keying every observation
+falls out at once: no weekend close, no feriado close, none for today because today has not closed. The values
+corroborate it — `1487.5`–`1514`, jittery, with negative deltas — against homologación's smooth curve over the
+same days.
+
+**So "la cotización registrada para el día hábil anterior a la fecha de emisión" — the day validation 10038
+names — is the row for the last business day strictly before your `date`**, and that is what this service now
+sends.
+
+> ⚠️ **A correction to how we cited this, because it changes what you should build.** 10038 does **not**
+> currently bind any voucher you can send. Its sentence opens with a condition we quoted past — *"Si se indica
+> que el pago del comprobante se realiza en la misma moneda extranjera que la factura"*, i.e.
+> `CanMisMonExt = S` — and nothing on this wire sets that field. Our own 2026-08-31 entry says as much about
+> the *exactness* half of the same validation ("so it never fires"); the day half is gated identically, and
+> presenting it as an ARCA requirement was our error.
+>
+> **Nothing about the behaviour changes, and neither does the measurement** — that rows are working-day closes
+> is a fact about ARCA's data, established by the `602`s, not by any validation. This service still resolves to
+> the previous working day, because it is the number 10038 names (so your vouchers are already right when
+> foreign-currency payment lands and it starts binding as `EXACT`), and because it makes `rateDate` a
+> defensible record of which publication priced a sale.
+>
+> **What it changes is what you should assert.** For a voucher you can send today the only cotización rule
+> that binds is 10119's band, `[0.02 × rate, 5 × rate]` — so a rate taken from a different day will almost
+> always be accepted. Do not build a check that tells an operator ARCA will reject one; that is the same trap
+> as `OUT_OF_BAND`, which the 2026-08-31 entry already warned about.
+
+Three things fall out that are worth having on the record:
+
+- **"Día hábil" vs "día anterior" stops being a question**, and it is *working* days that won. Weekends never
+  carry a close, so they are **skipped** rather than asked about: Monday 2026-08-31 reads Friday the 28th in
+  one call instead of spending two `602`s on the way. Feriados are the opposite decision — deliberately not
+  modelled, because a holiday calendar here would be wrong the first year ARCA moves a *puente*, so they are
+  discovered through the authority's own `602`. Monday 2026-08-17 resolves to Friday the 14th without anything
+  in this service knowing it was a holiday.
+- **Omitting `FchCotiz` really does mean "the latest row"** — verified in both environments. It answered the
+  same row as the last business day, so an omitted `date` and `date` = today are the same question in
+  different words.
+- **The trap, reported because it nearly shipped.** "ARCA's cotización for a day already *is* the previous
+  close, so asking for the voucher's own day already gives the right number" is a very reasonable argument,
+  and it is wrong: the row is *labelled* by the day it closed on, so asking `X` returns the close **of** `X`.
+  For a same-day sale it happens not to matter — today has no row, the walk-back rescues it, and both
+  readings give the same answer. **A backdated sale is where it bites**, which is the case `date` exists for:
+  `date` = Mon 2026-08-31 returns Friday's `1512`, not Monday's own `1508.5`.
+
+**One decision that follows from all this, and is worth stating because it is not obvious.** The rule above is
+**production's, and this service applies it in every environment — `testing` included.** Homologación serves a
+row for every calendar day, so following what it happens to answer would resolve a testing sale differently
+from a production one and hand you a `rateDate` that could never occur for real. Nothing in the resolution
+branches on environment: what you exercise in homologación is the behaviour you will get from ARCA. The cost is
+that a testing sale is priced off a *generated* number, which was always true and is now at least consistently
+so.
+
+`PROBE_ENVIRONMENT=production pnpm probe:cotizacion-day` re-takes the whole thing read-only — no vouchers, no
+numbering — and prints the verdict plus the constant to change if it ever disagrees. Add `PROBE_SERIES=1` for
+the 24-day picture. The decision and the day it was taken live in
+`src/providers/arca/mapping/cotizacion/cotizacion.ts` (`RATE_DAY_RULE`), together with the environment it was
+taken in, because that turned out to matter.
+
+---
+
+### Ask 13 — `date` names the day of the voucher, and the answer is immutable
+
+Granted as asked, and CONTRACT.md §3 now states it: **`date` is the day of the voucher being priced**, and the
+answer is **immutable** — the publication it resolves to is a close that already happened, so nothing ARCA
+posts later in the day can change it. What changed here to make that true:
+
+| behaviour | before | now |
+| --- | --- | --- |
+| the day sent as `FchCotiz` | `date` verbatim — the voucher's own day | the **previous working day**, weekends stepped over rather than probed |
+| a working day ARCA holds no close for | `NO_PUBLICATION` | walks back up to five working days; `rateDate` names the day that answered |
+| `date` later than today | asked about it, then reported nothing published | clamped to today (the second clause of 10038) |
+| `date` omitted | the latest row | unchanged — still the latest row, still one read per code |
+| environment | — | the same rule everywhere; homologación's weekend rows are ignored |
+
+Verified end to end against production, one code:
+
+| `date` | authority reads | `rateDate` → rate |
+| --- | --- | --- |
+| Tue 2026-09-01 (today) | 1 | `2026-08-31` → 1508.5 |
+| Mon 2026-08-31 | 1 | `2026-08-28` → 1512 — Friday, weekend skipped |
+| Sat 2026-08-29 / Sun 2026-08-30 | 1 | `2026-08-28` → 1512 |
+| Mon 2026-08-17 (the feriado) | 1 | `2026-08-14` → 1487.5 |
+| Tue 2026-08-18 (after it) | 2 | `2026-08-14` → 1487.5 — the feriado `602`s, then Friday |
+| 2027-12-31 (future) | 1 | `2026-08-31` → 1508.5 |
+| omitted | 1 | `2026-08-31` → 1508.5 |
+
+**`rateDate` is untouched on the wire, as you asked, and its meaning is now sharper.** It is always *earlier*
+than the `date` you sent — one day for a Tuesday-to-Friday, three for a Monday, more across a feriado — and it
+is ARCA's own echoed `FchCotiz`, never a day this service chose. It is the only record of which close priced a
+voucher, so keep storing it rather than your request date.
+
+**What it costs: one authority read per code, on every day of the week.** One `/api/currencies/rates` call is
+still one call, and skipping weekends is what keeps the reads behind it flat — a Monday resolves to Friday
+directly rather than paying two `602`s to rediscover that Saturdays do not close. Only a feriado costs a second
+read (the day after one: the feriado `602`s, then the working day before it). A currency with no close at all
+in the window is the case that pays for the bound: six reads, once. No per-date calendar here — your Ask 8
+answer in reverse — and nothing you need to change.
+
+Two things we did **not** do, both because you were explicit:
+
+- **No `validFrom` / `validUntil` on the wire.** Your argument is right and now lives in CONTRACT.md §2: how
+  long an answer is *warranted* is a function of your refresh cadence, which this service cannot see, and
+  supplying it would mean guessing a cadence and beginning to lie the moment an operator retunes it.
+- **No change to the band, `bandBasis`, or the reference-currency shortcut.** `[0.02 × rate, 5 × rate]`,
+  `TOLERANCE`/`EXACT`/`REFERENCE`, and `PES` answered locally at `1/1/1` are all as they were. One
+  consequence to expect: `PES` reports the day you asked about while a fetched row reports a business day
+  before it, so a batch carries two `rateDate`s. That is the contract as written — a shared `rateDate` was
+  never promised — and deliberate: the peso is 1 on the voucher's own day, with no close to be behind.
+
+---
+
+### Ask 14 — `refreshAfter` is advisory, and the publication hour is retired
+
+Granted as asked, and the reason you gave is the one written into CONTRACT.md rather than the arithmetic:
+
+- **`PUBLICATION_HOUR_ART` is deleted**, along with the business-day skip and the never-in-the-past clamp that
+  existed to defend it. The field is now the **start of the next authority day** (`…T00:00:00-03:00`), which
+  is all a day-keyed answer supports: a closed day's rate cannot change at all, and a day cannot stop being
+  the day you asked about until the calendar moves. One side effect worth knowing if you log it: the clamp was
+  the only path that emitted a UTC `Z` instant, so the field now always carries `-03:00`.
+- **The field is documented as advisory**, with your structural argument stated in full: a hint that can only
+  push a run **later** is unusable by any caller whose cache validity *ends* at its next scheduled run,
+  because obeying it leaves that caller past its own validity boundary holding nothing warranted. That is not
+  specific to your cadence, so §3 says it rather than leaving the next caller to find out. The old
+  instruction to let it push your next run "later, never earlier" is **gone** — your schedule sets the
+  rhythm, and this field is a fact about the data rather than an instruction about your cron.
+- **It is still always present and still never in the past**, including on an all-`unavailable` answer. Both
+  are now free rather than defended: the start of the next authority day is strictly after every instant
+  inside this one.
+
+Worth saying plainly, since your note was diplomatic about it: `max(cron, refreshAfter)` on a midnight sync
+computing `19:00` was our field's fault, not your arithmetic's. A hint that could only ever delay was the
+wrong shape for the thing.
+
+**Core action: none for either ask.** You already send the voucher's day and already ignore `refreshAfter`.
+
+---
+
+### Not an ask — `next-numbers` answers once per distinct document type
+
+Unrelated to currency, and in this branch only because it was found while reviewing it. `documentTypeCodes` is
+de-duplicated before the authority is called, so `numbers` carries **one entry per distinct code** rather than
+one per element sent: `[1, 6, 1, 1]` now answers with two entries.
+
+**Why**, and the second reason is the one that made it worth doing rather than merely tidy. A duplicate spent
+a `FECompUltimoAutorizado` call per copy — WSFEv1 has no batch operation, so the service fans out per code,
+and `[1, 1, 1]` was three calls for one answer. More to the point, it put **several entries carrying the same
+`documentTypeCode`** into an array the contract tells you to key by exactly that field. Two rows both claiming
+to answer for code `1` is not a shape a key-based read has a defined outcome for — last-wins, first-wins and
+"duplicate key" are all reasonable readings, and which one you got was never specified. Answering once per
+distinct code removes the question instead of documenting an answer to it.
+
+**What has not changed:**
+
+- **Every requested code is still echoed.** De-duplication drops only repeats, so the *set* of codes in
+  `numbers` equals the set you sent. Only the multiplicity differs.
+- **A duplicated unrecognized code is still a `400`.** Validation runs over the distinct codes, and a repeat
+  contributes no code that de-duplication removed — so `[9999, 9999]` fails exactly as `[9999]` does, with
+  `details.code: "UNKNOWN_CODE"`. De-duplicating cannot turn a rejection into a silent omission.
+- **Order is still the order you first named each code in**, and still not something to depend on: the echo is
+  by key, as it always was.
+
+**Core action: none if you read `numbers` by `documentTypeCode`.** The one thing that breaks is consuming it
+positionally against your request, or asserting the two are the same length — both now fail on any request
+containing a repeat. Sending duplicates was never useful and we do not know whether you do; if core already
+de-duplicates before calling, nothing here is observable for you at all.
+
+---
+
+## 2026-08-31 — The cotización: a rate endpoint, a canonical currency code, and one date rule
+
+Branch `feature/foreign-currency-electronic-sales`. Answers all five asks core raised on 2026-08-28. **Ask 11 is the one that unblocks you**;
+everything else is additive except one date-format tightening flagged below.
+
+| # | Ask | Answer | Core action |
+| --- | --- | --- | --- |
+| 8 | `POST /api/currencies/rates` | **Granted as specified.** Whole table when `currencyCodes` is omitted; `date` → the authority's day | Call it |
+| 9 | Serve it credential-free under our delegate identity | **Granted as written.** No `entity` block, no credentials | None — cache centrally as planned |
+| 10 | We own the band | **Granted**, as `TOLERANCE`. Read the warning below: it is wider than you expect | See "the band is wide" |
+| 11 | `invoice.currencyCode` | **Granted**, additive; `currencyIso` optional and deprecated | Send `currencyCode` |
+| 12 | The currency list | **As a table**, in [CONTRACT.md](CONTRACT.md) §5 — no endpoint | Diff your seed against it |
+
+---
+
+### Ask 11 — `invoice.currencyCode` (the one you are blocked on)
+
+`NeutralInvoiceDto` now accepts `currencyCode`, a canonical per-entity currency code identity-mapped to
+`MonId` like the other three fiscal codes. `currencyIso` is relaxed to optional and **exactly one of the two
+must be present** — both is a `400`, and so is neither.
+
+Exactly-one-of rather than prefer-`currencyCode`, as you asked: silently preferring one would let a bug send
+`{currencyIso: "USD", currencyCode: "PES"}` and file a peso voucher for a dollar sale, which is the failure
+`UNMAPPED_CURRENCY` existed to prevent. `@Length(1, 8)`, not three — `002`/`060` are zero-padded and `MonId`
+is `String(8)` in ARCA's own cotización response.
+
+The membership check stays: an unknown code is `400 ARCA_VALIDATION` / `UNKNOWN_CODE` naming the field,
+rather than a `502` relaying ARCA's `12000`. Worth being straight about the trade you asked for both halves
+of — a check and "zero change here for a new ARCA currency" are not both fully achievable. A new code is now
+a one-line addition to a set in this service rather than a mapping decision, and the ISO table is gone; that
+is the improvement, and it is not literally zero.
+
+`currencyIso` and the `{ARS, USD, EUR}` table will be removed as a **breaking** entry once you confirm every
+instance sends `currencyCode`.
+
+---
+
+### The verification case — ask 9 answered, ask 10 still open
+
+You were right that publishing these outcomes is worth more than either endpoint, so here they are
+separately from the prose above.
+
+**Experiment 2 (ask 9): GRANTED — measured, not assumed.** Against homologación on 2026-08-31,
+`FEParamGetCotizacion` answered with `Auth.Cuit` = our own delegate CUIT and **no representación**:
+
+| call | result |
+| --- | --- |
+| `FEParamGetCotizacion("DOL")` | `MonCotiz 1158.195`, `FchCotiz 20260830` |
+| `FEParamGetCotizacion("060")` | `MonCotiz 1186.5538`, `FchCotiz 20260830` |
+| `FEParamGetCotizacion("PES")` | **`602 Sin Resultados`** |
+
+No `600`, no `601`. So ask 9 stands as written and needs no fallback: cache centrally per
+`(entity, environment)` as you planned, with no tenant certificate anywhere near it.
+
+Three things fall out of that table:
+
+- **Your other question is answered: homologación DOES serve cotizaciones**, with live data rather than
+  stubs. You do not need to skip the check in a testing environment.
+- **`PES` genuinely has no publication** — the reference currency being answered locally is therefore
+  *required*, not an optimization. Asked upstream it would come back `NO_PUBLICATION`, leaving you with no
+  rate for ~99% of vouchers. This service answers it at `1/1/1` before any ticket is resolved.
+- **`FchCotiz` really does precede the day asked for** (the 30th, asked on the 31st), which is the
+  behaviour behind "store `rateDate`, not your request date".
+
+**Experiment 1 (ask 10 / the band): MEASURED.** Run against homologación on 2026-08-31 (`DOL`, published
+rate `R = 1158.195`), 23 vouchers consumed. Every rejection came back as validation **10119**:
+
+| `MonCotiz` | as a factor of `R` | outcome |
+| --- | --- | --- |
+| 23.048081 | `0.0199 × R` | **REJECTED** `10119` |
+| 23.163900 | `0.02 × R` | authorized — the floor |
+| 579.097500 | `0.5 × R` | authorized |
+| 1159.695000 | `R + 1.5` | authorized |
+| 2316.390000 | `2 × R` | authorized |
+| 4644.361950 | `4.01 × R` | authorized |
+| 5790.680927 | `4.9997 × R` | authorized — the ceiling, bisected |
+| 5791.246452 | `5.0002 × R` | **REJECTED** `10119` |
+
+**The band is `[0.02 × rate, 5 × rate]`.** Neither of the two readings we flagged was right, and the reason
+is worth stating because it is easy to repeat: **ARCA's sentence names two rules in different forms.**
+"inferior **al** 2%" is a fraction *of* the rate; "superior **en** un 400%" is an excess *over* it
+(`rate + 4 × rate`). Assuming both bounds share a form gives either a ceiling of `4R` — wrong, ARCA
+authorized `4.01R` — or a floor of `0.98R` — wrong by ~49×, ARCA authorized `0.5R`.
+
+**Validation 10240 does not bind ordinary vouchers.** `R + 1.5` was authorized, so its "no podra superar en
+1 a la cotizacion oficial" is conditioned on `CanMisMonExt` as its position in the manual suggests. Nothing
+to design around today.
+
+**What this means for you, concretely.** At a published rate of 1465.5 the accepted range is
+`[29.31, 7327.50]`. So the warning in your frontend contract will essentially never fire on a commercially
+wrong rate — which is the point in the section above, now measured rather than suspected.
+
+---
+
+### Ask 8 / 9 — `POST /api/currencies/rates`
+
+Documented in full in [CONTRACT.md](CONTRACT.md) §3. It matches the shape you specified field-for-field,
+including `unavailable`, `refreshAfter` and `publishedAt`. Notes on the parts where we made a decision:
+
+- **Credential-free, granted as written.** `Auth.Cuit` is our own delegate CUIT and no representación is
+  involved (§10). Nothing about this is tenant-scoped, so cache centrally as planned.
+- **`publishedAt`, not a shared `rateDate`.** We cannot promise the batch shares a day: a thinly-traded code
+  may not publish every day, so its answer legitimately carries an older day than the dollar's.
+  `publishedAt` is the latest `rateDate` in the batch, and it is absent rather than fabricated when nothing
+  was published.
+- **`refreshAfter` is always present and never in the past**, including on an all-`unavailable` answer.
+- **The per-date traffic is not a problem.** One extra single-code call per backdated sale is nothing next
+  to the whole-table sync. Do not build a per-date calendar on our account.
+- **`PES` costs nothing.** Answered locally at `1/1/1`, and a `PES`-only request resolves no ticket at all,
+  so a peso till cannot be taken down by an unreachable authority. Please do mark the reference row in your
+  own seed rather than hardcoding `"PES"`.
+- **An unknown code lands in `unavailable`**, not as a `400` — deliberately unlike `documentTypeCode`,
+  because one bad code must not cost the other forty-eight. But if *every* code fails the same transient
+  way, the request fails with a `502`: reporting that as forty-nine currencies coincidentally having no data
+  would let you cache "nothing is published" and stop asking.
+
+---
+
+### Ask 10 — the band, and the part you should act on
+
+`bandBasis: "TOLERANCE"`, both bounds **inclusive**, confirmed. `lowerLimit`/`upperLimit` are always
+present. Your check `lowerLimit ≤ rate ≤ upperLimit` is exactly right.
+
+> ⚠️ **The band ARCA enforces is much wider than the feature assumes, and your own worked example is inside
+> it.** Measured, not inferred (see the verification section above): the accepted range is
+> `[0.02 × rate, 5 × rate]`. USD invoiced at 900 on a day ARCA published 1465.5 sits inside
+> `[29.31, 7327.50]`. **ARCA will authorize it.**
+>
+> So `OUT_OF_BAND` will rarely fire, and the sale-create check as designed does not catch the abuse the
+> entry's problem statement opens with. This is the outcome your verification section anticipated, and we
+> are answering it the way you asked: report the real width rather than a narrower one, because telling an
+> operator the authority will reject something the authority accepts is worse than saying nothing.
+
+**What we would do about it, and it is cheap.** `rate` — the authority's point value — is already in the
+response. A comparison against *that* is what catches a commercially wrong rate, and it holds regardless of
+how wide the band turns out to be. We would suggest a distinct verdict (`OFF_OFFICIAL_RATE`, say) rather
+than overloading `OUT_OF_BAND`, because your frontend contract already tells the operator that
+`OUT_OF_BAND` means "ARCA will probably reject it". The two want different words.
+
+**Also:** while we return a real band, `common.fiscal_entity.rateTolerancePercent` should stay unused. Two
+tolerances applied in series would be nobody's intended rule.
+
+#### The width is a measurement, and it is perishable
+
+ARCA has rewritten this validation three times since 2023, each time by editing the same sentence. So the
+numbers above are dated rather than assumed permanent: `BAND_RULE.measuredOn` in
+`src/providers/arca/mapping/cotizacion/cotizacion.ts` carries `2026-08-31`, and `pnpm probe:band`
+re-measures it in one command — laddering `MonCotiz`, reporting which code rejected each rung, bisecting
+both bounds and printing the constant to paste back. Re-run it rather than re-reading the PDF.
+
+The two bounds are configured independently (`FRACTION_OF` for the floor, `EXCESS_OVER` for the ceiling)
+precisely because this measurement showed they do not share a form.
+
+#### One tightening to know about now
+
+Manual v4.0 added validation 10038: if a voucher declares it is *paid* in the same foreign currency
+(`CanMisMonExt = S`), `MonCotiz` must match the last published business day's rate **exactly**. Nothing on
+this wire can request that today, so it never fires. The day you add foreign-currency payment, the band for
+those sales becomes `EXACT` — worth knowing before rather than after.
+
+---
+
+### Ask 12 — the currency list, as a table
+
+[CONTRACT.md](CONTRACT.md) §5 now carries all forty-nine codes with names, ISO mapping and the reference row
+marked. No `POST /api/currencies`: §5's own argument against serving a catalogue applies, and this is
+build-time data.
+
+Diff your seed against it. It was transcribed from the same ARCA publication and cross-checked against
+`FEParamGetTiposMonedas`, so a disagreement is worth investigating in both directions.
+
+---
+
+### One date rule, for every date field — 🔴 a narrow tightening
+
+| Change | Where | Core action |
+| --- | --- | --- |
+| Every date field now accepts a calendar day (`2026-08-25`) or an instant **carrying a zone** (`2026-07-12T01:00:00Z`). A datetime with **no** zone is `400 ARCA_VALIDATION` / `INVALID_ISSUE_DATE`. | §2 *Dates*, §3 | **None if you send `YYYY-MM-DD`**, which your payload builder does. Confirm before deploy. |
+| A date-only value naming a day that does not exist (`2026-02-31`) is now refused rather than rolled forward to March 3rd. | §2 *Dates* | None |
+
+**Why this is worth a breaking note rather than a footnote.** `issueDate: "2026-08-26T01:00:00"` used to be
+accepted and resolved against *our container's* timezone: the identical request produced `CbteFch = 20260825`
+on a service running `TZ=UTC` and `20260826` on one in Buenos Aires. That is the voucher's **legal** date
+decided by our deployment rather than by you. It applied to `issueDate`, `serviceDateFrom`/`To` and
+`paymentDueDate` alike. Now refused, and the zone-qualified form is placed correctly:
+`2026-07-12T01:00:00Z` is 22:00 on the 11th in Buenos Aires and becomes `20260711`, not `20260712`.
+
+**And one thing you cannot delegate to us**, now written up in §2: you still need the entity's timezone for
+your own decisions — which day a sale is dated, whether it is backdated, and what day to render a date we
+returned as. A sale submitted 2026-08-25 22:00 ART is already 2026-08-26 in UTC; derive the day on a UTC host
+and you will validate a Monday sale against Tuesday's band. Hold the zone as data on the entity — you
+already do, as `rateSyncTimeZoneId` — never as a constant in shared code.
+
+---
+
+### A pre-existing inconsistency we are flagging, not fixing
+
+Two response fields render an authority **calendar day** as a UTC instant: `expiration` (ARCA `CAEFchVto`)
+and point-of-sale `dischargeDate` (`FchBaja`). `"2026-08-27T03:00:00.000Z"` is AR midnight in UTC — the
+`03:00:00.000Z` is an artifact, not information.
+
+The consequence is real: you persist `expiration` as a timestamp, so anything rendering the **day** in a
+non-AR zone gets it wrong (at UTC−5 that instant displays as 2026-08-26). Every other date this service
+returns is a bare authority day, including all seven padrón dates and everything new in this release.
+
+We are **not** changing them here — it is a breaking response change on a field you persist, and this
+release is already large. Raised so the inconsistency is on the record with an owner rather than discovered
+later; we will propose it with its own window.
+
+---
+
 ## 2026-08-26 (later) — An inactive or cancelled clave now gets a real answer
 
 Branch `feature/padron`. A behaviour change on `POST /api/taxpayers/lookup`; no field, no shape and no
@@ -51,8 +490,8 @@ so it reported as a credential fault. Fixed; both padrones answer. If you tested
 
 ## 2026-08-26 — The locality code now says which snapshot it came from
 
-Branch `feature/padron`. Answers both asks in [CONTRACT-REQUESTS.md](CONTRACT-REQUESTS.md) 2026-08-25
-(later). Additive on the wire; nothing breaks, and a reader that ignores the new key is correct today and
+Branch `feature/padron`. Answers both asks core raised on 2026-08-25 (later).
+Additive on the wire; nothing breaks, and a reader that ignores the new key is correct today and
 stays correct.
 
 | Change | Where | Core action |
@@ -160,7 +599,8 @@ are unchanged — they already read A13.
 
 ## 2026-08-25 — Taxpayer lookup: coded addresses, a fiscal condition, self-describing rows
 
-Branch `feature/padron`. Answers all five asks in [CONTRACT-REQUESTS.md](CONTRACT-REQUESTS.md) 2026-08-25.
+Branch `feature/padron`. Answers all five asks core raised on 2026-08-25 — numbered 1–5 there, and restated
+in the change table below rather than by number.
 
 > ### ⚠️ One breaking change, and it is a silent one
 >

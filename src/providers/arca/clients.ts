@@ -1,21 +1,17 @@
-import {
-    CommonInvoiceService,
-    ConstanciaInscripcionService,
-    SoapClient,
-    TaxpayerIdentityService,
-    type ArcaEnvironment,
-} from './sdk/index.js';
+import type {ArcaEnvironment} from './sdk/core/constants.js';
+import {SoapClient} from './sdk/core/soap-client/soap-client.js';
+import {CommonInvoiceService} from './sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
+import {ConstanciaInscripcionService} from './sdk/taxpayer-registry/constancia-inscripcion.service.js';
+import {TaxpayerIdentityService} from './sdk/taxpayer-registry/taxpayer-identity.service.js';
 
 /**
- * Shared SDK clients. The `SoapClient` is stateless (native `fetch`) and safe to share process-wide;
- * service instances are cheap value objects constructed per request bound to `(soap, environment)`.
- * No WSAA client / ticket cache lives here — auth arrives as an `ArcaAuth` from the ticket store —
- * but the ticket store's `WsaaClient` reuses this same `soap` so the whole process has one transport.
+ * Shared SDK clients. The `SoapClient` is stateless and safe to share process-wide; service instances are
+ * cheap value objects constructed per request. No ticket cache lives here — auth arrives from the ticket
+ * store — but that store's WSAA client reuses this same `soap`, so the process has one transport.
  *
- * The padrón factories return their CONCRETE service types, not the base: each one owns operations the
- * other does not have (A13's document search), and its `service` getter is what the ticket store is
- * keyed on — so callers read the WSAA service id off the instance rather than from a parallel map that
- * could drift.
+ * The padrón factories return their concrete service types rather than the base: each owns operations the
+ * other does not, and its `service` getter is what the ticket store is keyed on, so callers read the WSAA
+ * service id off the instance rather than a parallel map that could drift.
  */
 export const soap = new SoapClient();
 

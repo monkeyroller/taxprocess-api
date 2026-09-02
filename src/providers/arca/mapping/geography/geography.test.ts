@@ -9,7 +9,7 @@ import {
     provinceByArcaId,
     resolveIndecLocality,
 } from './geography.js';
-import {AddressCodeScheme} from '../../../provider/provider.js';
+import {AddressCodeScheme} from '../../../provider/address-code-scheme/address-code-scheme.js';
 import {INDEC_LOCALITY_ROWS, INDEC_SNAPSHOT} from '../indec/localities.generated.js';
 import {LOCALITY_ABBREVIATIONS, normalizeLocalityName} from '../indec/normalize-locality.js';
 
@@ -22,7 +22,7 @@ import {LOCALITY_ABBREVIATIONS, normalizeLocalityName} from '../indec/normalize-
 describe('what AR answers for each address level', () => {
     it('draws every scheme from the shared vocabulary rather than spelling one out', () => {
         // No scheme string exists anywhere but the enum, so a provider cannot drift from the vocabulary
-        // core keys on — which is the whole reason it does not live in this module.
+        // core keys on.
         expect(AR_COUNTRY_CODE_SCHEME).toBe(AddressCodeScheme.ISO_3166_1_ALPHA_2);
         expect(AR_REGION_CODE_SCHEME).toBe(AddressCodeScheme.ISO_3166_2);
         expect(AR_CITY_CODE_SCHEME).toBe(AddressCodeScheme.INDEC);
@@ -36,7 +36,7 @@ describe('what AR answers for each address level', () => {
     });
 
     it('answers the country in the form core stores', () => {
-        // `common.country.iso_code` holds alpha-2, which is what the country scheme promises.
+        // Core holds alpha-2, which is what the country scheme promises.
         expect(AR_COUNTRY_CODE).toBe('AR');
         expect(AR_COUNTRY_CODE).toMatch(/^[A-Z]{2}$/);
     });
@@ -61,8 +61,7 @@ describe('AR_PROVINCES', () => {
     });
 
     it('keeps ARCA and INDEC numbering apart — they disagree, and conflating them would be silent', () => {
-        // The two live padrón fixtures: ARCA calls Córdoba `3` and Buenos Aires `1`; INDEC calls them
-        // `14` and `06`. Nothing derives one from the other.
+        // ARCA calls Córdoba `3` and Buenos Aires `1`; INDEC calls them `14` and `06`.
         expect(provinceByArcaId('3')).toMatchObject({iso: 'AR-X', indec: '14'});
         expect(provinceByArcaId('1')).toMatchObject({iso: 'AR-B', indec: '06'});
     });
@@ -87,9 +86,9 @@ describe('the vendored catalog', () => {
     const rows = INDEC_LOCALITY_ROWS.split('\n');
 
     it('is well-formed on every row — the resolver skips what it cannot parse, so this is the alarm', () => {
-        // A malformed row degrades to "this address gets no code", which is a legitimate outcome the
-        // contract already documents and therefore invisible in production. The build script rejects the
-        // names that could produce one; this is the check that the file on disk actually came from it.
+        // A malformed row degrades to "this address gets no code", a legitimate outcome and therefore
+        // invisible in production. The build script rejects the names that could produce one; this checks
+        // that the file on disk actually came from it.
         const malformed = rows.filter((row) => !/^\d{2}\t[^\t]+\t\d{8}$/.test(row));
 
         expect(malformed).toEqual([]);
@@ -107,28 +106,25 @@ describe('the vendored catalog', () => {
     });
 
     it('covers the 24 provinces, in the codes AR_PROVINCES holds', () => {
-        // Guards the other direction from `AR_PROVINCES`' own consistency test: that the table and the
-        // catalog agree on the numbering, not just that each is internally sound.
+        // The other direction from the table's own consistency test: that the table and the catalog agree
+        // on the numbering, not just that each is internally sound.
         const inCatalog = new Set(rows.map((row) => row.split('\t')[0]));
 
         expect([...inCatalog].sort()).toEqual(AR_PROVINCES.map((p) => p.indec).sort());
     });
 
     it('describes itself accurately — the snapshot is published, so a wrong count is a wrong promise', () => {
-        // `INDEC_SNAPSHOT` is the one hand-written block in a generated file (backfilled once, for the
-        // snapshot that predates the stamp) and its `date` reaches a caller as `cityCodeSchemeVersion`. A
-        // count disagreeing with the rows means the file was edited without being regenerated.
+        // The snapshot is the one hand-written block in a generated file, and its date reaches a caller as
+        // `cityCodeSchemeVersion`. A count disagreeing with the rows means the file was edited by hand.
         expect(rows).toHaveLength(INDEC_SNAPSHOT.nameRows);
         expect(INDEC_SNAPSHOT.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
         expect(new Date(INDEC_SNAPSHOT.date).toISOString().slice(0, 10)).toBe(INDEC_SNAPSHOT.date);
     });
 
     it('codes localidades censales and nothing finer, which is what makes the code space a promise', () => {
-        // CONTRACT §5 guarantees every INDEC code on the wire is a localidad censal: asentamientos are
-        // projected *up* to the one containing them rather than emitted, which is the only reason a caller
-        // cataloguing that single layer resolves everything we send. The generator asserts this against the
-        // API's own totals; here it is asserted against what actually shipped, where a finer code would
-        // show up as more distinct codes than there are localidades censales.
+        // Every INDEC code on the wire is a localidad censal, asentamientos being projected up to the one
+        // containing them, which is why a caller cataloguing that single layer resolves everything we send.
+        // The generator asserts this against the API's totals; here it is asserted against what shipped.
         const distinctCodes = new Set(rows.map((row) => row.split('\t')[2]));
 
         expect(distinctCodes.size).toBe(INDEC_SNAPSHOT.localidadesCensales);
@@ -171,9 +167,8 @@ describe('resolveIndecLocality', () => {
     });
 
     it('reports nothing for a barrio of an interior city — the known coverage gap', () => {
-        // `BARRIO YAPEYU` is a real Córdoba fiscal address (see padron-parsing.test.ts) and the national
-        // catalog does not code neighbourhoods outside CABA. Omitting is the contract-sanctioned outcome;
-        // this test exists so the gap is a recorded decision rather than a surprise.
+        // `BARRIO YAPEYU` is a real Córdoba fiscal address, and the national catalog does not code
+        // neighbourhoods outside CABA. This test exists so the gap is a recorded decision.
         expect(resolveIndecLocality(cordoba, 'BARRIO YAPEYU')).toBeUndefined();
     });
 
@@ -185,11 +180,9 @@ describe('resolveIndecLocality', () => {
     });
 
     it('never strips it outside CABA, where the same name is a DIFFERENT place', () => {
-        // The prefix is the one signal ARCA gives that the text names a neighbourhood rather than a
-        // locality, and outside CABA the catalog does not model neighbourhoods. Stripping it would invert
-        // that signal: Córdoba capital has a Barrio General Paz, Córdoba province has a *localidad*
-        // General Paz in another departamento, and the address would be coded to the latter — a customer
-        // in the wrong city, with nothing on the wire to say anything was guessed.
+        // The prefix is the one signal ARCA gives that the text names a neighbourhood, and stripping it
+        // would invert that: Córdoba capital has a Barrio General Paz and the province a localidad General
+        // Paz elsewhere, so the address would be coded to the latter with nothing on the wire to say so.
         expect(resolveIndecLocality(cordoba, 'GENERAL PAZ')).toBe('14021130');
         expect(resolveIndecLocality(cordoba, 'BARRIO GENERAL PAZ')).toBeUndefined();
         expect(resolveIndecLocality(cordoba, 'B° GENERAL PAZ')).toBeUndefined();
@@ -198,8 +191,8 @@ describe('resolveIndecLocality', () => {
     });
 
     it('resolves a name the catalog itself states with the prefix, spelled either way', () => {
-        // 187 catalog names really do begin with `Barrio`. Those are indexed under both spellings, so the
-        // no-stripping rule above costs nothing for a place whose actual name carries the word.
+        // 187 catalog names do begin with `Barrio`, indexed under both spellings, so the no-stripping rule
+        // costs nothing for a place whose actual name carries the word.
         expect(resolveIndecLocality(buenosAires, 'BARRIO BANCO PROVINCIA')).toBe(
             resolveIndecLocality(buenosAires, 'BANCO PROVINCIA'),
         );
@@ -207,8 +200,8 @@ describe('resolveIndecLocality', () => {
     });
 
     it('never lets a stripped alias shadow or poison a name the catalog states outright', () => {
-        // `BANFIELD` is a localidad in its own right. An alias generated from some `Barrio Banfield` row
-        // must not collide with it and take both out — aliases only ever fill keys the catalog leaves free.
+        // `BANFIELD` is a localidad in its own right, so an alias generated from a `Barrio Banfield` row
+        // must not collide with it and take both out. Aliases only fill keys the catalog leaves free.
         expect(resolveIndecLocality(buenosAires, 'BANFIELD')).toBe('06490010');
     });
 
@@ -247,9 +240,8 @@ describe('resolveIndecLocality', () => {
     });
 
     it('reads the text literally before it reads it as an abbreviation', () => {
-        // Expansion is a fallback, never an override. `EST` is a token the catalog itself uses, so a name
-        // stated literally must win outright — otherwise a rewrite could answer where the literal reading
-        // deliberately would not.
+        // Expansion is a fallback, never an override: `EST` is a token the catalog itself uses, so a name
+        // stated literally must win outright.
         expect(resolveIndecLocality(provinceByArcaId('13'), 'Forres (Est. Chaguar Punco)')).toBe('86161040');
         expect(resolveIndecLocality(provinceByArcaId('13'), 'Forres (Estación Chaguar Punco)')).toBe(
             '86161040',
@@ -257,9 +249,8 @@ describe('resolveIndecLocality', () => {
     });
 
     it('never expands an abbreviation that has two readings', () => {
-        // `PTE.` is *Presidente* or *Puente*, and the catalog holds five `Puente …` localities, so it is
-        // left alone — the table only ever makes a rewrite that cannot be the wrong one. Reading it as
-        // *Presidente* here would code a Buenos Aires customer to whatever `Presidente Urquiza` turned up.
+        // `PTE.` is Presidente or Puente, and the catalog holds five `Puente …` localities, so it is left
+        // alone: the table only makes a rewrite that cannot be the wrong one.
         expect(resolveIndecLocality(buenosAires, 'PUENTE URQUIZA')).toBe('06882090');
         expect(resolveIndecLocality(buenosAires, 'PTE. URQUIZA')).toBeUndefined();
         // `PDTE.` and `PRES.` have only the one reading, so those are expanded.
@@ -284,10 +275,9 @@ describe('resolveIndecLocality', () => {
     });
 
     it('refuses a name its own province gives more than one code', () => {
-        // Read the ambiguity out of the vendored catalog rather than hardcoding an example, which would
-        // rot the next time the index is regenerated. Every (province, name) pair carrying two distinct
-        // codes must resolve to nothing — returning whichever row was read first would put a customer in
-        // the wrong city with no signal that anything was guessed.
+        // The ambiguity is read out of the vendored catalog rather than hardcoded, which would rot on the
+        // next regeneration. Every pair carrying two distinct codes must resolve to nothing: returning
+        // whichever row was read first would put a customer in the wrong city with no signal.
         const codesByPair = new Map<string, Set<string>>();
         for (const row of INDEC_LOCALITY_ROWS.split('\n')) {
             const [provinceIndec, name, code] = row.split('\t');
@@ -312,25 +302,24 @@ describe('resolveIndecLocality', () => {
     });
 
     it('never expands its way to the WRONG code, for any name in the catalog', () => {
-        // The guarantee that matters for the abbreviation table, checked against all ~4.9k catalog rows
-        // rather than the handful of examples above. Abbreviate every name back down — `GENERAL` → `GRAL`,
-        // the reverse of the table — and re-resolve it. Each one must come back either as its own code or
-        // as nothing at all. A hit on some OTHER code is the failure this table could plausibly cause and
-        // is what would put a customer in the wrong city.
+        // The guarantee that matters for the abbreviation table, checked against every catalog row rather
+        // than the handful of examples above: abbreviate each name back down and re-resolve it. Every one
+        // must come back as its own code or as nothing. A hit on some other code is what would put a
+        // customer in the wrong city.
         const contractions = new Map<string, Array<string>>();
         for (const [abbreviation, full] of LOCALITY_ABBREVIATIONS) {
             const spellings = contractions.get(full);
             if (spellings === undefined) {
                 contractions.set(full, [abbreviation]);
             } else {
-                // Two keys can share one expansion (`GRAL` and `GRL` both write out to `GENERAL`). Keeping
-                // only the first would leave the other never spelled by this test and so never checked.
+                // Two keys can share one expansion, and keeping only the first would leave the other
+                // never spelled by this test.
                 spellings.push(abbreviation);
             }
         }
 
-        // One variant per abbreviatable word per spelling of it, plus one abbreviating every word at once —
-        // that last is what covers a name abbreviating two words running (`NUESTRA SENORA` → `NTRA SRA`).
+        // One variant per abbreviatable word per spelling of it, plus one abbreviating every word at once,
+        // which is what covers a name abbreviating two words running.
         const spelled = new Set<string>();
         const contractionsOf = (normalized: string): ReadonlySet<string> => {
             const words = normalized.split(' ');
@@ -356,9 +345,8 @@ describe('resolveIndecLocality', () => {
                 continue;
             }
             const province = AR_PROVINCES.find((p) => p.indec === provinceIndec);
-            // Guards the guard: an unrecognized province makes every lookup below return `undefined`, which
-            // the `resolved !== undefined` check reads as a pass — a whole province could stop being tested
-            // in silence, and `exercised` would keep counting its rows.
+            // An unrecognized province makes every lookup below return `undefined`, which the check reads
+            // as a pass — so a whole province could stop being tested in silence.
             expect(province).toBeDefined();
             for (const abbreviated of contractionsOf(normalized)) {
                 exercised++;
@@ -369,11 +357,10 @@ describe('resolveIndecLocality', () => {
             }
         }
 
-        // Guards the guard: if the table or the catalog ever stopped overlapping, the loop above would
-        // pass by testing nothing.
+        // If the table and the catalog ever stopped overlapping, the loop above would pass on nothing.
         expect(exercised).toBeGreaterThan(500);
-        // And every key must have been spelled at least once. A key whose expansion the catalog does not
-        // carry is unreachable here, which is exactly the dead entry criterion 1 of the table forbids.
+        // And every key must have been spelled at least once: one whose expansion the catalog does not
+        // carry is unreachable here, which is the dead entry the table's own rules forbid.
         expect([...LOCALITY_ABBREVIATIONS.keys()].filter((abbreviation) => !spelled.has(abbreviation))).toEqual(
             [],
         );

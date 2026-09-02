@@ -1,9 +1,7 @@
 /**
- * Error hierarchy for the ARCA SDK.
- *
- * Every error extends {@link ArcaError} so a caller can branch on the failure category —
- * authentication vs. transport vs. business rejection — and decide what is safe to retry.
- * Transport failures (5xx, timeouts) are transient; auth and business errors are not.
+ * Error hierarchy for the ARCA SDK. Every error extends `ArcaError`, so a caller can branch on the category
+ * — authentication, transport or business rejection — and decide what is safe to retry. Transport failures
+ * are transient; auth and business errors are not.
  */
 export class ArcaError extends Error {
     constructor(message: string, readonly code?: string) {
@@ -22,15 +20,22 @@ export class ArcaSoapError extends ArcaError {
     }
 }
 
-/** A single `{Code, Msg}` pair as returned inside an ARCA service response `Errors.Err`. */
-export interface ArcaErrorEntry {
+/**
+ * A single `{Code, Msg}` pair as ARCA reports one. One structure because ARCA uses one: it appears as the
+ * fatal `Errors.Err` and the non-fatal `Observaciones.Obs`, and a single reader parses both, which is what
+ * stopped the two drifting into different absent-child handling.
+ */
+export interface ArcaCodeMessage {
     code: string;
     message: string;
 }
 
+/** One inside a service response's `Errors.Err` — fatal. */
+export type ArcaErrorEntry = ArcaCodeMessage;
+
 /**
- * Business rejection reported inside an otherwise-successful SOAP response (the service
- * returned HTTP 200 but the payload carries `Errors`). Not retryable without changing the input.
+ * Business rejection reported inside an otherwise-successful SOAP response: HTTP 200 whose payload carries
+ * `Errors`. Not retryable without changing the input.
  */
 export class ArcaServiceError extends ArcaError {
     constructor(message: string, readonly errors: Array<ArcaErrorEntry>) {
@@ -49,11 +54,9 @@ export class NotImplementedError extends ArcaError {
 }
 
 /**
- * A padrón lookup for an identifier ARCA has no person registered under. Deliberately its own class and
- * NOT an {@link ArcaServiceError}: the padrón services report it as a perfectly successful `200` (the
- * constancia service nests `errorConstancia › error: "No existe persona con ese Id"`, A13 answers with
- * the documented `"La Clave (CUIT/CUIL) consultada es inexistente"`), and it is a stable, caller-visible
- * outcome — a `404` — never the retryable authority failure a service error implies.
+ * A padrón lookup for an identifier ARCA has no person registered under. Its own class rather than a service
+ * error: the padrón services report it as a successful `200`, and it is a stable caller-visible outcome —
+ * a `404` — never the retryable authority failure a service error implies.
  */
 export class ArcaTaxpayerNotFoundError extends ArcaError {
     constructor(readonly taxpayerId: string, message?: string) {

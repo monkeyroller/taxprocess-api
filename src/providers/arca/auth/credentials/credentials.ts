@@ -4,19 +4,18 @@ import {
     isValidCertificate,
     isValidPrivateKey,
     keyMatchesCertificatePem,
-} from '../../sdk/index.js';
+} from '../../../pem/pem.js';
 import {canonicalCuit} from '../../mapping/identifiers.js';
 import type {
     CredentialValidationError,
     CredentialValidationResult,
     ValidateCredentialsInput,
-} from '../../../provider/provider.js';
+} from '../../../provider/credential-validation.js';
 
 /**
- * Validates an ARCA credential bundle at registration time (H3): the certificate is an issued cert (not a
- * CSR), the private key parses, the key matches the certificate, and the certificate was issued to the
- * taxpayer core declares in `expectedTaxId` (the owning company's CUIT). Returns `{ ok: true }` or
- * structured errors. This is the PEM/CUIT validation that previously lived in core's `provider-adapters.ts`.
+ * Validates an ARCA credential bundle at registration time: the certificate is an issued cert rather than a
+ * CSR, the private key parses, the key matches the certificate, and the certificate was issued to the
+ * taxpayer core declares in `expectedTaxId`.
  */
 export function validateArcaCredentials(input: ValidateCredentialsInput): CredentialValidationResult {
     const errors: Array<CredentialValidationError> = [];
@@ -56,11 +55,9 @@ export function validateArcaCredentials(input: ValidateCredentialsInput): Creden
         errors.push({code: 'KEY_CERT_MISMATCH', message: 'keyPem does not match the certificate'});
     }
 
-    // Identity check: the certificate must belong to the company that owns the integration. Runs only
-    // after the structural checks so an unparseable cert fails with its own code (per the contract), and
-    // only when `expectedTaxId` itself is a valid CUIT. The cert's serialNumber RDN goes through the same
-    // canonicalizer as `expectedTaxId`, so formatting (the `CUIT ` prefix, dashes) never causes a spurious
-    // mismatch.
+    // The certificate must belong to the company that owns the integration. After the structural checks, so
+    // an unparseable cert fails with its own code, and only when `expectedTaxId` is itself a valid CUIT.
+    // Both sides go through the same canonicalizer, so formatting never causes a spurious mismatch.
     if (certOk && expected !== null) {
         const serial = certificateSubjectSerialNumber(certPem);
         const certTaxId = serial === null ? null : canonicalCuit(serial);

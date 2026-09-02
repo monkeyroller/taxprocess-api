@@ -6,11 +6,9 @@ import {TaxpayerIdentityService} from './taxpayer-identity.service.js';
 import type {ArcaAuth} from '../core/types.js';
 
 /**
- * Padrón response parsing, driven by the worked examples in ARCA's own manuals — constancia de
- * inscripción v4.1 and padrón alcance 13 v1.4. The fixtures are XML, not hand-built objects, and go
- * through the REAL `SoapClient` parser: that is the only way the tests see what production sees
- * (`parseTagValue: false`, so every value is a string; namespace prefixes stripped; a repeated element
- * as an array but a single occurrence as a bare object).
+ * Padrón response parsing, driven by the worked examples in ARCA's own manuals. The fixtures are XML rather
+ * than hand-built objects and go through the real SOAP parser, which is the only way the tests see what
+ * production sees: every value a string, prefixes stripped, and a single occurrence as a bare object.
  */
 
 const AUTH: ArcaAuth = {token: 't', sign: 's', cuit: 30999999997};
@@ -31,7 +29,7 @@ function serviceReturning<T>(
     return new Service(soap, 'homologacion');
 }
 
-/** A service whose transport throws — how A13 reports its documented §5.3 conditions. */
+/** A service whose transport throws — how A13 reports its fault conditions. */
 function serviceFailing<T>(Service: new (soap: SoapClient, environment: 'homologacion') => T, error: unknown): T {
     const soap = {
         call: async () => {
@@ -56,7 +54,7 @@ function constanciaResponse(personaReturn: string): string {
     return envelope('getPersona_v2', CONSTANCIA_NS, `<personaReturn>${personaReturn}</personaReturn>`);
 }
 
-/** Manual v4.1 §3.2.3 — an individual, with the 2026 caracterizaciones block. */
+/** An individual, with the 2026 caracterizaciones block. */
 const INDIVIDUAL = constanciaResponse(`
     <datosGenerales>
         <apellido>SKIOGEK OGIUPE</apellido>
@@ -153,7 +151,7 @@ const LEGAL_ENTITY = constanciaResponse(`
     </errorRegimenGeneral>
 `);
 
-/** Manual v4.1 §3.3.3 — how a CUIT nobody is registered under comes back (as a 200). */
+/** How a CUIT nobody is registered under comes back — as a `200`. */
 const NOT_FOUND = constanciaResponse(`
     <errorConstancia>
         <error>No existe persona con ese Id</error>
@@ -162,9 +160,9 @@ const NOT_FOUND = constanciaResponse(`
 `);
 
 /**
- * Live homologación, CUIT 24850833059: the constancia declines an INACTIVE clave — a `200` whose only
- * content is the complaint. A13 holds this person in full (LEBLANC RACHEL, `registrationStatus: INACTIVE`),
- * which is why this has to raise rather than parse into an empty taxpayer.
+ * Live homologación: the constancia declines an inactive clave with a `200` whose only content is the
+ * complaint. A13 holds this person in full, which is why this has to raise rather than parse into an empty
+ * taxpayer.
  */
 const INACTIVE_CLAVE = constanciaResponse(`
     <errorConstancia>
@@ -174,9 +172,9 @@ const INACTIVE_CLAVE = constanciaResponse(`
 `);
 
 /**
- * Live homologación, CUIT 20111111112: a CANCELLED clave, reported alongside two genuine data-quality
- * complaints. The verdict is not the only entry and not the one a naive read would land on, and its
- * siblings both name the CUIT without saying anything about its existence.
+ * A cancelled clave reported alongside two genuine data-quality complaints. The verdict is neither the only
+ * entry nor the one a naive read would land on, and its siblings both name the CUIT without saying anything
+ * about its existence.
  */
 const CANCELLED_CLAVE = constanciaResponse(`
     <errorConstancia>
@@ -188,8 +186,8 @@ const CANCELLED_CLAVE = constanciaResponse(`
 `);
 
 /**
- * The same two complaints WITHOUT the cancellation verdict. Both name the CUIT, so they are exactly what an
- * over-eager verdict pattern would misread as "no such taxpayer" — a real registration turned into a 404.
+ * The same two complaints without the cancellation verdict. Both name the CUIT, so they are what an
+ * over-eager verdict pattern would misread as "no such taxpayer" — a real registration turned into a `404`.
  */
 const CUIT_DATA_ERRORS = constanciaResponse(`
     <datosGenerales>
@@ -205,10 +203,10 @@ const CUIT_DATA_ERRORS = constanciaResponse(`
 `);
 
 /**
- * The cancellation verdict beside a REGISTRATION the service did report. `getPersona_v2` answers for a clave
- * the v1 operation refuses, so an inactive/cancelled clave can come back with its `datosGenerales` intact —
- * and then the complaint is not a no-answer at all: `estadoClave` carries the state, and A13 has strictly
- * less to say about this taxpayer than what is already in hand.
+ * The cancellation verdict beside a registration the service did report. `getPersona_v2` answers for a clave
+ * the v1 operation refuses, so a cancelled clave can come back with its `datosGenerales` intact — and then
+ * the complaint is not a no-answer: `estadoClave` carries the state, and A13 has less to say than what is
+ * already in hand.
  */
 const CANCELLED_CLAVE_WITH_REGISTRATION = constanciaResponse(`
     <datosGenerales>
@@ -222,7 +220,7 @@ const CANCELLED_CLAVE_WITH_REGISTRATION = constanciaResponse(`
     </errorConstancia>
 `);
 
-/** An existing taxpayer whose constancia carries data-quality complaints — NOT a not-found. */
+/** An existing taxpayer whose constancia carries data-quality complaints, not a not-found. */
 const WITH_DATA_ERRORS = constanciaResponse(`
     <datosGenerales>
         <apellido>PEREZ</apellido>
@@ -327,9 +325,9 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 
     /**
-     * An inactive or cancelled clave leaves every field of the response empty. Parsing it into a taxpayer
-     * yields a `200` with no name, no personType and no registrationStatus — an answer about the taxpayer
-     * that ARCA never gave. It must raise instead, so `claveFor` falls through to A13, which can answer.
+     * An inactive or cancelled clave leaves every field empty, so parsing it into a taxpayer yields a `200`
+     * with no name, no person type and no status — an answer ARCA never gave. It must raise instead, so the
+     * lookup falls through to A13.
      */
     it('raises a not-found for an inactive clave, so the lookup falls through to A13', async () => {
         const service = serviceReturning(ConstanciaInscripcionService, INACTIVE_CLAVE, 'getPersona_v2');
@@ -337,7 +335,7 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
         const error = await service.getTaxpayer(AUTH, 24850833059).catch((err: unknown) => err);
 
         expect(error).toBeInstanceOf(ArcaTaxpayerNotFoundError);
-        // ARCA's own wording rides along: it is what the provider rethrows into the 404 when A13 misses too.
+        // ARCA's own wording rides along: it is what the provider rethrows into the `404` when A13 misses.
         expect((error as Error).message).toContain('La clave se encuentra inactiva');
     });
 
@@ -392,10 +390,9 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 
     it('reports the CURRENT monotributo category, not whichever period came first', async () => {
-        // Recategorización is twice-yearly, so a taxpayer accumulates entries. ARCA documents no ordering,
-        // and here the newest is deliberately not first. The `estadoClave` in this fixture and the two below
-        // is incidental to what they test — it is what makes each an answer at all, rather than a régimen
-        // block hanging off a `datosGenerales` that names nobody.
+        // A taxpayer accumulates entries and ARCA documents no ordering, so the newest is deliberately not
+        // first here. The `estadoClave` in this fixture and the two below is what makes each an answer at
+        // all, rather than a régimen block hanging off a `datosGenerales` that names nobody.
         const service = serviceReturning(
             ConstanciaInscripcionService,
             constanciaResponse(
@@ -447,17 +444,16 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
 
         const data = await service.getTaxpayer(AUTH, 30712345678);
 
-        // NOT `false` — that would claim ARCA said this is not the principal activity, which it did not.
+        // Not `false`, which would claim ARCA said this is not the principal activity.
         expect(data.activities).toEqual([
             {code: '692000', description: 'SERVICIOS', period: undefined, primary: undefined},
         ]);
     });
 
     it('keeps a data-quality complaint that merely mentions something missing', async () => {
-        // The 404 test is about the PERSON; this one is about an address. A bare `no existe` check would
-        // throw away a complete registration because one of its blocks was flagged. The registration has to
-        // actually be here for that to be what is under test — an `idPersona` echo and a complaint is the
-        // substantively empty answer of its own test below, not a registration with a flagged block.
+        // The not-found test is about the person; this one about an address. A bare `no existe` check would
+        // throw away a complete registration because one of its blocks was flagged, so the registration has
+        // to actually be here for that to be what is under test.
         const service = serviceReturning(
             ConstanciaInscripcionService,
             constanciaResponse(
@@ -476,8 +472,8 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 
     it('classifies its SOAP faults exactly as A13 does — same webapp, same vocabulary', async () => {
-        // Constancia reports a not-found in its payload, but nothing stops it faulting like its sibling. Both
-        // services must answer the same authority verdict with the same HTTP status.
+        // The constancia reports a not-found in its payload, but nothing stops it faulting like its sibling,
+        // and both must answer the same authority verdict with the same status.
         const missing = serviceFailing(
             ConstanciaInscripcionService,
             new ArcaSoapError('La Clave (CUIT/CUIL) consultada es inexistente'),
@@ -493,8 +489,8 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 
     it('falls back to the requested clave when the response omits idPersona', async () => {
-        // `estadoClave` is what makes this an ANSWER rather than the substantively empty response below:
-        // `tipoClave` alone is derivable from the clave that was asked with and says nothing on its own.
+        // `estadoClave` is what makes this an answer rather than the empty response below: `tipoClave` is
+        // derivable from the clave asked with and says nothing on its own.
         const service = serviceReturning(
             ConstanciaInscripcionService,
             constanciaResponse(
@@ -507,16 +503,14 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 
     /**
-     * The bug behind the 2026-08-27 report: an answer that reports NOTHING about the taxpayer used to come
-     * back as a success, and a draft holding only the number that was asked with reached the customer form
-     * and was auto-applied. It has to raise so `claveFor` asks A13, which for these very claves
-     * (`27333333339`, `23333333333` in homologación) answers with the full identity.
+     * The bug behind the 2026-08-27 report: an answer reporting nothing about the taxpayer came back as a
+     * success, and a draft holding only the number asked with reached the customer form and was
+     * auto-applied. It has to raise so the lookup asks A13, which answers for these claves in full.
      *
      * Every spelling of "nothing", because each defeats a different obvious implementation: an empty
-     * `datosGenerales` with no recognizable complaint beside it defeats gating on the wording, a
-     * `datosGenerales` present but carrying only an `idPersona` echo defeats counting its keys, and a
-     * cancelled clave's leftover `impuesto` defeats asking whether the MAPPED record holds anything at all
-     * — a tax with nobody attached to it is not a taxpayer, and the customer form has no use for it.
+     * `datosGenerales` with no recognizable complaint defeats gating on the wording, one carrying only an
+     * `idPersona` echo defeats counting its keys, and a cancelled clave's leftover `impuesto` defeats
+     * asking whether the mapped record holds anything at all.
      */
     it.each([
         [
@@ -554,10 +548,9 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 
     /**
-     * The regression guard the widened miss needs: ONE authority-reported field is a real answer. Each of
-     * these responses is as close to empty as a response can be while still saying something, and none of
-     * them may become a 404 — the constancia is the richer padrón, and falling through would trade its
-     * answer for A13's thinner one.
+     * The guard the widened miss needs: one authority-reported field is a real answer. Each of these is as
+     * close to empty as a response can be while still saying something, and none may become a `404` — the
+     * constancia is the richer padrón, so falling through would trade its answer for A13's thinner one.
      */
     it.each([
         ['a registration status', '<estadoClave>ACTIVO</estadoClave>', {registrationStatus: 'ACTIVE'}],
@@ -579,16 +572,14 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
         );
 
         // The cancellation verdict is deliberately beside it: with something reported there is nothing to
-        // fall through to A13 FOR, so the complaint stays a note rather than becoming the answer.
+        // fall through to A13 for, so the complaint stays a note rather than becoming the answer.
         await expect(service.getTaxpayer(AUTH, 20272901849)).resolves.toMatchObject(expected);
     });
 
     /**
-     * The recognizable-wording case is covered above (an inactive clave keeps ARCA's own sentence, which is
-     * what `details.upstreamMessage` carries to the operator). This is its other half: the wording no longer
-     * DECIDES, so an unreadable complaint is still a miss — and it is still quoted, because the record it
-     * arrived on is discarded with the raise and this SDK logs nothing. "Not a verdict we recognize" is
-     * exactly when the operator most needs to see what ARCA actually said.
+     * The other half of the recognizable-wording case above: the wording no longer decides, so an unreadable
+     * complaint is still a miss — and still quoted, because the record it arrived on is discarded with the
+     * raise and this SDK logs nothing. An unrecognized verdict is when the operator most needs ARCA's words.
      */
     it('still raises when the wording is one no pattern recognizes, and quotes it anyway', async () => {
         const service = serviceReturning(
@@ -605,9 +596,8 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
 
     /**
      * The one complaint never quoted. A credential fault copied into the not-found would tell the caller a
-     * clave is unknown when our ticket was the problem — and the provider's `padronCall` classifies by
-     * message text, so it would evict a delegate ticket ARCA will not re-issue for ~12h on the strength of a
-     * sentence we merely passed along.
+     * clave is unknown when our ticket was the problem — and since the provider classifies by message text,
+     * it would evict a delegate ticket ARCA will not re-issue for ~12h.
      */
     it('never quotes a complaint about our own credentials', async () => {
         const service = serviceReturning(
@@ -623,7 +613,7 @@ describe('ConstanciaInscripcionService.getTaxpayer', () => {
     });
 });
 
-/** Manual v1.4 §3.2.3 — an individual with two declared addresses. */
+/** An individual with two declared addresses. */
 const A13_PERSON = envelope(
     'getPersonaV2',
     A13_NS,
@@ -734,10 +724,9 @@ describe('TaxpayerIdentityService', () => {
     });
 
     /**
-     * A13's silent "no such clave", in every spelling — and the reason a missing `persona` block is not the
-     * only one worth testing: this is the padrón the constancia falls back ONTO, and the padrón the document
-     * route reads alone, so an echo-only record returned from here is the same empty draft that reached the
-     * customer form. Presence of the container is not an answer; identifying somebody is.
+     * A13's silent "no such clave", in every spelling. This is the padrón the constancia falls back onto and
+     * the one the document route reads alone, so an echo-only record from here is the same empty draft that
+     * reached the customer form. Presence of the container is not an answer; identifying somebody is.
      */
     it.each([
         ['no persona block at all', '<metadata/>'],
@@ -806,9 +795,9 @@ describe('TaxpayerIdentityService', () => {
         ['El certificado no es valido'],
         ['No existe un ticket de acceso vigente para el servicio'],
     ])('never reads a credential fault (%s) as a bad identifier', async (message) => {
-        // Each of these carries the SAME verdict wording A13 uses for a bad clave, so classifying on the
-        // verdict alone would turn a rejected ticket into `400 INVALID_ID` (telling core to correct a clave
-        // that was never wrong) or into a `404` — burying a retryable authority failure behind a caller error.
+        // Each of these carries the same verdict wording A13 uses for a bad clave, so classifying on the
+        // verdict alone would turn a rejected ticket into a `400` or a `404` — burying a retryable
+        // authority failure behind a caller error.
         const thrown = new ArcaSoapError(message);
         const service = serviceFailing(TaxpayerIdentityService, thrown);
 
@@ -816,8 +805,8 @@ describe('TaxpayerIdentityService', () => {
     });
 
     it('leaves a fault about something other than the identifier untouched', async () => {
-        // "not found" about anything but the person we asked for is not this taxpayer's 404; an unreadable
-        // fault stays the authority error it arrived as.
+        // A not-found about anything but the person asked for is not this taxpayer's `404`, and an
+        // unreadable fault stays the authority error it arrived as.
         const thrown = new ArcaSoapError('El servicio no existe en este entorno');
         const service = serviceFailing(TaxpayerIdentityService, thrown);
 
@@ -876,13 +865,12 @@ describe('TaxpayerIdentityService', () => {
 });
 
 /**
- * The request side, driven through a REAL `SoapClient` so the assertions are about bytes on the wire.
+ * The request side, driven through a real SOAP client so the assertions are about bytes on the wire.
  *
- * ARCA's `sr-padron` webapp is JAX-WS with an unqualified schema: it wants `<token>`, not
- * `{http://a5.soap.ws.server.puc.sr/}token`. The qualified envelope is rejected at unmarshalling —
- * before the ticket is looked at — so the fault reads as an auth failure ("ARCA rejected the delegate
- * ticket") and sends the reader after the certificate instead of the body. That misdiagnosis is what
- * these tests exist to prevent recurring.
+ * ARCA's `sr-padron` webapp is JAX-WS with an unqualified schema, so it wants `<token>` rather than the
+ * namespaced form. The qualified envelope is rejected at unmarshalling, before the ticket is looked at, so
+ * the fault reads as an auth failure and sends the reader after the certificate instead of the body. That
+ * misdiagnosis is what these tests prevent recurring.
  */
 describe('padrón request envelope', () => {
     const originalFetch = (global as any).fetch;
@@ -901,8 +889,8 @@ describe('padrón request envelope', () => {
     }
 
     it('sends the constancia lookup with unqualified children', async () => {
-        // The response is incidental here — only the REQUEST is under test — but it has to report something
-        // about the taxpayer, or parsing it correctly raises the not-found an empty answer now is.
+        // The response is incidental, only the request being under test, but it has to report something
+        // about the taxpayer or parsing it raises the not-found an empty answer now is.
         const capture = captureRequest(
             constanciaResponse(
                 '<datosGenerales><idPersona>20123456789</idPersona><estadoClave>ACTIVO</estadoClave></datosGenerales>',

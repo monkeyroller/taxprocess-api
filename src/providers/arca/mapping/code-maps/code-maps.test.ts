@@ -1,11 +1,5 @@
-import {ArcaValidationError} from '../../sdk/index.js';
-import {
-    identificationTypeForClaveKind,
-    toCbteTipo,
-    toCondicionIvaReceptorId,
-    toDocTipo,
-    toPadronService,
-} from './code-maps.js';
+import {ArcaValidationError} from '../../sdk/core/errors.js';
+import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
 
 describe('code-maps (canonical code → ARCA code)', () => {
     describe('toCbteTipo (documentTypeCode → CbteTipo)', () => {
@@ -27,8 +21,8 @@ describe('code-maps (canonical code → ARCA code)', () => {
         });
 
         it('rejects retired core PKs that are not canonical codes', () => {
-            // The old export PK (17→CbteTipo 19), the adjust PK (43→95), and the whole 1xxx purchase-twin
-            // id-set are gone: core now sends the canonical code directly, so these are unknown.
+            // The old core primary keys are gone: core sends the canonical code directly, so these are
+            // unknown.
             expect(() => toCbteTipo(17)).toThrow(ArcaValidationError);
             expect(() => toCbteTipo(43)).toThrow(ArcaValidationError);
             expect(() => toCbteTipo(1001)).toThrow(ArcaValidationError);
@@ -52,58 +46,6 @@ describe('code-maps (canonical code → ARCA code)', () => {
             expect(toDocTipo(80)).toBe(80); // CUIT
             expect(toDocTipo(96)).toBe(96); // DNI
             expect(toDocTipo(99)).toBe(99); // SIN IDENTIFICAR (consumidor final)
-        });
-    });
-
-    describe('toPadronService', () => {
-        it('sends a clave tributaria to the constancia service', () => {
-            for (const code of [80, 86, 87]) {
-                expect(toPadronService(code)).toBe('CONSTANCIA');
-            }
-        });
-
-        it('sends an identity document to A13, the only service that can resolve one', () => {
-            for (const code of [96, 89, 90]) {
-                expect(toPadronService(code)).toBe('A13');
-            }
-        });
-
-        it('refuses the identification types no padrón service can answer for', () => {
-            // ARCA's document search takes a bare number with no type, so a passport or foreign CI cannot
-            // be routed; 99 names no person at all. Caller-fixable, hence its own reason code.
-            for (const code of [91, 94, 99]) {
-                expect(() => toPadronService(code)).toThrow(ArcaValidationError);
-                expect(() => toPadronService(code)).toThrow(/padrón service/);
-            }
-        });
-
-        it('reports an entirely unknown code as UNKNOWN_CODE, not as an unroutable type', () => {
-            try {
-                toPadronService(1234);
-                throw new Error('expected a validation error');
-            } catch (err) {
-                expect((err as {code?: string}).code).toBe('UNKNOWN_CODE');
-            }
-        });
-    });
-
-    describe('identificationTypeForClaveKind (tipoClave → identificationTypeCode)', () => {
-        it('maps the three clave kinds ARCA reports', () => {
-            expect(identificationTypeForClaveKind('CUIT')).toBe(80);
-            expect(identificationTypeForClaveKind('CUIL')).toBe(86);
-            expect(identificationTypeForClaveKind('CDI')).toBe(87);
-        });
-
-        it('tolerates the spacing and casing of a free-text field', () => {
-            expect(identificationTypeForClaveKind(' cuit ')).toBe(80);
-        });
-
-        it('reports nothing instead of throwing — this reads registry data, not caller input', () => {
-            // The mirror of toDocTipo: an unknown code from a CALLER is their error, but an unexpected
-            // string from ARCA must not fail a lookup that otherwise succeeded.
-            expect(identificationTypeForClaveKind(undefined)).toBeUndefined();
-            expect(identificationTypeForClaveKind('')).toBeUndefined();
-            expect(identificationTypeForClaveKind('DNI')).toBeUndefined();
         });
     });
 

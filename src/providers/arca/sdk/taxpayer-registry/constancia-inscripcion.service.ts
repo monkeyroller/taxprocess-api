@@ -2,32 +2,27 @@ import {TaxpayerRegistryService} from './taxpayer-registry.service.base.js';
 import {ENDPOINTS, Namespaces, ServiceId} from '../core/constants.js';
 import {ArcaTaxpayerNotFoundError} from '../core/errors.js';
 import {registrationUnavailableMessage} from './padron-faults.js';
-import {firstOf} from '../invoicing/common/common-helpers.js';
+import {asArray, firstOf, integer, text} from '../../../xml-node/xml-node.js';
 import {
     address,
-    asArray,
     identifiesNoTaxpayer,
-    integer,
     isoDate,
     isoPeriod,
     personType,
     registrationStatus,
-    text,
 } from './padron-helpers.js';
 import type {PadronActivity, PadronService, PadronTax, TaxpayerData} from './padron.types.js';
 
 /**
- * Consulta a Padrón — Constancia de Inscripción (`ws_sr_constancia_inscripcion`), the service ARCA's
- * catalog names as the replacement for the deprecated alcance 5 (`ws_sr_padron_a5`). The rename did not
- * move the endpoint or the namespace — both are still the alcance-5 ones — but the WSAA ticket must be
- * requested under the new id, and the certificate enrolled under it.
+ * Consulta a Padrón — Constancia de Inscripción, ARCA's replacement for the deprecated alcance 5. The rename
+ * moved neither the endpoint nor the namespace, but the WSAA ticket must be requested under the new id and
+ * the certificate enrolled under it.
  *
- * Returns the taxpayer's registration picture: fiscal address, registered taxes, activities, régimen
- * general / monotributo data. It carries no identity document and no birth date — that is A13's half
- * (see `taxpayer-identity.service.ts`), which is why the SDK reports a `PadronDetail` alongside the data.
+ * Returns the taxpayer's registration picture: fiscal address, registered taxes, activities, régimen general
+ * and monotributo data. It carries no identity document and no birth date — that is A13's half, which is why
+ * the SDK reports a detail alongside the data.
  *
- * Uses `getPersona_v2` (manual v4.1 §3.2): it returns every monotributo activity and the caracterizaciones
- * the v1 operation omits.
+ * Uses `getPersona_v2`, which returns every monotributo activity and the caracterizaciones v1 omits.
  */
 export class ConstanciaInscripcionService extends TaxpayerRegistryService {
     protected readonly padron: PadronService = 'CONSTANCIA';
@@ -77,33 +72,26 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
             providerMetadata: buildMetadata(general, regimeGeneral, persona, errors),
         };
 
-        // This service only reports claves with a CURRENT inscripción. A clave ARCA issued with nothing
-        // registered against it, and one that is inactive or cancelled, both come back as a perfectly
-        // successful `200` in which every reported field is empty — so what decides a no-answer is whether
-        // the MAPPED record names a taxpayer at all ({@link identifiesNoTaxpayer}), and nothing else.
-        // Returned as data, such a record is an answer ARCA never gave: it reached the customer form as a
-        // draft holding only the number that was asked with, and was auto-applied as if it were the
-        // taxpayer's data. Raised as a not-found it becomes what it is — "this padrón has nothing" — and
-        // `claveFor` asks A13, which routinely knows the person perfectly well.
+        // This service reports only claves with a current inscripción. A clave with nothing registered
+        // against it, and one that is inactive or cancelled, both come back as a successful `200` in which
+        // every reported field is empty — so whether the mapped record names a taxpayer at all is what
+        // decides a no-answer. Returned as data, such a record reached the customer form as a draft holding
+        // only the number asked with, and was auto-applied as if it were the taxpayer's data.
         //
-        // Deliberately NOT a key count on `datosGenerales`: that measures whether ARCA sent a container,
-        // not whether the container said anything, and the node can arrive present carrying only an
-        // `idPersona` echo. Nor is it gated on the complaint's wording — see below. And deliberately blind
-        // to the régimen/monotributo blocks: a cancelled clave can come back with an empty `datosGenerales`
-        // beside a dangling `impuesto`, and a tax with nobody attached to it is not a taxpayer.
+        // Deliberately not a key count on `datosGenerales`, which measures whether ARCA sent a container
+        // rather than whether it said anything, and not gated on the complaint's wording. Deliberately blind
+        // to the régimen and monotributo blocks too: a cancelled clave can come back with an empty
+        // `datosGenerales` beside a dangling `impuesto`, and a tax with nobody attached is not a taxpayer.
         //
-        // Safe for the same reason the narrower test was: with no registration in hand there is nothing to
-        // throw away. When a registration IS in hand — `getPersona_v2` answers for an inactive clave the v1
-        // operation refuses — a cancellation verdict beside it rides along as metadata like every other
-        // complaint, because `estadoClave` already carries that state into `registrationStatus`.
+        // Safe because with no registration in hand there is nothing to throw away. Where one is in hand, a
+        // cancellation verdict rides along as metadata like every other complaint, `estadoClave` already
+        // carrying that state into `registrationStatus`.
         if (identifiesNoTaxpayer(data)) {
-            // The complaint now picks only the MESSAGE. That matters — it is the authority's own wording,
-            // which `claveFor` rethrows into the `404` and which is what lets a caller tell "nobody
-            // registered" from "clave cancelada" — but it no longer decides anything, so an unknown
-            // wording, or none at all, is still a not-found. `errorConstancia` doubles as a data-quality
-            // channel about a taxpayer who very much exists (manual §5.3: "Domicilio Incompleto", "Nombre
-            // erróneo", …) and shares its vocabulary with the verdicts, so ARCA rewording one must not turn
-            // a miss back into an empty success.
+            // The complaint picks only the message, which `claveFor` rethrows into the `404` and which lets
+            // a caller tell "nobody registered" from "clave cancelada". It decides nothing, so an unknown
+            // wording — or none — is still a not-found: `errorConstancia` doubles as a data-quality channel
+            // about a taxpayer who does exist, so ARCA rewording a verdict must not turn a miss back into an
+            // empty success.
             throw new ArcaTaxpayerNotFoundError(String(taxpayerId), registrationUnavailableMessage(errors));
         }
 
@@ -112,11 +100,10 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
 }
 
 /**
- * The taxpayer's CURRENT small-taxpayer category. ARCA returns one `categoriaMonotributo` per period the
- * taxpayer has held — recategorización is twice-yearly — and documents no ordering, so the latest `periodo`
- * wins rather than whichever element happened to come first. Comparing the ISO-normalized year-month keeps
- * that safe when ARCA sends a full `AAAAMMDD` in the same list as an `AAAAMM`, which raw string or numeric
- * comparison would order wrongly.
+ * The taxpayer's current small-taxpayer category. ARCA returns one `categoriaMonotributo` per period held and
+ * documents no ordering, so the latest `periodo` wins rather than whichever element came first. Comparing
+ * the ISO-normalized year-month keeps that safe when ARCA mixes `AAAAMMDD` and `AAAAMM` in one list, which
+ * raw string or numeric comparison would order wrongly.
  */
 function currentCategory(monotributo: Record<string, any>): Record<string, any> | undefined {
     const categories = asArray(monotributo.categoriaMonotributo);
@@ -153,10 +140,9 @@ function parseActivities(
             code,
             description: text(node.descripcionActividad),
             period: isoPeriod(node.periodo),
-            // Left unreported when ARCA sends no `orden`, rather than asserting `false`. `primary` is
-            // optional precisely so "not the principal activity" and "the authority did not say" stay
-            // distinguishable — collapsing them would have every activity of a taxpayer whose block omits
-            // `orden` claim it is not the principal one, which is a statement ARCA never made.
+            // Left unreported when ARCA sends no `orden`, rather than asserting `false`: collapsing the two
+            // would have every activity of a taxpayer whose block omits `orden` claim it is not the
+            // principal one, which ARCA never said.
             primary: order === undefined ? undefined : order === 1,
         });
     }
@@ -184,10 +170,10 @@ function parseTaxes(regimeGeneral: Record<string, any>, monotributo: Record<stri
 }
 
 /**
- * ARCA-only data with no cross-country meaning, passed through for callers that need it: caracterizaciones
- * (which since 2026 carry flags such as `GANANCIAS SIMPLIFICADA LEY 27.779`), the sucesión/fallecimiento
- * markers, the taxpayer's dependencia, régimen and autónomos entries, and the per-block constancia errors.
- * Keys are added only when present, so an unremarkable taxpayer yields just the `service` marker.
+ * ARCA-only data with no cross-country meaning, passed through for callers that need it: caracterizaciones,
+ * the sucesión and fallecimiento markers, the taxpayer's dependencia, régimen and autónomos entries, and the
+ * per-block constancia errors. Keys are added only when present, so an unremarkable taxpayer yields just the
+ * `service` marker.
  */
 function buildMetadata(
     general: Record<string, any>,

@@ -1,33 +1,28 @@
 import {TaxpayerRegistryService} from './taxpayer-registry.service.base.js';
 import {ENDPOINTS, Namespaces, ServiceId} from '../core/constants.js';
 import {ArcaTaxpayerNotFoundError} from '../core/errors.js';
-import {firstOf} from '../invoicing/common/common-helpers.js';
+import {asArray, firstOf, integer, text} from '../../../xml-node/xml-node.js';
 import {
     address,
-    asArray,
     fiscalAddressOf,
     identifiesNoTaxpayer,
-    integer,
     isoDate,
     isoPeriod,
     personType,
     registrationStatus,
-    text,
 } from './padron-helpers.js';
 import type {ArcaAuth} from '../core/types.js';
 import type {PadronActivity, PadronService, TaxpayerData} from './padron.types.js';
 
 /**
- * Consulta a Padrón — Alcance 13 (`ws_sr_padron_a13`), the *identity* half of the padrón: names,
- * identity document, birth date, legal form, every declared address, and the principal activity. It
- * reports no registered taxes and no monotributo data — that is the constancia service's half.
+ * Consulta a Padrón — Alcance 13, the identity half of the padrón: names, identity document, birth date,
+ * legal form, every declared address, and the principal activity. No registered taxes and no monotributo
+ * data — that is the constancia service's half.
  *
- * Two operations are used:
- * - `getPersonaV2` (no underscore, unlike the constancia service's `getPersona_v2`) — manual v1.4 §3.4.
- *   It answers even when the clave is INACTIVA, which the v1 `getPersona` refuses; an inactive taxpayer
- *   must come back as data with `registrationStatus: 'INACTIVE'`, not as an error.
- * - `getIdPersonaListByDocumento` — resolves an identity document number to the claves issued for it.
- *   One document commonly maps to several (a person's CUIL and CUIT), so it returns a list.
+ * Two operations. `getPersonaV2` (no underscore, unlike the constancia service's spelling) answers even for
+ * an inactive clave, which the v1 `getPersona` refuses: an inactive taxpayer must come back as data rather
+ * than an error. `getIdPersonaListByDocumento` resolves an identity document to the claves issued for it,
+ * commonly several, so it returns a list.
  */
 export class TaxpayerIdentityService extends TaxpayerRegistryService {
     protected readonly padron: PadronService = 'A13';
@@ -88,21 +83,18 @@ export class TaxpayerIdentityService extends TaxpayerRegistryService {
             addresses,
             activities: parsePrincipalActivity(persona),
             // No `taxes` key at all: this service cannot report them, and an empty array would read as
-            // "none registered" (see the per-detail table in docs/CONTRACT.md).
+            // "none registered".
             providerMetadata: buildMetadata(persona),
         };
 
-        // A `200` that names no taxpayer is A13's silent form of "no such clave", and it has more than one
-        // spelling: no `persona` block at all, an empty `<persona/>` container, or one carrying nothing but
-        // the `idPersona` we asked with. All three used to map to a record holding that echo and nothing
-        // else — the empty draft the customer form auto-applies — and only the first was caught, by testing
-        // that the container was *present*. Presence is not an answer, so the same shape test the constancia
-        // uses decides it here: what matters is whether the MAPPED record identifies anybody.
+        // A `200` that names no taxpayer is A13's silent form of "no such clave", in several spellings: no
+        // `persona` block, an empty container, or one carrying nothing but the `idPersona` asked with. All
+        // three produce the empty draft the customer form auto-applies, and testing that the container was
+        // merely present caught only the first — so the same shape test the constancia uses decides it here.
         //
-        // A13 has no fallback behind it, so this miss is the authoritative `404` rather than a reason to ask
-        // elsewhere. That is the right reading all the same: a persona block ARCA populates carries
-        // `estadoClave` and the names in every §3.4 example, and a record with none of them says nothing a
-        // caller could act on anyway.
+        // A13 has no fallback behind it, so this miss is the authoritative `404`. That is the right reading
+        // regardless: a populated persona block carries `estadoClave` and the names in every manual example,
+        // and a record with none of them says nothing a caller could act on.
         if (identifiesNoTaxpayer(data)) {
             throw new ArcaTaxpayerNotFoundError(String(taxpayerId));
         }

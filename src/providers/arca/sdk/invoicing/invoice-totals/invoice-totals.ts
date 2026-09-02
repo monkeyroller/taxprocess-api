@@ -1,15 +1,18 @@
 import {vatRateIdForPercent} from '../vat-rate-map.js';
+import {roundHalfUpTo} from '../../../../rounding/rounding.js';
 
 /**
- * Pure VAT/total aggregation for invoice authorization. No I/O — the application layer feeds it
- * line-level tax data extracted from a sale, and it returns the `Iva[]` breakdown ARCA expects plus
- * the rolled-up taxed net and VAT amounts. Every intermediate is rounded to two decimals so the
+ * VAT and total aggregation for invoice authorization: line-level tax data in, the `Iva[]` breakdown ARCA
+ * expects plus the rolled-up taxed net and VAT out. Every intermediate is rounded to two decimals so the
  * summed subtotals reconcile with the header totals ARCA validates.
  */
 
-/** Rounds to two decimals, nudging past binary-float representation error. */
+/**
+ * Rounds to two decimals, the precision every amount reaches ARCA at. Half-up on a decimal tie, because an
+ * operator checking the invoice by hand adds the same column.
+ */
 export function roundToTwo(value: number): number {
-    return Math.round((value + Number.EPSILON) * 100) / 100;
+    return roundHalfUpTo(value, 2);
 }
 
 /** One taxable line's contribution: its net (base imponible) and VAT amount at a given rate. */
@@ -39,9 +42,8 @@ export interface InvoiceTotals {
 }
 
 /**
- * Groups lines by ARCA VAT id, summing base and VAT per group, and returns the subtotals and header
- * roll-ups. Lines with a zero net and zero VAT are ignored so a 0% group only appears when a line
- * actually carries a base at 0% (as ARCA requires for exempt-but-declared bases).
+ * Groups lines by ARCA VAT id, summing base and VAT per group. Lines with a zero net and zero VAT are
+ * ignored, so a 0% group appears only when a line carries a real base at 0%.
  */
 export function calculateTotals(lines: ReadonlyArray<InvoiceLineTax>): InvoiceTotals {
     const byId = new Map<number, {base: number; vat: number}>();

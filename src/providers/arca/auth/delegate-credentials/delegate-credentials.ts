@@ -5,20 +5,20 @@ import {
     certificateSubjectSerialNumber,
     isCertificateSigningRequest,
     keyMatchesCertificatePem,
-} from '../../sdk/index.js';
+} from '../../../pem/pem.js';
 import {canonicalCuit} from '../../mapping/identifiers.js';
 import {env, type ArcaDelegateConfig} from '../../../../config/env.js';
-import {DelegationNotConfiguredError, type GenericEnvironment} from '../../../provider/provider.js';
+import {DelegationNotConfiguredError} from '../../../provider/faults.js';
+import type {GenericEnvironment} from '../../../provider/environment.js';
 
 /**
- * The service's own ARCA *delegate* certificate for one environment — the platform credential this
- * service signs WSAA logins with when acting as a computador on behalf of a represented taxpayer.
- * `delegateCuit` is the canonical 11-digit CUIT read from the certificate subject (our organization's).
+ * The service's own ARCA delegate certificate for one environment — the platform credential this service
+ * signs WSAA logins with when acting on behalf of a represented taxpayer. `delegateCuit` is the canonical
+ * CUIT read from the certificate subject.
  *
- * `certPem`/`keyPem` are the **canonical** PEMs (armor repaired, escaped/CRLF newlines converted, key
- * normalized to PKCS#1), not the raw configured strings: the PEM validators tolerate those defects but the
- * WSAA signer (`forge.pki.certificateFromPem` / `crypto.createPrivateKey`) does not, so storing the raw
- * value would pass boot validation and then fail to sign on every delegated request.
+ * The PEMs are canonical rather than the raw configured strings: the validators tolerate armor and newline
+ * defects but the WSAA signer does not, so storing the raw value would pass boot validation and then fail to
+ * sign on every delegated request.
  */
 export interface DelegateCredentials {
     readonly certPem: string;
@@ -26,7 +26,7 @@ export interface DelegateCredentials {
     readonly delegateCuit: string;
 }
 
-/** Reads a PEM from an inline value (preferred) or a file path; undefined when neither is configured. */
+/** Reads a PEM from an inline value or a file path; `undefined` when neither is configured. */
 function readPemSource(
     environment: GenericEnvironment,
     inline: string | undefined,
@@ -48,14 +48,10 @@ function readPemSource(
 }
 
 /**
- * Loads, validates, and caches the delegate certificate per environment.
- *
- * The delegate cert is a single platform credential (see {@link file://../../../config/env.ts}), so it is
- * read once per environment and memoized. `get()` returns the validated bundle, `undefined` when the
- * environment has no delegate cert configured at all, and throws {@link DelegationNotConfiguredError}
- * when a cert IS configured but is unusable (invalid PEM, key/cert mismatch, no CUIT, or a CUIT that
- * disagrees with `ARCA_DELEGATE_TAXID`). Boot calls {@link DelegateCredentialStore.validateConfigured}
- * so a misconfiguration fails fast at startup rather than on the first delegated request.
+ * Loads, validates and caches the delegate certificate per environment — a single platform credential, so it
+ * is read once and memoized. `get()` returns the validated bundle, `undefined` when the environment has no
+ * delegate cert at all, and throws when one is configured but unusable. Boot calls `validateConfigured` so a
+ * misconfiguration fails fast at startup rather than on the first delegated request.
  */
 export class DelegateCredentialStore {
     private readonly cache = new Map<GenericEnvironment, DelegateCredentials | null>();
@@ -80,10 +76,10 @@ export class DelegateCredentialStore {
     }
 
     /**
-     * True when `certPem` is the very certificate this environment's delegate identity signs with — compared
-     * as canonical PEM, so formatting differences (armor, escaped/CRLF newlines) never make the same
-     * certificate look different. Used to decide whether a tenant request may share the delegate's cached
-     * WSAA ticket; a broken/absent delegate config is simply "no match", never a failure of that request.
+     * True when `certPem` is the certificate this environment's delegate identity signs with, compared as
+     * canonical PEM so formatting differences never make the same certificate look different. Decides
+     * whether a tenant request may share the delegate's cached WSAA ticket; a broken or absent delegate
+     * config is simply "no match", never a failure of that request.
      */
     matchesDelegateCertificate(environment: GenericEnvironment, certPem: string): boolean {
         let delegate: DelegateCredentials | undefined;
@@ -117,8 +113,8 @@ export class DelegateCredentialStore {
         if (isCertificateSigningRequest(rawCert)) {
             throw new DelegationNotConfiguredError(environment, 'the certificate is a CSR, not an issued certificate');
         }
-        // Canonicalize and KEEP the canonical form: validating a repaired PEM but signing with the raw one
-        // would let an escaped-`\n` / unarmored / CRLF value pass boot and then fail in the WSAA signer.
+        // The canonical form is kept: validating a repaired PEM but signing with the raw one would let an
+        // unarmored or escaped-newline value pass boot and then fail in the WSAA signer.
         const certPem = canonicalizeCertificatePem(rawCert);
         if (certPem === null) {
             throw new DelegationNotConfiguredError(environment, 'the certificate is not a valid X.509 certificate');
@@ -137,7 +133,7 @@ export class DelegateCredentialStore {
             throw new DelegationNotConfiguredError(environment, 'the certificate subject carries no CUIT');
         }
 
-        // Optional cross-check: guard against deploying a cert for the wrong organization.
+        // Guards against deploying a cert for the wrong organization.
         if (this.config.expectedTaxId !== undefined) {
             const expected = canonicalCuit(this.config.expectedTaxId);
             if (expected === null) {
@@ -158,5 +154,5 @@ export class DelegateCredentialStore {
     }
 }
 
-/** Process-wide delegate certificate store (reads {@link env.arcaDelegate}). */
+/** Process-wide delegate certificate store. */
 export const delegateCredentialStore = new DelegateCredentialStore();

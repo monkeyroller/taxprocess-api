@@ -10,12 +10,12 @@ import {InvoicesController} from './http/controllers/invoices.controller.js';
 import {PointsOfSaleController} from './http/controllers/points-of-sale.controller.js';
 import {TaxpayersController} from './http/controllers/taxpayers.controller.js';
 import {EntitiesController} from './http/controllers/entities.controller.js';
+import {CurrenciesController} from './http/controllers/currencies.controller.js';
 import {toHttpError} from './http/error-mapper/error-mapper.js';
 
 /**
- * Express safety net for errors that reach the framework layer — chiefly class-validator `400`s that
- * routing-controllers raises before an action runs. Controllers map their own SDK errors in-action
- * (so `ArcaError` identity is preserved); this catches the rest.
+ * Safety net for errors that reach the framework layer, chiefly the class-validator `400`s raised before an
+ * action runs. Controllers map their own errors in-action; this catches the rest.
  */
 function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
     if (res.headersSent) {
@@ -27,8 +27,8 @@ function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunc
 }
 
 function bootstrap(): void {
-    // Fail fast if a delegate certificate is configured but unusable, rather than on the first
-    // delegated request. A no-op when no delegate cert is configured (delegation stays disabled).
+    // Fails fast if a delegate certificate is configured but unusable, rather than on the first delegated
+    // request. A no-op when none is configured.
     delegateCredentialStore.validateConfigured();
 
     const app = express();
@@ -41,7 +41,8 @@ function bootstrap(): void {
             InvoicesController,
             PointsOfSaleController,
             TaxpayersController,
-            EntitiesController
+            EntitiesController,
+            CurrenciesController
         ],
         validation: {
             whitelist: true,

@@ -2,14 +2,11 @@ import {XMLParser} from 'fast-xml-parser';
 import {ArcaError, ArcaSoapError} from '../errors.js';
 
 /**
- * Minimal SOAP 1.1 client over native `fetch`. Deliberately avoids a WSDL/SOAP library: it builds
- * the envelope by hand and parses responses with `fast-xml-parser`, which keeps the dependency
- * surface tiny and the wire format fully explicit (important for a fiscal integration).
+ * Minimal SOAP 1.1 client over native `fetch`, avoiding a WSDL library so the wire format stays explicit.
  *
- * Namespace prefixes are stripped on parse (`removeNSPrefix`) so `Envelope`/`Body` are reachable
- * regardless of whether the server answers with `soap:`, `soapenv:` or `S:`. Tag values are NOT
- * coerced to numbers (`parseTagValue: false`) so long fiscal identifiers (CUIT, 14-digit CAE) and
- * monetary strings are never mangled into floats — callers convert explicitly where needed.
+ * Namespace prefixes are stripped on parse, so `Envelope`/`Body` are reachable whether the server answers
+ * with `soap:`, `soapenv:` or `S:`. Tag values are not coerced to numbers, so long fiscal identifiers and
+ * monetary strings are never mangled into floats — callers convert explicitly.
  */
 
 export interface SoapClientOptions {
@@ -19,25 +16,20 @@ export interface SoapClientOptions {
 }
 
 /**
- * How the operation element's children are namespace-qualified — the wire consequence of the target
- * schema's `elementFormDefault`. ARCA's services disagree on this, so it is per-call:
+ * How the operation element's children are namespace-qualified. ARCA's services disagree, so it is per-call:
  *
- * - `'qualified'` (the default): the operation element declares the target namespace as the DEFAULT
- *   `xmlns`, so every unprefixed child inherits it. What the .NET services want — WSFEv1/WSFEXv1 — and
- *   what WSAA's `loginCms` accepts.
- * - `'unqualified'`: the target namespace rides on a prefix, so ONLY the operation element carries it
- *   and its children stay in no namespace at all. What the JAX-WS padrón services (`sr-padron`) want.
- *   Sending them the qualified form is rejected before the ticket is even looked at, with
- *   `Unmarshalling Error: unexpected element (uri:"http://a5.soap.ws.server.puc.sr/", local:"token").
- *   Expected elements are <{}sign>,<{}token>,<{}cuitRepresentada>,<{}idPersona>` — a SOAP fault that
- *   reads like an auth failure but is purely a body-shape one.
+ * - `'qualified'`, the default: the operation element declares the target namespace as the default `xmlns`,
+ *   so every unprefixed child inherits it. What the .NET invoicing services and WSAA want.
+ * - `'unqualified'`: the namespace rides on a prefix, so only the operation element carries it and its
+ *   children stay in no namespace. What the JAX-WS padrón services want — sending them the qualified form
+ *   is rejected at unmarshalling with a fault that reads like an auth failure but is purely a body shape.
  */
 export type ElementForm = 'qualified' | 'unqualified';
 
 export interface SoapCallOptions {
     /**
-     * SOAPAction header; defaults to `"{namespace}/{operation}"`. Pass `''` for services (e.g. WSAA)
-     * that expect an empty action.
+     * SOAPAction header; defaults to `"{namespace}/{operation}"`. Pass `''` for a service that expects an
+     * empty action, as WSAA does.
      */
     soapAction?: string;
     /** Namespace form for the operation element's children. Defaults to `'qualified'`. */
@@ -51,10 +43,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Serializes a plain object into element XML for the SOAP body. Nested objects become nested
- * elements; an array repeats its key (`{Iva: [a, b]}` → `<Iva>…a…</Iva><Iva>…b…</Iva>`); primitives
- * become escaped text; `null`/`undefined` are omitted. No attribute support is needed — ARCA request
- * bodies are element-only. Kept in-house to avoid the deprecated `XMLBuilder`.
+ * Serializes a plain object into element XML for the SOAP body. Nested objects become nested elements, an
+ * array repeats its key, primitives become escaped text, and `null`/`undefined` are omitted. No attribute
+ * support: ARCA request bodies are element-only.
  */
 function serializePayload(payload: Record<string, unknown>): string {
     return Object.entries(payload)
@@ -101,14 +92,8 @@ export class SoapClient {
     }
 
     /**
-     * Sends a SOAP request and returns the parsed `<{operation}Response>` element. The caller reads
-     * the operation-specific child (e.g. `FECAESolicitarResult`, `loginCmsReturn`) off the result.
-     *
-     * @param endpoint absolute service URL
-     * @param namespace SOAP target namespace, carried by the operation element
-     * @param operation operation name, e.g. `"FECAESolicitar"`
-     * @param payload object serialized as the operation element's children
-     * @param options SOAPAction override and the children's {@link ElementForm}
+     * Sends a SOAP request and returns the parsed response element. The caller reads the
+     * operation-specific child off the result.
      */
     async call(
         endpoint: string,
@@ -123,7 +108,7 @@ export class SoapClient {
         return this.extractResponse(rawXml, operation);
     }
 
-    /** Parses a standalone XML string (e.g. the escaped ticket XML nested in a WSAA response). */
+    /** Parses a standalone XML string, such as the escaped ticket XML nested in a WSAA response. */
     parseXmlString(xml: string): Record<string, unknown> {
         return this.parser.parse(xml) as Record<string, unknown>;
     }
@@ -139,8 +124,8 @@ export class SoapClient {
         elementForm: ElementForm,
     ): string {
         const inner = serializePayload(payload);
-        // A prefix on the operation element leaves the children in no namespace; a default `xmlns` puts
-        // them all in the target one. See {@link ElementForm} — the two are not interchangeable.
+        // A prefix on the operation element leaves the children in no namespace; a default `xmlns` puts them
+        // all in the target one. The two are not interchangeable.
         const body =
             elementForm === 'unqualified'
                 ? `<ns1:${operation} xmlns:ns1="${namespace}">${inner}</ns1:${operation}>`

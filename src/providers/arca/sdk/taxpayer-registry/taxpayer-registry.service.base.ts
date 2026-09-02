@@ -6,30 +6,23 @@ import type {ArcaAuth} from '../core/types.js';
 import type {PadronService, TaxpayerData} from './padron.types.js';
 
 /**
- * Shared base for the ARCA padrón "consulta de persona" web services.
+ * Shared base for the ARCA padrón "consulta de persona" web services. They take the same SOAP inputs and
+ * differ only in operation name, endpoint and how much taxpayer data they return. The base owns the SOAP
+ * call and the fault classification — the services share ARCA's `sr-padron` webapp and therefore its fault
+ * vocabulary, so an unknown clave has to mean `404` whichever alcance was asked.
  *
- * All of them take the same SOAP inputs — `(token, sign, cuitRepresentada, idPersona)` — and differ in
- * their operation name, their endpoint/namespace, and how much taxpayer data they return, which is why
- * they belong under one base parameterized by {@link PadronService}. The base owns the SOAP call; each
- * service fills its identity (`padron`, `serviceId`, `namespace`, `operation`, `endpoint`) and its
- * `parseTaxpayer`.
- *
- * Fault classification is the base's too, via {@link invoke} — the services share ARCA's `sr-padron` webapp
- * and therefore its fault vocabulary, so an unknown clave has to mean `404` whichever alcance was asked.
- *
- * Each service also requires its own enrolment of the calling certificate at ARCA and its own WSAA
- * ticket (keyed by `serviceId`).
+ * Each service requires its own enrolment of the calling certificate at ARCA and its own WSAA ticket.
  */
 export abstract class TaxpayerRegistryService {
     /** Which padrón service this is, in SDK vocabulary. */
     protected abstract readonly padron: PadronService;
-    /** ARCA service id, e.g. `"ws_sr_constancia_inscripcion"` — the WSAA ticket key. */
+    /** ARCA service id, which is also the WSAA ticket key. */
     protected abstract readonly serviceId: ServiceIdValue;
     protected abstract readonly namespace: string;
     /**
-     * SOAP operation name. Deliberately per-service: the two live services spell their v2 lookup
-     * differently (`getPersona_v2` for constancia, `getPersonaV2` for A13), and the v1 `getPersona` both
-     * still expose is the one to avoid — it refuses to answer for an INACTIVA key.
+     * SOAP operation name, per service: the two live services spell their v2 lookup differently
+     * (`getPersona_v2` against `getPersonaV2`), and the v1 `getPersona` both still expose is the one to
+     * avoid, refusing to answer for an inactive clave.
      */
     protected abstract readonly operation: string;
 
@@ -40,24 +33,22 @@ export abstract class TaxpayerRegistryService {
 
     protected abstract endpoint(): string;
 
-    /** ARCA service id this instance authenticates against — used to request the WSAA ticket. */
+    /** ARCA service id this instance authenticates against, used to request the WSAA ticket. */
     get service(): ServiceIdValue {
         return this.serviceId;
     }
 
     /**
-     * Sends one padrón SOAP operation, translating the authority's documented fault conditions into the SDK's
-     * own errors ({@link translatePadronFault}). Every padrón operation goes through here, including the
-     * subclass-specific ones, so no service can accidentally return a `502` for a condition its sibling
-     * reports as a `404`.
+     * Sends one padrón SOAP operation, translating the authority's fault conditions into the SDK's own
+     * errors. Every padrón operation goes through here, including the subclass-specific ones, so no service
+     * can return a `502` for a condition its sibling reports as a `404`.
      *
-     * `subject` is the identifier the call is about, echoed into a not-found so the error names what was asked
-     * for even when the authority's own wording does not.
+     * `subject` is the identifier the call is about, echoed into a not-found so the error names what was
+     * asked for even when the authority's own wording does not.
      *
-     * The padrón services are JAX-WS and expect UNQUALIFIED children (`<token>`, not
-     * `{a5.soap.ws.server.puc.sr}token`) — unlike the .NET invoicing services, which take the SDK's default
-     * qualified form. Getting this wrong is rejected at unmarshalling, before the ticket is read, so it
-     * surfaces as an auth-looking fault; see {@link ElementForm}.
+     * The padrón services are JAX-WS and expect unqualified children, unlike the .NET invoicing services
+     * which take the SDK's default qualified form. Getting this wrong is rejected at unmarshalling, before
+     * the ticket is read, so it surfaces as an auth-looking fault.
      */
     protected async invoke(
         operation: string,

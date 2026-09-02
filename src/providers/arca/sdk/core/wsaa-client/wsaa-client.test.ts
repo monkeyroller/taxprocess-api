@@ -106,6 +106,43 @@ describe('WsaaClient', () => {
         expect(soap.calls).toHaveLength(2);
     });
 
+    it('reads a ticket file written before the cache was extracted, without a single SOAP call', async () => {
+        // `.arca-tickets.json` is a LIVE format. If a deploy stops reading the file it wrote yesterday, every
+        // cached ticket is silently invalidated — and WSAA refuses to mint a replacement while the old one is
+        // still valid, so the till is down for up to ~12h per (certificate, service). This fixture is the
+        // shape the pre-extraction client wrote: `${ticketOwnerKey}:${serviceId}` keys, two-space indent.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsaa-'));
+        const cachePath = path.join(dir, 'tickets.json');
+        try {
+            const config = makeConfig();
+            fs.writeFileSync(
+                cachePath,
+                JSON.stringify(
+                    {
+                        [`${config.ticketOwnerKey}:wsfe`]: {
+                            token: 'PERSISTED-TOK',
+                            sign: 'PERSISTED-SIG',
+                            expirationTime: '2999-01-01T00:00:00.000Z',
+                        },
+                    },
+                    null,
+                    2,
+                ),
+            );
+
+            const soap = new FakeSoap(ticketXml('2999-01-01T00:00:00.000Z'));
+            const client = new WsaaClient(soap as unknown as SoapClient, cachePath);
+
+            expect(client.peekAccessTicket(config.ticketOwnerKey, 'wsfe')?.token).toBe('PERSISTED-TOK');
+            const ticket = await client.getAccessTicket(config, 'wsfe');
+            expect(ticket.sign).toBe('PERSISTED-SIG');
+            // The point of persisting at all: no login was attempted.
+            expect(soap.calls).toHaveLength(0);
+        } finally {
+            fs.rmSync(dir, {recursive: true, force: true});
+        }
+    });
+
     it('clearCache purges the persisted file so an evicted ticket cannot resurrect from disk', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsaa-'));
         const cachePath = path.join(dir, 'tickets.json');

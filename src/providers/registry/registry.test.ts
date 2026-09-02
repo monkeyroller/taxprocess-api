@@ -1,5 +1,6 @@
 import {getProvider, registeredEntityCodes} from './registry.js';
-import {TaxEntityProvider, UnknownEntityError} from '../provider/provider.js';
+import {TaxEntityProvider} from '../provider/provider.js';
+import {UnknownEntityError} from '../provider/faults.js';
 import {ArcaProvider} from '../arca/arca-provider/arca.provider.js';
 
 describe('provider registry', () => {
