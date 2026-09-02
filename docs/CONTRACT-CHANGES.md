@@ -6,6 +6,125 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-02 — A rate now says which day it applies to, and every instant on this wire is UTC
+
+Branch `feature/foreign-currency-electronic-sales`. Answers both asks core raised on 2026-09-02. **Ask 15 is
+granted, and it reverses the non-ask we agreed yesterday — you were right that we put the field on the wrong
+side of the split.** A window derived from `rate_sync_cron` describes *when you will next ask*; a window
+derived from the authority's own day rule describes *when its number stops applying*. Those are different
+facts, only one of them is ours, and `validity_day` existing solely to stop them drifting is the proof.
+
+**Granted with one change to what you asked for**, which is the part to read: the range is keyed on the day
+you *asked about*, not on the day the rate *closed on*. The next section has the reasoning.
+
+| # | Ask | Answer | Core action |
+| --- | --- | --- | --- |
+| 15.1 | Accept an instant on `/currencies/rates` | **Already shipped** — `date` has accepted a zone-qualified instant (`…Z`, `…±HH:MM`) since the endpoint landed; it is placed in the authority's zone and reduced to its day. It was documented in §2's date table but never called out on the endpoint. Day-granular `date` stays, unchanged | **None.** Send either form |
+| 15.2 | Report the authority's applicability range | **Granted.** Every rate now carries `validFrom` and `validUntil` — two absolute instants, half-open, one authority day wide, **keyed on the day you asked about** | **Delete `validity_day` and the two-predicate cache test**, as you proposed. One correction to the read path: test against the **voucher's** instant, never `now` — see the warning below |
+| 15.3 | The service converts internally, core never names a zone | **Granted**, already true, and now stated as a wire-wide rule: **every date we return is a bare authority day; every instant we return is UTC** | **None** |
+| 16 | Say what happens to `refreshAfter` | **Kept, redefined, and re-rendered.** It is now the later of the earliest `validUntil` in the batch and the next authority midnight — which, since a requested day is clamped at today, is the same instant it always was. Its **rendering** changes: `Z`, not `-03:00` | **None if you parse it.** See the rendering note if you compare it as a string |
+
+---
+
+### Why per-day, and not the range you asked for
+
+You asked for "the interval for which that published figure is *the* valid one". Read strictly that is the
+inverse of the day rule: a close dated `D` prices every voucher in `(D, next working day after D]`, so
+Friday's close would report **one** window spanning Saturday, Sunday and Monday.
+
+**We cannot compute that upper bound, and we would rather not guess it.** It needs a walk **forward** to know
+whether tomorrow is a feriado — and ask 13 settled that feriados are not modelled here on purpose, they are
+discovered through ARCA's own `602` after the fact. A feriado calendar would be wrong the first year ARCA
+moves a puente, and this is exactly the case where being wrong is expensive: report the window one day short
+and you re-fetch needlessly; report it one day long and you price a voucher off a rate that no longer applies.
+
+So a rate is valid for the **24 hours of the day it was asked for**:
+
+| you ask about | `rate` | `rateDate` | `validFrom` → `validUntil` |
+| --- | --- | --- | --- |
+| Sat 2026-08-29 | 1512 | `2026-08-28` | `2026-08-29T03:00:00Z` → `2026-08-30T03:00:00Z` |
+| Sun 2026-08-30 | 1512 | `2026-08-28` | `2026-08-30T03:00:00Z` → `2026-08-31T03:00:00Z` |
+| Mon 2026-08-31 | 1512 | `2026-08-28` | `2026-08-31T03:00:00Z` → `2026-09-01T03:00:00Z` |
+
+Three requests, one number, one `rateDate`, three windows. `validFrom` is the day you asked about — the one
+value you already hold, and nothing to do with the walk-back, which is what produces `rateDate` — and
+`validUntil` is just the next midnight after it. Nothing looks forward, so nothing can be wrong about a
+calendar we cannot see. The windows are contiguous and half-open, so no instant is priced twice and none is
+priced by nothing.
+
+Every rate in one response carries the **same** window, including the locally-answered `PES` row — they answer
+one question — while their `rateDate`s may still differ. That is the existing rule that a shared `rateDate`
+across a batch is not promised, unchanged.
+
+### The one thing that will bite you: applicability is not entitlement
+
+> ⚠️ **For a backdated request the window is entirely in the past, and that is correct.**
+
+Your ask anticipated this — "`isBandWarranted(...)` against the voucher's instant" — and your own note
+rejected requested-day bounds for exactly this reason: *the window would be entirely in the past and every
+consumer would correctly read it as expired and re-fetch on every read.*
+
+That objection is right under the **entitlement** reading and dissolves under the **applicability** one. The
+field no longer means "core may serve this from cache until then". It means "this number priced that day",
+which is permanent: the rate that priced 2026-08-17 will always be the rate that priced it, and a window in
+the past records which day the answer is about rather than that it went stale.
+
+So the predicate must take the voucher's instant, not `now`. A read path that tests against `now` concludes
+every backdated answer is expired and re-fetches it on every single read — the failure you predicted, arriving
+through the reading rather than through the bounds.
+
+### What this does not give you
+
+**ARCA still cannot be represented intraday.** The *shape* is instants and is future-proof for an authority
+that republishes every six hours; ARCA's `FchCotiz` is a day, so these values stay day-aligned and a second
+ARCA publication within one day remains unrepresentable. Ask 15's motivating scenario is served by the field
+shape, not by ARCA. We would rather say that plainly than have you find it out.
+
+### `refreshAfter` — ask 16
+
+Your reading is right: ask 15 dissolves ask 14's premise. **A hint that can only push a run later is no longer
+incompatible with anything**, because validity now ends where the authority says rather than at your next
+tick. Ask 14's *outcome* stands — the publication hour is gone and stays gone — but its stated rationale is
+superseded, and §3 now says so rather than leaving it standing on a premise this entry removed.
+
+The field survives because it is not fully redundant. Three cases:
+
+- **live request** — identical to every rate's `validUntil`. The ranges subsume it;
+- **backdated request** — the only forward-looking instant in the payload, every window being in the past;
+- **no rates at all** — the only refresh signal there is, since there are no ranges to read one from. That is
+  the case a client would otherwise poll hot, and it is the one that decided this.
+
+You said you had no preference; this is the reading where the field still earns its place, so we kept it.
+
+### Rendering: `refreshAfter` moves from `-03:00` to `Z`
+
+> ⚠️ **Correction to the 2026-09-01 entry.** That entry told you, as a side effect of retiring the publication
+> hour, that "the field now always carries `-03:00`". That is no longer true.
+
+Every instant this service returns is now UTC — `refreshAfter`, `validFrom` and `validUntil` alike — while
+every **date** stays a bare authority day. A day is the authority's unit and means nothing without its
+calendar; an instant is absolute and should travel in the one form every caller reads identically.
+
+The instant is unchanged. `2026-08-29T00:00:00-03:00` and `2026-08-29T03:00:00Z` are the same moment, so
+**anything that parses the field is unaffected**. Only a string comparison or a logged-value assertion sees a
+difference. Where an instant marks a day boundary it is that authority day's midnight rendered UTC: Argentine
+midnight on 2026-08-30 is `2026-08-30T03:00:00Z`.
+
+### What did NOT change
+
+Each is a reasonable guess at the blast radius, and each is wrong.
+
+- **The band.** `[0.02 × rate, 5 × rate]`, measured rather than inferred, and `bandBasis` with it.
+- **`rateDate`.** Still ARCA's echoed `FchCotiz`, still a bare authority day, still the record of which
+  publication priced a voucher. It is **not** the window, and the two routinely disagree — that is the point
+  of having both.
+- **The business-day walk-back** (ask 13). This is built on it, not against it.
+- **`publishedAt`**, the `PES` shortcut, `unavailable` and its three reasons, and the whole-table shape.
+- **No history endpoint**, no bulk calendar, no per-instant series. Still one warranted answer per currency.
+- **Day-granular `date` is not deprecated.** Send days indefinitely if you prefer.
+
+---
+
 ## 2026-09-01 — Which day a cotización is for, the end of the publication hour, and `next-numbers` duplicates
 
 Branch `feature/foreign-currency-electronic-sales`. Answers both asks core raised on 2026-09-01. **Ask 13 is your row 2**, settled against

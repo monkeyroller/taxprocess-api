@@ -54,6 +54,32 @@ export class CurrencyRateDto {
 
     /** Which rule produced `lowerLimit`/`upperLimit`. */
     bandBasis!: BandBasis;
+
+    /**
+     * Start of the period this rate applies to — an absolute instant, in UTC.
+     *
+     * The authority's applicability, not your entitlement to serve a cached copy. The two are easily
+     * conflated and are not the same thing: this says which vouchers the number prices, and it is a property
+     * of the entity, currency and day alone that never changes afterwards. For a backdated request the whole
+     * window is therefore in the past, which is correct and permanent rather than expired — test it against
+     * the voucher's instant, never against `now`, or every backdated answer reads as stale and is re-fetched
+     * on every read.
+     *
+     * Keyed on the day asked for, so it is not derivable from `rateDate`, which may be several days earlier:
+     * Saturday, Sunday and Monday all price off Friday's close and share one `rate` and one `rateDate`
+     * between them, but carry three distinct one-day windows. `CONTRACT.md` §3 has why the alternative — the
+     * true span of a close — is not something this service can state.
+     */
+    validFrom!: string;
+
+    /**
+     * End of the period this rate applies to, exclusive — an absolute instant, in UTC.
+     *
+     * The next authority midnight after `validFrom`, so the window is one authority day wide. An authority
+     * that republished intraday would narrow it, which is why the pair travels per rate rather than per
+     * batch; today every rate in one answer carries the same window.
+     */
+    validUntil!: string;
 }
 
 /** A requested code the authority had no rate for. */
@@ -83,12 +109,21 @@ export class CurrencyRatesResultDto {
     /**
      * Absolute instant meaning "this value cannot change before then" — an instant rather than a publication
      * clock, so a country-agnostic caller never hardcodes the authority's schedule. Always present, including
-     * when everything is unavailable, and never in the past.
+     * when everything is unavailable, and never in the past. In UTC, as every instant on this wire is.
+     *
+     * Formally the later of the earliest `validUntil` in the batch and the next authority midnight. Since a
+     * requested day is clamped at today, the second term always wins, which leaves three cases worth telling
+     * apart: on a live request it is identical to every rate's `validUntil`, so the ranges subsume it; on a
+     * backdated one it is the only forward-looking instant in the payload, every window being legitimately
+     * in the past; and with no rates at all it is the only refresh signal there is, since there are no
+     * ranges to read one from. That last case — a client that would otherwise poll hot — is why the field
+     * outlived the arrival of `validUntil` rather than being retired alongside it.
      *
      * Advisory: a fact about the data, not an instruction about a caller's cron. It used to carry ARCA's
      * publication hour and to tell callers to push their next run later but never earlier, which is unusable
-     * by any caller whose cache validity ends at its next scheduled run. Store it as a record of what the
-     * answer claimed; nothing requires acting on it.
+     * by any caller whose cache validity ends at its next scheduled run. That incompatibility is gone now
+     * that validity ends where the authority says rather than at a caller's next tick, and the field stays
+     * advisory regardless. Store it as a record of what the answer claimed; nothing requires acting on it.
      */
     refreshAfter!: string;
 

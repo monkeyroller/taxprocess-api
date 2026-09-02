@@ -1207,10 +1207,78 @@ describe('ArcaProvider.currencyRates', () => {
                 lowerLimit: 29.31,
                 upperLimit: 7327.5,
                 rateDate: '2026-08-27',
+                // The clock is Tuesday 2026-09-01 and no day was asked for, so the answer is about today —
+                // even though the row that answered closed on the 27th. Argentine midnight, rendered UTC.
+                validFrom: '2026-09-01T03:00:00Z',
+                validUntil: '2026-09-02T03:00:00Z',
                 bandBasis: 'TOLERANCE',
             },
         ]);
         expect(result.publishedAt).toBe('2026-08-27');
+        // The identity the contract states for a live request: `refreshAfter` IS the window's end. It holds
+        // only because `clampToAuthorityToday` caps the requested day at today — loosen that clamp and the
+        // answer would promise a refresh earlier than the rate it ships stops applying.
+        expect(result.refreshAfter).toBe(result.rates[0].validUntil);
+    });
+
+    it('keys the applicability window on the day asked for, not on the row that answered', async () => {
+        // The whole point of the field being ours rather than a caller's. Saturday, Sunday and Monday all
+        // price off Friday's close: one `rate` and one `rateDate` between them, three distinct windows.
+        getCurrencyRate.mockResolvedValue({monId: 'DOL', rate: 1465.5, rateDate: '20260828'});
+
+        const days = ['2026-08-29', '2026-08-30', '2026-08-31'];
+        const rates = [];
+        for (const day of days) {
+            const result = await provider().currencyRates('testing', ['DOL'], day);
+            rates.push(result.rates[0]);
+        }
+
+        expect(rates.map((r) => r.rateDate)).toEqual(['2026-08-28', '2026-08-28', '2026-08-28']);
+        expect(rates.map((r) => r.validFrom)).toEqual([
+            '2026-08-29T03:00:00Z',
+            '2026-08-30T03:00:00Z',
+            '2026-08-31T03:00:00Z',
+        ]);
+        // Contiguous and half-open, so no instant is priced twice and none is priced by nothing.
+        expect(rates[0].validUntil).toBe(rates[1].validFrom);
+        expect(rates[1].validUntil).toBe(rates[2].validFrom);
+    });
+
+    it('reports a backdated window entirely in the past, while refreshAfter stays ahead', async () => {
+        // Applicability, not entitlement to serve. A window in the past is this answer stating which day it
+        // priced — permanently — rather than claiming to be stale. `refreshAfter` is the one field that
+        // still looks forward on this path, which is why it survived the arrival of the range.
+        getCurrencyRate.mockResolvedValue({monId: 'DOL', rate: 1465.5, rateDate: '20260814'});
+
+        const result = await provider().currencyRates('testing', ['DOL'], '2026-08-17');
+
+        expect(result.rates[0]).toMatchObject({
+            validFrom: '2026-08-17T03:00:00Z',
+            validUntil: '2026-08-18T03:00:00Z',
+        });
+        expect(new Date(result.rates[0].validUntil).getTime()).toBeLessThan(Date.now());
+        expect(new Date(result.refreshAfter).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('gives every rate in a batch the same window, even where their rateDates differ', async () => {
+        // The window is a property of the question, so a thinly-traded code that walked further back than
+        // the dollar still applies to the same day. Only `rateDate` records which publication answered.
+        getCurrencyRate.mockImplementation(async (_auth, code, day) => {
+            if (code === 'DOL') {
+                return {monId: code, rate: 1465.5, rateDate: '20260831'};
+            }
+            return day === '20260828'
+                ? {monId: code, rate: 1700, rateDate: '20260828'}
+                : Promise.reject(noResults);
+        });
+
+        const result = await provider().currencyRates('testing', ['DOL', '060', 'PES'], '2026-09-01');
+
+        expect(result.rates.map((r) => r.rateDate)).toEqual(['2026-09-01', '2026-08-31', '2026-08-28']);
+        // Including the locally-answered peso row, which never touches the authority at all.
+        expect(new Set(result.rates.map((r) => `${r.validFrom}/${r.validUntil}`))).toEqual(
+            new Set(['2026-09-01T03:00:00Z/2026-09-02T03:00:00Z']),
+        );
     });
 
     it('answers the reference currency locally, resolving no ticket at all', async () => {
@@ -1763,8 +1831,11 @@ describe('ArcaProvider.currencyRates', () => {
 
         expect(result.rates).toEqual([]);
         expect(result.unavailable).toEqual([{currencyCode: 'DOL', reason: 'NO_PUBLICATION'}]);
-        // The all-unavailable case is precisely the one a client would otherwise poll hot.
+        // The all-unavailable case is precisely the one a client would otherwise poll hot, and the one no
+        // applicability range can answer — there is no rate to carry one. That is why the field outlived
+        // the range rather than being retired with it.
         expect(new Date(result.refreshAfter).getTime()).toBeGreaterThan(Date.now());
+        expect(result.refreshAfter.endsWith('Z')).toBe(true);
     });
 
     it('reports a missing delegate certificate as a server misconfiguration, not an authority failure', async () => {

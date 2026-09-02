@@ -20,19 +20,23 @@ import {toCbteTipo} from '../mapping/code-maps/code-maps.js';
 import {toPadronService} from '../mapping/padron-routing/padron-routing.js';
 import {toArcaDay, arcaDayToIsoDate, isArcaDay} from '../mapping/authority-day/authority-day.js';
 import {
+    applicabilityRange,
     arcaBand,
     clampToAuthorityToday,
     nextRefreshAfter,
     partitionCurrencyCodes,
     rateDayCandidates,
     referenceBand,
-    toRateDto,
+    toUnscopedRate,
     vintageOf,
+    withValidity,
     REFERENCE_MON_ID,
+    type RateValidity,
+    type UnscopedRate,
 } from '../mapping/cotizacion/cotizacion.js';
 import {mapWithConcurrency} from '../../concurrency/concurrency.js';
 import type {CommonInvoiceService} from '../sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
-import type {CurrencyRateDto, CurrencyRateUnavailableDto} from '../../../http/dto/currency-rates-result.dto.js';
+import type {CurrencyRateUnavailableDto} from '../../../http/dto/currency-rates-result.dto.js';
 import {
     isDelegateTicketFault,
     isNoResults,
@@ -100,7 +104,7 @@ export const CURRENCY_FAN_OUT_LIMIT = 8;
  * property-presence narrowing does not survive inference through the generic fan-out helper.
  */
 type RateOutcome =
-    | {kind: 'RATE'; rate: CurrencyRateDto; rateDay: string}
+    | {kind: 'RATE'; rate: UnscopedRate; rateDay: string}
     | {kind: 'UNAVAILABLE'; unavailable: CurrencyRateUnavailableDto};
 
 /**
@@ -116,10 +120,11 @@ interface RateAttempt {
 
 /**
  * What the whole fan-out produced. Separate from `CurrencyRatesResult` because `vintage` is the raw latest
- * ARCA day rather than the wire's `publishedAt`.
+ * ARCA day rather than the wire's `publishedAt`, and because its rates still lack the batch's applicability
+ * window — a fact about the question rather than about anything this fan-out asked.
  */
 interface RateFanOut {
-    readonly rates: Array<CurrencyRateDto>;
+    readonly rates: Array<UnscopedRate>;
     readonly unavailable: Array<CurrencyRateUnavailableDto>;
     readonly vintage: string | undefined;
     /**
@@ -457,13 +462,21 @@ export class ArcaProvider extends TaxEntityProvider {
         // throw a `TypeError` off `.trim()` for what the contract calls the omitted case.
         const requestedDay = date == null ? undefined : toArcaDay(date, 'date');
         const arcaDay = requestedDay === undefined ? undefined : clampToAuthorityToday(requestedDay, now);
+        // The day this answer is ABOUT — the one asked for, or today when none was. Hoisted because two
+        // things read it and must not drift: what `PES` reports as its day, and the window every rate in the
+        // batch is valid for.
+        const answeredDay = arcaDay ?? formatArcaDate(now);
         // What `PES` reports as its day. Deliberately not walked back the way a fetched row is: the peso is 1
         // on the day of the voucher itself, with nothing to publish. For the same reason it does not feed
         // `publishedAt`. A batch where `PES` carries a later `rateDate` than `DOL` is the contract working as
         // written — a shared `rateDate` across a batch is not promised.
-        const referenceDay = arcaDayToIsoDate(arcaDay ?? formatArcaDate(now));
+        const referenceDay = arcaDayToIsoDate(answeredDay);
+        // Keyed on the day asked for rather than on the day a row closed on, so every rate in one answer
+        // carries the same window even where their `rateDate`s differ. `applicabilityRange` has why. Stamped
+        // onto the rates in `assembleRates`, once, rather than carried down through the fan-out.
+        const validity = applicabilityRange(answeredDay);
 
-        const localRates: Array<CurrencyRateDto> = [];
+        const localRates: Array<UnscopedRate> = [];
         const localUnavailable: Array<CurrencyRateUnavailableDto> = [];
         let toFetch: Array<string>;
         let auth: ArcaAuth;
@@ -518,7 +531,14 @@ export class ArcaProvider extends TaxEntityProvider {
             // Every code answered without the authority, so resolve no ticket at all: the peso-only till
             // must not be able to fail because ARCA was unreachable.
             if (toFetch.length === 0) {
-                return this.assembleRates(environment, localRates, localUnavailable, refreshAfter, undefined);
+                return this.assembleRates(
+                    environment,
+                    localRates,
+                    validity,
+                    localUnavailable,
+                    refreshAfter,
+                    undefined,
+                );
             }
             auth = await this.delegateAuth(environment, ServiceId.WSFEV1);
         }
@@ -528,6 +548,7 @@ export class ArcaProvider extends TaxEntityProvider {
         return this.assembleRates(
             environment,
             [...localRates, ...fetched.rates],
+            validity,
             [...localUnavailable, ...fetched.unavailable],
             refreshAfter,
             fetched.vintage,
@@ -572,8 +593,8 @@ export class ArcaProvider extends TaxEntityProvider {
     }
 
     /** The reference currency's row: `1/1/1`, no authority call. */
-    private referenceRate(rateDate: string): CurrencyRateDto {
-        return toRateDto(REFERENCE_MON_ID, referenceBand(), rateDate);
+    private referenceRate(rateDate: string): UnscopedRate {
+        return toUnscopedRate(REFERENCE_MON_ID, referenceBand(), rateDate);
     }
 
     /**
@@ -609,7 +630,7 @@ export class ArcaProvider extends TaxEntityProvider {
             this.fetchRate(environment, service, auth, code, days),
         );
 
-        const rates: Array<CurrencyRateDto> = [];
+        const rates: Array<UnscopedRate> = [];
         const unavailable: Array<CurrencyRateUnavailableDto> = [];
         const rateDays: Array<string> = [];
         // `mapWithConcurrency` preserves input order, so the first tolerated failure found here is the first
@@ -685,7 +706,7 @@ export class ArcaProvider extends TaxEntityProvider {
                     outcome: {
                         kind: 'RATE',
                         // Prefer ARCA's echoed spelling of the code, falling back to ours if it sends none.
-                        rate: toRateDto(
+                        rate: toUnscopedRate(
                             info.monId === '' ? code : info.monId,
                             arcaBand(info.rate),
                             arcaDayToIsoDate(info.rateDate),
@@ -722,7 +743,8 @@ export class ArcaProvider extends TaxEntityProvider {
      */
     private assembleRates(
         environment: GenericEnvironment,
-        rates: Array<CurrencyRateDto>,
+        rates: Array<UnscopedRate>,
+        validity: RateValidity,
         unavailable: Array<CurrencyRateUnavailableDto>,
         refreshAfter: string,
         publishedAt: string | undefined,
@@ -730,7 +752,7 @@ export class ArcaProvider extends TaxEntityProvider {
         return {
             entityCode: ENTITY_CODE,
             environment,
-            rates,
+            rates: withValidity(rates, validity),
             // Optional keys are omitted rather than sent empty or `null`.
             ...(unavailable.length > 0 ? {unavailable} : {}),
             refreshAfter,

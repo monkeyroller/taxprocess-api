@@ -1,6 +1,13 @@
 import {describe, expect, it} from '@jest/globals';
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {arcaDayToIsoDate, isArcaDay, parseAuthorityDate, shiftArcaDay, toArcaDay} from './authority-day.js';
+import {
+    arcaDayToIsoDate,
+    arcaDayToUtcInstant,
+    isArcaDay,
+    parseAuthorityDate,
+    shiftArcaDay,
+    toArcaDay,
+} from './authority-day.js';
 
 /**
  * The contract's date rule, in the one place it is implemented. Three forms in, `yyyymmdd` out, and the
@@ -117,9 +124,45 @@ describe('arcaDayToIsoDate', () => {
 });
 
 /**
- * The gate in front of `arcaDayToIsoDate` and `shiftArcaDay`. It answers whether a value can be used as a
- * day, which decides whether a cotización is publishable at all — a rate with no day is a row a caller
- * cannot key — and narrows the type so neither of those need accept an absent one.
+ * The other direction out of an authority day: not which day it is, but the absolute moment it starts. Every
+ * instant on the wire is rendered from here, so what these pin is that the boundary is the authority's and
+ * the rendering is everyone's.
+ */
+describe('arcaDayToUtcInstant', () => {
+    it('is Argentine midnight, rendered UTC', () => {
+        // Both halves matter: a caller comparing instants must never have to learn a zone, and a boundary
+        // rendered at `00:00Z` would be three hours adrift of the day it claims to describe.
+        expect(arcaDayToUtcInstant('20260830')).toBe('2026-08-30T03:00:00Z');
+        expect(new Date(arcaDayToUtcInstant('20260830')).getTime()).toBe(
+            new Date('2026-08-30T00:00:00-03:00').getTime(),
+        );
+    });
+
+    it('crosses a year boundary without leaving the authority day behind', () => {
+        // 21:00 ART on New Year's Eve is already the 1st in UTC, so a day rendered by its own zone rather
+        // than converted is the failure this catches.
+        expect(arcaDayToUtcInstant('20261231')).toBe('2026-12-31T03:00:00Z');
+        expect(arcaDayToUtcInstant('20270101')).toBe('2027-01-01T03:00:00Z');
+    });
+
+    it('accepts the padded day `isArcaDay` accepts', () => {
+        // The gate matches a trimmed value while `parseArcaDate` slices whatever it is given, so a padded
+        // day that passed the guard and reached the slice unchanged would yield `Invalid Date` — an opaque
+        // 500 rather than an answer.
+        expect(arcaDayToUtcInstant(' 20260830 ')).toBe('2026-08-30T03:00:00Z');
+    });
+
+    it('refuses anything that is not an ARCA day, rather than an Invalid Date', () => {
+        for (const notADay of ['', '   ', '2026-08-30', 'NULL', '2026083', '20261345']) {
+            expect(() => arcaDayToUtcInstant(notADay)).toThrow(ArcaValidationError);
+        }
+    });
+});
+
+/**
+ * The gate in front of `arcaDayToIsoDate`, `arcaDayToUtcInstant` and `shiftArcaDay`. It answers whether a
+ * value can be used as a day, which decides whether a cotización is publishable at all — a rate with no day
+ * is a row a caller cannot key — and narrows the type so none of the three need accept an absent one.
  */
 describe('isArcaDay', () => {
     it('accepts a real ARCA day', () => {

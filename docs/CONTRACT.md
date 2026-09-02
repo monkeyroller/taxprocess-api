@@ -127,6 +127,14 @@ against the *host's* timezone, so the same request would have produced `CbteFch 
 running `TZ=UTC` and `20260826` on one in Buenos Aires — the voucher's **legal** date decided by our
 deployment rather than by you. Dates we return are bare authority days for the same reason.
 
+**Instants are the other half of that rule, and they are always UTC.** A *day* is the authority's unit and
+means nothing without its calendar, so it travels bare; an *instant* is absolute, so it travels in the one
+form every caller reads the same way. `refreshAfter` and a rate's `validFrom`/`validUntil` (§3) are instants
+and end in `Z`; every field named a date is a day. Where an instant marks a day boundary it is that
+authority day's midnight rendered in UTC — Argentine midnight on 2026-08-30 is `2026-08-30T03:00:00Z` — so
+you can compare it to anything without ever naming a zone. Until 2026-09-02 `refreshAfter` carried `-03:00`;
+same instant, one shape.
+
 Also stricter than plain ISO-8601, and deliberately: week (`2026-W01-1`), ordinal (`2026-366`), basic
 (`20260231`) and space-separated (`2026-08-05 12:00:00`) forms are refused, as is the bare-hour offset
 (`…T22:00:00-03`) that ISO allows but no `Date` parser reads — send `-03:00`.
@@ -141,14 +149,18 @@ spelling would have filed `CbteFch = 20260303` — a legal voucher date you neve
 
 This service will not need it from you. Your own decisions do — and the failure is silent and off by one.
 
-Four decisions are yours, and every one of them is a timezone question:
+Three decisions are yours, and every one of them is a timezone question:
 
 | your decision | why the zone decides it |
 | --- | --- |
 | which day a sale is dated (`issueDate` → `CbteFch`) | this is the voucher's **legal** date |
 | which day a sale is priced for (`currencies/rates.date`) | you send the **voucher's** day; §3 turns it into the publication that applies |
-| how long a cached answer stays warranted | a function of **your** refresh cadence, which this service cannot see. `refreshAfter` is advisory (§3) and does not answer it |
 | what day to **render** a date we returned as | it is the authority's day, not the viewer's |
+
+A fourth used to be: **how long a cached answer stays warranted.** As of 2026-09-02 that is no longer yours
+for a rate — each one carries the period it applies to (`validFrom`/`validUntil`, §3), which is the
+authority's fact and not a function of your cron. Everywhere else it is still your cadence, which this
+service cannot see.
 
 A sale submitted 2026-08-25 22:00 in Buenos Aires is already 2026-08-26 in UTC. Derive the day on a UTC
 host and you will validate a Monday sale against Tuesday's band — and `CbteFch` will claim a day the sale
@@ -537,16 +549,20 @@ customers' data, and leave a tenant with no valid integration unable to read a p
 `200 →`
 ```jsonc
 { "entityCode": "ARCA", "environment": "production",
-  // `date` was Friday the 28th, so `rateDate` is Thursday the 27th — the previous working day's close.
+  // `date` was Friday the 28th, so `rateDate` is Thursday the 27th — the previous working day's close —
+  // while `validFrom`/`validUntil` are Friday's own 24 hours, the day you asked about. The two answer
+  // different questions and routinely disagree; both rows carry the same window for that reason.
   // `049` shows the other outcome: no close within the walk-back window, reported rather than approximated
   "rates": [
     { "currencyCode": "DOL", "rate": 1465.5, "lowerLimit": 29.31, "upperLimit": 7327.5,
-      "rateDate": "2026-08-27", "bandBasis": "TOLERANCE" },
+      "rateDate": "2026-08-27", "bandBasis": "TOLERANCE",
+      "validFrom": "2026-08-28T03:00:00Z", "validUntil": "2026-08-29T03:00:00Z" },
     { "currencyCode": "PES", "rate": 1, "lowerLimit": 1, "upperLimit": 1,
-      "rateDate": "2026-08-28", "bandBasis": "REFERENCE" }
+      "rateDate": "2026-08-28", "bandBasis": "REFERENCE",
+      "validFrom": "2026-08-28T03:00:00Z", "validUntil": "2026-08-29T03:00:00Z" }
   ],
   "unavailable": [ { "currencyCode": "049", "reason": "NO_PUBLICATION" } ],
-  "refreshAfter": "2026-08-29T00:00:00-03:00",
+  "refreshAfter": "2026-08-29T03:00:00Z",
   "publishedAt": "2026-08-27" }
 ```
 
@@ -703,12 +719,54 @@ a voucher was priced against. A bare authority calendar day (§2).
 **not** promised: a thinly-traded currency may not publish every day, so its answer legitimately carries an
 older day than the dollar's. Absent when nothing was published at all, rather than fabricated.
 
+#### `validFrom` / `validUntil` — the period the rate applies to
+
+Two absolute instants, in UTC, marking a half-open interval: `validFrom` included, `validUntil` excluded.
+Present on every rate. Together they say **which vouchers this number prices**.
+
+**They are keyed on the day you asked about, not on the day the rate closed on**, so they are not derivable
+from `rateDate` and routinely disagree with it. Saturday, Sunday and Monday all price off Friday's close: the
+three answers carry one `rate` and one `rateDate` between them, and three distinct, non-overlapping one-day
+windows. Every rate in one response carries the same window — they answer one question — while their
+`rateDate`s may differ.
+
+> **Why not the true span of a close?** Inverting the day rule would give it: a close dated `D` prices every
+> voucher in `(D, next working day after D]`, so Friday's close would report a single window covering
+> Saturday through Monday. That upper bound cannot be computed. It needs a walk **forward** to know whether
+> tomorrow is a feriado — and feriados are deliberately not modelled here (see the note on `date` above),
+> they are discovered through ARCA's own `602` after the fact. Reporting a window one day short would be
+> wrong; reporting one day long would be worse. A per-day window needs no lookahead and cannot be wrong about
+> a calendar this service cannot see.
+
+**This is the authority's applicability, not your entitlement to serve a cached copy.** The distinction is
+the whole reason the field belongs on this side of the wire, and it has one sharp consequence:
+
+> ⚠️ **For a backdated request the window is entirely in the past, and that is correct.** The rate that priced
+> 2026-08-17 will always be the rate that priced it; a past window records which day this answer is about, it
+> does not mean the answer went stale. **Test the range against the voucher's own instant, never against
+> `now`** — a caller that tests against `now` concludes every backdated answer is expired and re-fetches it
+> on every single read.
+
+The pair travels per rate rather than per batch because an authority that republished intraday, or per
+currency, would narrow it. ARCA does not: `FchCotiz` is a day, so these values stay day-aligned and a second
+ARCA publication within one day is not representable here today. The shape is what carries forward.
+
 #### `refreshAfter` — advisory, always present, never in the past
 
-An absolute instant meaning "the answer to this question cannot change before then". Under the day-keyed rule
-above that is the **start of the next authority day**: a closed day's rate cannot change at all, and a day
-cannot stop being the day you asked about until the calendar moves. An instant rather than a clock, so the
-authority's zone never has to be hardcoded in a country-agnostic caller (§2, §9).
+An absolute instant, in UTC, meaning "the answer to this question cannot change before then". Formally the
+later of the earliest `validUntil` in the batch and the **start of the next authority day**; since a requested
+day is clamped at today, the second term always wins. An instant rather than a clock, so the authority's zone
+never has to be hardcoded in a country-agnostic caller (§2, §9).
+
+Now that a rate states its own applicability, three cases are worth telling apart:
+
+| request | what this field adds |
+| --- | --- |
+| **live** (today, or no `date`) | nothing new — it equals every rate's `validUntil` by construction. The ranges subsume it |
+| **backdated** | the only forward-looking instant in the payload, every window being legitimately in the past |
+| **no rates at all** | the only refresh signal there is, since there are no ranges to read one from |
+
+That last case is why the field survived the arrival of `validUntil` rather than being retired alongside it.
 
 > ⚠️ **Treat it as advisory. It is a fact about the data, not an instruction about your cron.** Until
 > 2026-09-01 this field carried ARCA's next publication hour (19:00 ART) and this section told you to let it
@@ -716,9 +774,12 @@ authority's zone never has to be hardcoded in a country-agnostic caller (§2, §
 > mistake outlives the number: **a hint that can only push a run later is unusable by any caller whose cache
 > validity ends at its next scheduled run.** Obeying it leaves that caller past its own validity boundary
 > holding nothing warranted — and a caller syncing at midnight computed `max(00:00, 19:00) = 19:00`, which
-> silently reinstates an evening schedule it may have deliberately retired. Your schedule sets the rhythm.
-> Store this field because it records what the authority's answer claimed when you took it, which is worth
-> having in the row when diagnosing a sync; nothing here requires you to act on it.
+> silently reinstates an evening schedule it may have deliberately retired.
+>
+> **That specific incompatibility is gone as of 2026-09-02**, since a rate's validity now ends where the
+> authority says rather than at your next tick — but the field stays advisory regardless. Your schedule sets
+> the rhythm. Store it because it records what the authority's answer claimed when you took it, which is
+> worth having in the row when diagnosing a sync; nothing here requires you to act on it.
 
 Present on every `200`, **including one where every code came back unavailable** — that being precisely the
 case a client would otherwise poll hot.
@@ -1117,10 +1178,16 @@ caller could plausibly have invented for itself*:
   stays in here. It is also why `refreshAfter` is an absolute instant rather than an hour: a clock on the
   wire is an Argentine policy constant living in a country-agnostic scheduler, the same mistake moving
   `idProvincia` off the wire avoided.
+- **How long a rate applies for.** The same rule read the other way round, and it belongs here for the same
+  reason the rule does: `validFrom`/`validUntil` are derived from `RATE_DAY_RULE` and rendered as absolute
+  instants, so a caller compares them without knowing where an authority's day begins. A caller deriving the
+  window from its own refresh cadence instead would be describing *when it next intends to ask*, which
+  drifts from the authority's grid the moment an operator retunes a cron — the same class of mistake as
+  inventing the band.
 
 Also here for the same reason: **`America/Argentina/Buenos_Aires` itself**. Which calendar day an instant
 falls on is resolved inside this service (`mapping/authority-day/`), which is why every date on the wire is
-a bare authority day and no caller has to convert one (§2).
+a bare authority day, every instant is UTC, and no caller has to convert either (§2).
 
 ---
 

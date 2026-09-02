@@ -1,5 +1,5 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {ARGENTINA_UTC_OFFSET, formatArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
+import {ARGENTINA_UTC_OFFSET, formatArcaDate, parseArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
 import {
     DATE_ONLY_PATTERN,
     ZONED_DATETIME_PATTERN,
@@ -126,9 +126,9 @@ function arcaDayMatch(value: string | undefined): RegExpExecArray | undefined {
 
 /**
  * Whether `value` is an ARCA `yyyymmdd` day this service can treat as a day — the gate in front of
- * `arcaDayToIsoDate` and `shiftArcaDay`, both of which refuse anything this rejects. Anything answering
- * `false` (ARCA's `NULL` markers, a truncated field, `20261345`) is a day the authority did not state, and
- * no caller can key a rate by it.
+ * `arcaDayToIsoDate`, `arcaDayToUtcInstant` and `shiftArcaDay`, all of which refuse anything this rejects.
+ * Anything answering `false` (ARCA's `NULL` markers, a truncated field, `20261345`) is a day the authority
+ * did not state, and no caller can key a rate by it.
  *
  * The real-calendar-day check is not pedantry: `20261345` passes a bare `\d{8}` and would surface as the
  * `rateDate` `2026-13-45`, which every downstream parser reads as garbage or silently rolls over.
@@ -166,6 +166,39 @@ export function arcaDayToUtcDate(day: string): Date {
         );
     }
     return utcDateOf(match, 0);
+}
+
+/**
+ * The instant an ARCA `yyyymmdd` day begins, rendered UTC — the authority's own midnight as an absolute
+ * moment.
+ *
+ * Every instant this service publishes is UTC, while every *day* it publishes stays a bare authority
+ * calendar day. The two are not in tension and the distinction is the point: a day is the authority's unit
+ * and means nothing without its calendar, whereas an instant is absolute and a caller comparing one should
+ * never have to learn a zone to do it. So the boundary marked here is Argentine midnight and the rendering
+ * is `Z` — `20260830` begins at `2026-08-30T03:00:00Z`.
+ *
+ * The offset is applied by `parseArcaDate` rather than written into a third template literal here, so a
+ * reinstated Argentine DST is one edit in the place that caveat is recorded rather than a hunt through the
+ * copies. Guarded first because that function slices without checking, so a day the authority never stated
+ * would become an `Invalid Date` surfacing only as an opaque `500`.
+ *
+ * Milliseconds are trimmed because they are always zero and a caller reading these out of a log should not
+ * hold two shapes.
+ */
+export function arcaDayToUtcInstant(arcaDay: string): string {
+    const match = arcaDayMatch(arcaDay);
+    if (match === undefined) {
+        throw new ArcaValidationError(
+            `"${arcaDay}" is not an ARCA calendar day, so it cannot be placed on a clock`,
+            'INVALID_ISSUE_DATE',
+        );
+    }
+    // Rebuilt from the match rather than handed the argument: the match is of a trimmed value, while
+    // `parseArcaDate` slices whatever it is given, so ` 20260830 ` would otherwise slice to an
+    // `Invalid Date` after passing the guard.
+    const midnight = parseArcaDate(`${match[1]}${match[2]}${match[3]}`);
+    return `${midnight.toISOString().slice(0, 19)}Z`;
 }
 
 /**

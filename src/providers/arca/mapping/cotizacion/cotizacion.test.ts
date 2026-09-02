@@ -1,5 +1,6 @@
 import {describe, expect, it} from '@jest/globals';
 import {
+    applicabilityRange,
     arcaBand,
     BAND_RULE,
     clampToAuthorityToday,
@@ -9,10 +10,34 @@ import {
     rateDayCandidates,
     RATE_DAY_RULE,
     referenceBand,
-    toRateDto,
+    toUnscopedRate,
     vintageOf,
+    withValidity,
     REFERENCE_MON_ID,
 } from './cotizacion.js';
+
+/**
+ * Runs `fn` with the process timezone forced, restoring it afterwards.
+ *
+ * The unset case is deleted rather than assigned back: `process.env` coerces its values to strings, so
+ * `process.env.TZ = undefined` leaves the literal `"undefined"` behind, which Node resolves to UTC without
+ * complaining. On any host where `TZ` starts unset — most CI images — that would outlive this call for the
+ * rest of the worker, and the tests it would then silently pass are precisely the ones asserting these
+ * functions do not read the container's zone.
+ */
+function withTimeZone<T>(tz: string, fn: () => T): T {
+    const previous = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+        return fn();
+    } finally {
+        if (previous === undefined) {
+            delete process.env.TZ;
+        } else {
+            process.env.TZ = previous;
+        }
+    }
+}
 
 /**
  * The Argentine policy this service owns: the band around a published rate, the reference currency, and
@@ -132,34 +157,140 @@ describe('partitionCurrencyCodes', () => {
     });
 });
 
-describe('toRateDto', () => {
-    it('flattens a band onto the wire shape', () => {
-        expect(toRateDto('DOL', arcaBand(1000), '2026-08-27')).toEqual({
+describe('toUnscopedRate', () => {
+    it('flattens a band onto the wire shape, less the window it cannot know', () => {
+        // The rate closed on Friday the 28th. Which day it PRICES is not a question this row can answer —
+        // the same close prices Saturday, Sunday and Monday — so the window is stamped on by `withValidity`.
+        expect(toUnscopedRate('DOL', arcaBand(1000), '2026-08-28')).toEqual({
             currencyCode: 'DOL',
             rate: 1000,
             lowerLimit: 20,
             upperLimit: 5000,
-            rateDate: '2026-08-27',
+            rateDate: '2026-08-28',
             bandBasis: 'TOLERANCE',
         });
     });
 });
 
-describe('nextRefreshAfter', () => {
-    /** Runs `fn` with the process timezone forced, restoring it afterwards. */
-    function withTimeZone<T>(tz: string, fn: () => T): T {
-        const previous = process.env.TZ;
-        process.env.TZ = tz;
-        try {
-            return fn();
-        } finally {
-            process.env.TZ = previous;
-        }
-    }
+describe('withValidity', () => {
+    // A Monday voucher's window. Which day it is does not matter to any test here — only that one window
+    // reaches every rate — so it is named once and the literal instants are left to `applicabilityRange`.
+    const MONDAY = applicabilityRange('20260831');
 
+    it('completes a rate with the day it was asked about', () => {
+        // Closed Friday the 28th, applies for Monday the 31st alone.
+        const [rate] = withValidity([toUnscopedRate('DOL', arcaBand(1000), '2026-08-28')], MONDAY);
+        expect(rate).toEqual({
+            currencyCode: 'DOL',
+            rate: 1000,
+            lowerLimit: 20,
+            upperLimit: 5000,
+            rateDate: '2026-08-28',
+            validFrom: '2026-08-31T03:00:00Z',
+            validUntil: '2026-09-01T03:00:00Z',
+            bandBasis: 'TOLERANCE',
+        });
+    });
+
+    it('gives every rate the SAME window, whatever day each one closed on', () => {
+        // The rule this function exists to hold: the window answers which day was asked about, so a code
+        // that walked further back than the dollar still applies to the same day, and the peso row — which
+        // never asked an authority anything — is not an exception either.
+        const rates = withValidity(
+            [
+                toUnscopedRate('DOL', arcaBand(1000), '2026-08-28'),
+                toUnscopedRate('060', arcaBand(1700), '2026-08-25'),
+                toUnscopedRate(REFERENCE_MON_ID, referenceBand(), '2026-08-31'),
+            ],
+            MONDAY,
+        );
+
+        expect(rates.map((r) => r.rateDate)).toEqual(['2026-08-28', '2026-08-25', '2026-08-31']);
+        expect(new Set(rates.map((r) => `${r.validFrom}/${r.validUntil}`))).toEqual(
+            new Set([`${MONDAY.validFrom}/${MONDAY.validUntil}`]),
+        );
+    });
+
+    it('leaves the rates it was given untouched', () => {
+        // Copied rather than stamped in place, so a rate can be built before the day it answers for is
+        // resolved and neither caller has to care which ran first.
+        const unscoped = toUnscopedRate('DOL', arcaBand(1000), '2026-08-28');
+        withValidity([unscoped], MONDAY);
+        expect(unscoped).not.toHaveProperty('validFrom');
+    });
+
+    it('answers an empty batch with an empty batch', () => {
+        // The all-unavailable case, where `refreshAfter` is the only refresh signal left.
+        expect(withValidity([], MONDAY)).toEqual([]);
+    });
+});
+
+describe('applicabilityRange', () => {
+    it('is the authority day it was asked for, one day wide', () => {
+        expect(applicabilityRange('20260831')).toEqual({
+            validFrom: '2026-08-31T03:00:00Z',
+            validUntil: '2026-09-01T03:00:00Z',
+        });
+    });
+
+    it('is UTC, at the instant the authority day begins', () => {
+        // The boundary is Argentine midnight; the rendering is UTC. Both halves matter: a caller comparing
+        // instants must never have to learn a zone, and a window rendered at `00:00Z` would be three hours
+        // adrift of the day it claims to describe.
+        const {validFrom} = applicabilityRange('20260831');
+        expect(validFrom).toBe('2026-08-31T03:00:00Z');
+        expect(new Date(validFrom).getTime()).toBe(new Date('2026-08-31T00:00:00-03:00').getTime());
+    });
+
+    it('gives Saturday, Sunday and Monday three windows for one rate', () => {
+        // The reason the range is keyed on the day ASKED FOR rather than on the close that answered. All
+        // three price off Friday's close and would share one window if it were derived from `rateDate` —
+        // and deriving the true span of that close needs a walk FORWARD over feriados this service refuses
+        // to model. Three one-day windows need no lookahead and cannot be wrong.
+        const windows = ['20260829', '20260830', '20260831'].map(applicabilityRange);
+        expect(windows).toEqual([
+            {validFrom: '2026-08-29T03:00:00Z', validUntil: '2026-08-30T03:00:00Z'},
+            {validFrom: '2026-08-30T03:00:00Z', validUntil: '2026-08-31T03:00:00Z'},
+            {validFrom: '2026-08-31T03:00:00Z', validUntil: '2026-09-01T03:00:00Z'},
+        ]);
+        // Half-open and contiguous: no instant falls in two windows, and none falls in none.
+        expect(windows[0].validUntil).toBe(windows[1].validFrom);
+        expect(windows[1].validUntil).toBe(windows[2].validFrom);
+    });
+
+    it('is entirely in the past for a backdated day, which is not the same as expired', () => {
+        // Applicability, not entitlement. The rate that priced 2026-01-05 will always be the rate that
+        // priced it, so a caller testing this against `now` rather than against the voucher's own instant
+        // re-fetches every backdated read forever.
+        const {validUntil} = applicabilityRange('20260105');
+        expect(new Date(validUntil).getTime()).toBeLessThan(Date.now());
+    });
+
+    it('crosses a year boundary correctly', () => {
+        // The month boundary is already covered above, the 31st's window ending on 2026-09-01.
+        expect(applicabilityRange('20261231')).toEqual({
+            validFrom: '2026-12-31T03:00:00Z',
+            validUntil: '2027-01-01T03:00:00Z',
+        });
+    });
+
+    it('does not depend on the container timezone', () => {
+        const utc = withTimeZone('UTC', () => applicabilityRange('20260831'));
+        const ar = withTimeZone('America/Argentina/Buenos_Aires', () => applicabilityRange('20260831'));
+        const tokyo = withTimeZone('Asia/Tokyo', () => applicabilityRange('20260831'));
+        expect(utc).toEqual(ar);
+        expect(tokyo).toEqual(ar);
+    });
+
+    it('refuses a value that does not name an authority day', () => {
+        expect(() => applicabilityRange('20261345')).toThrow();
+    });
+});
+
+describe('nextRefreshAfter', () => {
     it('is the start of the next authority day, not a publication hour', () => {
         // Wednesday 2026-08-26, 14:00 ART.
-        expect(nextRefreshAfter(new Date('2026-08-26T17:00:00Z'))).toBe('2026-08-27T00:00:00-03:00');
+        expect(nextRefreshAfter(new Date('2026-08-26T17:00:00Z'))).toBe('2026-08-27T03:00:00Z');
     });
 
     it('does not move across the retired 19:00 publication hour', () => {
@@ -174,14 +305,14 @@ describe('nextRefreshAfter', () => {
         // Friday 20:00 ART gives Saturday, not Monday. Three days that share a number are still three
         // distinct questions, and the old business-day skip claimed Saturday's could not change until
         // Monday.
-        expect(nextRefreshAfter(new Date('2026-08-28T23:00:00Z'))).toBe('2026-08-29T00:00:00-03:00');
-        expect(nextRefreshAfter(new Date('2026-08-29T13:00:00Z'))).toBe('2026-08-30T00:00:00-03:00');
+        expect(nextRefreshAfter(new Date('2026-08-28T23:00:00Z'))).toBe('2026-08-29T03:00:00Z');
+        expect(nextRefreshAfter(new Date('2026-08-29T13:00:00Z'))).toBe('2026-08-30T03:00:00Z');
     });
 
     it('crosses month and year boundaries correctly', () => {
-        expect(nextRefreshAfter(new Date('2026-08-31T23:00:00Z'))).toBe('2026-09-01T00:00:00-03:00');
+        expect(nextRefreshAfter(new Date('2026-08-31T23:00:00Z'))).toBe('2026-09-01T03:00:00Z');
         // 2026-12-31, 21:00 ART.
-        expect(nextRefreshAfter(new Date('2027-01-01T00:00:00Z'))).toBe('2027-01-01T00:00:00-03:00');
+        expect(nextRefreshAfter(new Date('2027-01-01T00:00:00Z'))).toBe('2027-01-01T03:00:00Z');
     });
 
     it('is identical under TZ=UTC and TZ=America/Argentina/Buenos_Aires', () => {
@@ -196,7 +327,7 @@ describe('nextRefreshAfter', () => {
         expect(tokyo).toBe(ar);
     });
 
-    it('is never in the past, and always states the authority offset', () => {
+    it('is never in the past, and is always UTC', () => {
         for (const iso of [
             '2026-08-26T17:00:00Z',
             '2026-08-26T23:00:00Z',
@@ -209,8 +340,9 @@ describe('nextRefreshAfter', () => {
             const now = new Date(iso);
             const refreshAfter = nextRefreshAfter(now);
             expect(new Date(refreshAfter).getTime()).toBeGreaterThan(now.getTime());
-            // Never a UTC `Z` instant: a caller reading these out of a log should not hold two formats.
-            expect(refreshAfter.endsWith('T00:00:00-03:00')).toBe(true);
+            // Always UTC, matching every other instant on this wire — a caller reading these out of a log
+            // should not hold two formats. It emitted `-03:00` until 2026-09-02; same instant, one shape.
+            expect(refreshAfter.endsWith('T03:00:00Z')).toBe(true);
         }
     });
 });

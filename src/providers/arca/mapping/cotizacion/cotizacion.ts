@@ -1,7 +1,8 @@
-import {ARGENTINA_UTC_OFFSET, formatArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
+import {formatArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
 import {
     arcaDayToIsoDate,
     arcaDayToUtcDate,
+    arcaDayToUtcInstant,
     isArcaDay,
     shiftArcaDay,
 } from '../authority-day/authority-day.js';
@@ -105,8 +106,23 @@ export function partitionCurrencyCodes(codes: Iterable<string>): CurrencyCodePar
     return {toFetch, unsupported, namesReference};
 }
 
-/** A resolved band flattened into the wire's fields. */
-export function toRateDto(currencyCode: string, band: RateBand, rateDate: string): CurrencyRateDto {
+/** The instants between which a rate is the one that prices a voucher. Half-open: `validUntil` is excluded. */
+export interface RateValidity {
+    readonly validFrom: string;
+    readonly validUntil: string;
+}
+
+/**
+ * A rate as far as one code's own answer can determine it — everything but the window it applies to, which
+ * is a property of the batch rather than of any row. {@link withValidity} completes it.
+ *
+ * Spelled as an `Omit` of the wire shape rather than as its own field list so the two cannot drift: a field
+ * added to `RateValidity` leaves this type immediately, and a field added to the wire arrives in it.
+ */
+export type UnscopedRate = Omit<CurrencyRateDto, keyof RateValidity>;
+
+/** A resolved band flattened into the wire's fields, less the window `withValidity` stamps on. */
+export function toUnscopedRate(currencyCode: string, band: RateBand, rateDate: string): UnscopedRate {
     return {
         currencyCode,
         rate: band.rate,
@@ -118,18 +134,65 @@ export function toRateDto(currencyCode: string, band: RateBand, rateDate: string
 }
 
 /**
- * The start of the next authority day, ART — the contract's advisory `refreshAfter`.
+ * The period a rate applies to: the 24 hours of the day it was asked for, as absolute instants.
+ *
+ * **Keyed on the day requested, not on the day the rate closed on.** Those differ constantly — Saturday,
+ * Sunday and Monday all price off Friday's close — so the three answers carry one `rate` and one
+ * `rateDate` between them but three distinct, non-overlapping windows. That is deliberate, and the reason is
+ * that the alternative cannot be computed. Inverting {@link RATE_DAY_RULE} would give the true span of a
+ * close, `(D, nextWorkingDayAfter(D)]`, but its upper bound needs a walk FORWARD to know whether tomorrow is
+ * a feriado — and feriados are not modelled here on purpose, they are discovered through ARCA's own `602`
+ * after the fact. A per-day window needs no lookahead and cannot be wrong about a calendar it cannot see.
+ *
+ * This is the authority's applicability, NOT a caller's entitlement to serve a cached copy. For a backdated
+ * request the window is entirely in the past, and that is correct and permanent rather than expired: the
+ * rate that priced 2026-08-30 will always be the rate that priced it. A caller testing this range against
+ * `now` will conclude every backdated answer is stale; the test belongs against the voucher's own instant.
+ */
+export function applicabilityRange(arcaDay: string): RateValidity {
+    return {
+        validFrom: arcaDayToUtcInstant(arcaDay),
+        validUntil: arcaDayToUtcInstant(shiftArcaDay(arcaDay, 1)),
+    };
+}
+
+/**
+ * Stamps one batch's applicability window onto every rate in it, completing the wire shape.
+ *
+ * Applied to the batch rather than passed to each `toUnscopedRate` call, because that is what the window is:
+ * an answer about the day that was *asked about*, not about the row that happened to answer any one code —
+ * which is why every rate in a response carries the same one while their `rateDate`s may differ. Doing it in
+ * one place makes that a rule the types keep rather than one every producer of a rate has to observe, an
+ * `UnscopedRate` having no way to reach the wire except through here.
+ *
+ * Copies rather than stamping in place, so a rate can be built before the day it answers for is resolved and
+ * neither caller has to care which ran first.
+ */
+export function withValidity(
+    rates: ReadonlyArray<UnscopedRate>,
+    validity: RateValidity,
+): Array<CurrencyRateDto> {
+    return rates.map((rate) => ({...rate, ...validity}));
+}
+
+/**
+ * The start of the next authority day — the contract's advisory `refreshAfter`.
  *
  * A day-keyed answer cannot change before the day being asked about does, so the next authority midnight is
  * the nearest instant that is both true and still a lower bound. It is never in the past, and is present
- * even when every requested code came back unavailable — the case a client would otherwise poll hot.
+ * even when every requested code came back unavailable — the case a client would otherwise poll hot, and
+ * the one case no {@link applicabilityRange} can answer because there is no rate to carry one.
+ *
+ * Since 2026-09-02 a rate states its own applicability, and for a live request this field is that rate's
+ * `validUntil` by construction: the field is `max(min(validUntil), next authority midnight)`, and a
+ * requested day clamped at today makes the second term always the larger. What it still answers alone is the
+ * backdated request — where every window is legitimately in the past — and the empty batch.
  *
  * It used to return ARCA's 19:00 publication hour, which made the field a schedule: a caller told to push
  * its next run "later, never earlier" reinstated the evening cadence it had just retired.
  */
 export function nextRefreshAfter(now: Date): string {
-    const tomorrow = arcaDayToIsoDate(shiftArcaDay(formatArcaDate(now), 1));
-    return `${tomorrow}T00:00:00${ARGENTINA_UTC_OFFSET}`;
+    return arcaDayToUtcInstant(shiftArcaDay(formatArcaDate(now), 1));
 }
 
 /**
