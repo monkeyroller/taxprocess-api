@@ -4,6 +4,7 @@ import {
     ArcaServiceError,
     ArcaTaxpayerNotFoundError,
     ArcaValidationError,
+    NotImplementedError,
 } from '../sdk/core/errors.js';
 import type {ArcaAuth} from '../sdk/core/types.js';
 import {formatArcaDate} from '../sdk/invoicing/arca-qr/arca-qr.js';
@@ -12,12 +13,22 @@ import type {
     CommonInvoiceResult,
 } from '../sdk/invoicing/common/common-invoice.types.js';
 import type {TaxpayerData} from '../sdk/taxpayer-registry/padron.types.js';
-import {commonInvoiceService, constanciaService, taxpayerIdentityService} from '../clients.js';
+import {
+    commonInvoiceService,
+    constanciaService,
+    fexInvoiceService,
+    taxpayerIdentityService,
+} from '../clients.js';
 import {ticketStore} from '../auth/ticket-store/ticket-store.js';
 import {delegateCredentialStore, type DelegateCredentialStore} from '../auth/delegate-credentials/delegate-credentials.js';
 import {toArcaEnvironment} from '../auth/environment/environment.js';
 import {toCbteTipo} from '../mapping/code-maps/code-maps.js';
 import {toPadronService} from '../mapping/padron-routing/padron-routing.js';
+import {invoiceRoute, type InvoiceRoute} from '../mapping/invoice-routing/invoice-routing.js';
+import {
+    buildFexInvoiceRequest,
+    toNeutralExportResult,
+} from '../mapping/export-invoice-mapper/export-invoice.mapper.js';
 import {toArcaDay, arcaDayToIsoDate, isArcaDay} from '../mapping/authority-day/authority-day.js';
 import {
     applicabilityRange,
@@ -71,10 +82,12 @@ import {
 import type {GenericEnvironment} from '../../provider/environment.js';
 import type {EntityAuthBlock} from '../../provider/entity-auth.js';
 import type {NeutralInvoice} from '../../provider/neutral-invoice.js';
+import type {WebService} from '../../provider/web-service.js';
 import type {
     AuthorityStatusResult,
     CurrencyRatesResult,
     LastAuthorizedResult,
+    LastRequestIdResult,
     NextNumbersResult,
     PointsOfSaleResult,
     TaxAuthorizationResult,
@@ -218,15 +231,66 @@ export class ArcaProvider extends TaxEntityProvider {
         return Promise.resolve(validateArcaCredentials(input));
     }
 
+    /**
+     * The WSAA scope a route authenticates against. Separate tickets, not one shared credential: WSAA issues
+     * per service, and the certificate has to be enrolled in each one independently.
+     */
+    private static readonly SERVICE_BY_ROUTE: Readonly<Record<InvoiceRoute, ServiceIdValue>> = {
+        WSFEV1: ServiceId.WSFEV1,
+        WSMTXCA: ServiceId.WSFEV1,
+        WSFEXV1: ServiceId.WSFEXV1,
+    };
+
+    /**
+     * Resolves the issuing ticket for one route. Every issuing method needs exactly this, and had a copy of
+     * it — including the `credentials`/`delegated` pair, whose omission is what turns a cache miss into a
+     * `409` instead of a failure.
+     */
+    private issuerAuth(entity: EntityAuthBlock, route: InvoiceRoute): Promise<ArcaAuth> {
+        return ticketStore.resolve(
+            entity.entityCode,
+            entity.issuerTaxId,
+            ArcaProvider.SERVICE_BY_ROUTE[route],
+            entity.environment,
+            entity.credentials,
+            entity.delegated,
+        );
+    }
+
+    /**
+     * Refuses a route ARCA has but this provider does not implement, before anything is spent on it.
+     *
+     * `WSMTXCA` is reachable today: contract §7 lists it in the per-entity `configuration.webService` enum,
+     * so core can name it before any implementation exists. It must answer `501`, never fall back to
+     * WSFEv1 — that would authorize a domestic voucher through a service the caller did not choose and
+     * report it as a success.
+     */
+    private static assertRouteImplemented(route: InvoiceRoute): void {
+        if (route === 'WSMTXCA') {
+            throw new NotImplementedError('WSMTXCA (factura electrónica con detalle)');
+        }
+    }
+
     protected async authorizeInvoiceImpl(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult> {
         // Single-voucher flow only: the mapper sets CbteHasta to `voucherNumberFrom`, so a differing
         // `voucherNumberTo` would be silently truncated. Rejected before minting a WSAA ticket.
+        //
+        // WSFEX has no range at all — one `Cbte_nro` per request — so the same guard is what both routes
+        // need, and it stays here rather than being duplicated into each.
         if (invoice.voucherNumberFrom !== invoice.voucherNumberTo) {
             throw new ArcaValidationError(
                 `Single-voucher flow requires voucherNumberFrom === voucherNumberTo ` +
                     `(got ${invoice.voucherNumberFrom}..${invoice.voucherNumberTo})`,
                 'VOUCHER_RANGE_UNSUPPORTED',
             );
+        }
+
+        // Decided from the body alone, before a ticket: the route determines which WSAA scope to spend, so
+        // resolving first could mint a `wsfe` ticket for a voucher only `wsfex` can authorize.
+        const route = invoiceRoute({webService: invoice.webService, documentTypeCode: invoice.documentTypeCode});
+        ArcaProvider.assertRouteImplemented(route);
+        if (route === 'WSFEXV1') {
+            return this.authorizeExportInvoice(entity, invoice);
         }
 
         // Core owns the voucher number: authorize exactly the one it sent, never a computed correlative.
@@ -298,6 +362,42 @@ export class ArcaProvider extends TaxEntityProvider {
     }
 
     /**
+     * Authorizes a Factura E or one of its notas through WSFEXv1.
+     *
+     * Mirrors the WSFEv1 path — build before the ticket, then one delegation-aware call — and departs from
+     * it in exactly one place: **there is no idempotent recovery here.**
+     *
+     * WSFEv1 has none of its own, so this service reconstructs it: a `10016` means the number is taken, and
+     * `FECompConsultar` is asked whether the voucher on file is the one being re-sent. WSFEX has the
+     * mechanism natively. `Cmp.Id` is the caller's idempotency key, and re-sending it returns the stored
+     * answer with `Reproceso = "S"` instead of a rejection — so there is nothing to reconcile, and calling
+     * `FEXGetCMP` to reconcile it would be asking a question ARCA already answered.
+     *
+     * The consequence travels to the caller rather than being absorbed: `reprocessed` says which happened,
+     * because only the caller knows whether it meant to retry. On a deliberate retry a replay is the wanted
+     * outcome; on a request it believes is new, the same flag means the id was reused and the voucher
+     * described is an older one.
+     *
+     * Also no QR — see `toNeutralExportResult`.
+     */
+    private async authorizeExportInvoice(
+        entity: EntityAuthBlock,
+        invoice: NeutralInvoice,
+    ): Promise<TaxAuthorizationResult> {
+        // Built first for the reason the domestic path states: this is where every canonical code is
+        // translated, and an unmapped one should cost a `400` rather than a WSAA login and a `409`.
+        const request = buildFexInvoiceRequest(invoice, invoice.voucherNumberFrom);
+
+        const auth = await this.issuerAuth(entity, 'WSFEXV1');
+        const service = fexInvoiceService(toArcaEnvironment(entity.environment));
+
+        const result = await this.delegationAware(entity, ServiceId.WSFEXV1, () =>
+            service.requestAuthorization(auth, request),
+        );
+        return toNeutralExportResult(result);
+    }
+
+    /**
      * Binds `recoverAuthorizedVoucher` to this request: the issuer whose CUIT signs the rebuilt QR, and the
      * delegation-aware wrapper the query runs under.
      */
@@ -323,19 +423,43 @@ export class ArcaProvider extends TaxEntityProvider {
         pointOfSaleNumber: number,
         documentTypeCode: number,
     ): Promise<LastAuthorizedResult> {
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
-        const number = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-            service.getLastAuthorizedNumber(auth, pointOfSaleNumber, toCbteTipo(documentTypeCode)),
+        // Routed on the document type alone: the two services keep separate numbering, in separate
+        // point-of-sale registers, so asking the wrong one answers about a different series.
+        const route = invoiceRoute({documentTypeCode});
+        ArcaProvider.assertRouteImplemented(route);
+        const auth = await this.issuerAuth(entity, route);
+        const cbteTipo = toCbteTipo(documentTypeCode);
+
+        const number = await this.delegationAware(entity, ArcaProvider.SERVICE_BY_ROUTE[route], () =>
+            route === 'WSFEXV1'
+                ? fexInvoiceService(toArcaEnvironment(entity.environment)).getLastAuthorizedNumber(
+                      auth,
+                      pointOfSaleNumber,
+                      cbteTipo,
+                  )
+                : commonInvoiceService(toArcaEnvironment(entity.environment)).getLastAuthorizedNumber(
+                      auth,
+                      pointOfSaleNumber,
+                      cbteTipo,
+                  ),
         );
         return {number};
+    }
+
+    /**
+     * The highest `Cmp.Id` WSFEX has seen for this issuer (`FEXGetLast_ID`).
+     *
+     * Only WSFEXv1 has such a sequence, so this is the one method that names its service outright rather
+     * than routing: there is no document type to route on, and the base class already answers `501` for a
+     * provider without one.
+     */
+    protected override async lastRequestIdImpl(entity: EntityAuthBlock): Promise<LastRequestIdResult> {
+        const auth = await this.issuerAuth(entity, 'WSFEXV1');
+        const service = fexInvoiceService(toArcaEnvironment(entity.environment));
+        const requestId = await this.delegationAware(entity, ServiceId.WSFEXV1, () =>
+            service.getLastRequestId(auth),
+        );
+        return {requestId};
     }
 
     protected async nextNumbersImpl(
@@ -347,30 +471,61 @@ export class ArcaProvider extends TaxEntityProvider {
         // rather than a silent omission. De-duplicated because a repeated code would spend a SOAP call per
         // copy and put two entries in a `numbers` array core maps back by `documentTypeCode`; insertion order
         // is preserved, and every distinct code still reaches `toCbteTipo`.
-        const mapped = [...new Set(documentTypeCodes)].map((code) => ({code, cbteTipo: toCbteTipo(code)}));
+        //
+        // Each code also carries its own route: this is the one method whose request can legitimately span
+        // both services — `[6, 19]` is a domestic invoice and an export one — and they keep separate
+        // numbering in separate registers. Grouping is what lets one call answer for both instead of forcing
+        // the caller to know it must ask twice.
+        const mapped = [...new Set(documentTypeCodes)].map((code) => {
+            const route = invoiceRoute({documentTypeCode: code});
+            ArcaProvider.assertRouteImplemented(route);
+            return {code, cbteTipo: toCbteTipo(code), route};
+        });
 
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
+        // One ticket per distinct route, since WSAA issues per service; a request naming only domestic types
+        // therefore still mints exactly the one ticket it did before. Each ticket is attached to its codes
+        // rather than kept in a map keyed by route, so no lookup here can be empty.
+        const routes = [...new Set(mapped.map((entry) => entry.route))];
+        const groups = await Promise.all(
+            routes.map(async (route) => ({
+                route,
+                auth: await this.issuerAuth(entity, route),
+                codes: mapped.filter((entry) => entry.route === route),
+            })),
         );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
 
-        // WSFEv1 has no batch operation, so the per-code lookups fan out concurrently on one ticket.
-        // `numbers` follows `mapped` — the distinct codes in the order first named — and is deliberately not
-        // positional against `documentTypeCodes`: `[1, 6, 1, 1]` answers with two entries, keyed by code.
-        const numbers = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-            Promise.all(
-                mapped.map(async ({code, cbteTipo}) => {
-                    const last = await service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo);
-                    // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
-                    return {documentTypeCode: code, nextNumber: last + 1};
-                }),
-            ),
-        );
+        // Neither service has a batch numbering operation, so the per-code lookups fan out concurrently on
+        // their route's ticket. `numbers` is keyed by code and deliberately not positional against
+        // `documentTypeCodes`: `[1, 6, 1, 1]` answers with two entries.
+        const environment = toArcaEnvironment(entity.environment);
+        const numbers = (
+            await Promise.all(
+                groups.map(({route, auth, codes}) =>
+                    Promise.all(
+                        codes.map(async ({code, cbteTipo}) => {
+                            const last = await this.delegationAware(
+                                entity,
+                                ArcaProvider.SERVICE_BY_ROUTE[route],
+                                () =>
+                                    route === 'WSFEXV1'
+                                        ? fexInvoiceService(environment).getLastAuthorizedNumber(
+                                              auth,
+                                              pointOfSaleNumber,
+                                              cbteTipo,
+                                          )
+                                        : commonInvoiceService(environment).getLastAuthorizedNumber(
+                                              auth,
+                                              pointOfSaleNumber,
+                                              cbteTipo,
+                                          ),
+                            );
+                            // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
+                            return {documentTypeCode: code, nextNumber: last + 1};
+                        }),
+                    ),
+                ),
+            )
+        ).flat();
         return {numbers};
     }
 
@@ -380,18 +535,21 @@ export class ArcaProvider extends TaxEntityProvider {
         documentTypeCode: number,
         voucherNumber: number,
     ): Promise<TaxAuthorizationResult> {
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
+        const route = invoiceRoute({documentTypeCode});
+        ArcaProvider.assertRouteImplemented(route);
+        const auth = await this.issuerAuth(entity, route);
+        const cbteTipo = toCbteTipo(documentTypeCode);
         try {
+            if (route === 'WSFEXV1') {
+                const service = fexInvoiceService(toArcaEnvironment(entity.environment));
+                const result = await this.delegationAware(entity, ServiceId.WSFEXV1, () =>
+                    service.queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
+                );
+                return toNeutralExportResult(result);
+            }
+            const service = commonInvoiceService(toArcaEnvironment(entity.environment));
             const result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-                service.queryVoucher(auth, pointOfSaleNumber, toCbteTipo(documentTypeCode), voucherNumber),
+                service.queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
             );
             return toNeutralResult(result);
         } catch (err) {
@@ -413,22 +571,36 @@ export class ArcaProvider extends TaxEntityProvider {
         return {appServer: status.appServer, dbServer: status.dbServer, authServer: status.authServer};
     }
 
-    protected async pointsOfSaleImpl(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
+    /**
+     * The entity's registered points of sale, from the register the named service keeps.
+     *
+     * There are two, and they do not overlap: WSFEv1's CAE/CAEA register and WSFEX's "Comprobantes de
+     * Exportación – Web Services" (FEEWS). A point of sale good for one is not usable for the other, so
+     * without the selector a caller checking whether it can issue a Factura E would be shown the wrong list
+     * and conclude it can.
+     */
+    protected async pointsOfSaleImpl(
+        entity: EntityAuthBlock,
+        webService?: WebService,
+    ): Promise<PointsOfSaleResult> {
+        const route = invoiceRoute({webService});
+        ArcaProvider.assertRouteImplemented(route);
+        const auth = await this.issuerAuth(entity, route);
+        const environment = toArcaEnvironment(entity.environment);
         try {
-            const points = await this.delegationAware(entity, ServiceId.WSFEV1, () => service.getPointsOfSale(auth));
+            const points = await this.delegationAware(entity, ArcaProvider.SERVICE_BY_ROUTE[route], () =>
+                route === 'WSFEXV1'
+                    ? fexInvoiceService(environment).getPointsOfSale(auth)
+                    : commonInvoiceService(environment).getPointsOfSale(auth),
+            );
             return {pointsOfSale: points.map(toNeutralPointOfSale)};
         } catch (err) {
             // ARCA signals "no registered points of sale" with a `602 Sin Resultados` on FEParamGetPtosVenta
             // rather than an empty ResultGet. That is the empty case, not a failure.
+            //
+            // WSFEX answers the same question with an empty `FEXResultGet` instead, which `catalogueRows`
+            // already reads as `[]` — so this branch is the WSFEv1 idiom only, and is left scoped to the
+            // code rather than widened to "any error means empty".
             if (isNoResults(err)) {
                 return {pointsOfSale: []};
             }

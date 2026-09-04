@@ -12,6 +12,7 @@ import type {
     TaxpayerResult,
 } from './neutral-results.js';
 import type {CredentialValidationResult, ValidateCredentialsInput} from './credential-validation.js';
+import type {WebService} from './web-service.js';
 import {ProviderFault} from './faults.js';
 
 /**
@@ -107,8 +108,8 @@ export abstract class TaxEntityProvider {
             this.lookupTaxpayersImpl(environment, identificationTypeCode, identificationNumber),
         );
     }
-    pointsOfSale(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
-        return this.guarded(() => this.pointsOfSaleImpl(entity));
+    pointsOfSale(entity: EntityAuthBlock, webService?: WebService): Promise<PointsOfSaleResult> {
+        return this.guarded(() => this.pointsOfSaleImpl(entity, webService));
     }
     currencyRates(
         environment: GenericEnvironment,
@@ -152,7 +153,17 @@ export abstract class TaxEntityProvider {
         identificationTypeCode: number,
         identificationNumber: string,
     ): Promise<TaxpayerResult>;
-    protected abstract pointsOfSaleImpl(entity: EntityAuthBlock): Promise<PointsOfSaleResult>;
+    /**
+     * The entity's registered points of sale.
+     *
+     * `webService` selects the register when the entity keeps more than one, which some do: a point of sale
+     * enrolled for ordinary invoicing may not be usable for export invoicing and vice versa. Omitted means
+     * the entity's ordinary register.
+     */
+    protected abstract pointsOfSaleImpl(
+        entity: EntityAuthBlock,
+        webService?: WebService,
+    ): Promise<PointsOfSaleResult>;
     /**
      * The authority's published exchange rates, with the band it accepts around each.
      *

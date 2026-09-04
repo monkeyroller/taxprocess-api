@@ -28,6 +28,7 @@ import {PointsOfSaleRequestDto} from '../../../http/dto/points-of-sale-request.d
 import {CurrencyRatesRequestDto} from '../../../http/dto/currency.dto.js';
 import {RATE_DAY_RULE} from '../mapping/cotizacion/cotizacion.js';
 import {ARCA_CURRENCY_CODES} from '../mapping/currency-codes/currency-codes.js';
+import type {FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
 
 /**
  * The provider reaches ARCA through two module-level singletons, the ticket store and the per-environment
@@ -56,6 +57,19 @@ const identityGetTaxpayer = jest.fn<(auth: unknown, id: number) => Promise<Taxpa
 const getIdPersonaList = jest.fn<(auth: unknown, documentNumber: number) => Promise<Array<string>>>();
 const invalidateDelegated = jest.fn<(entityCode: string, environment: string, service: string) => void>();
 
+/**
+ * The WSFEX service's own fakes, kept separate from WSFEv1's rather than shared.
+ *
+ * Sharing them would make the assertions that matter most here unwritable: the point of the routing tests is
+ * that a document type reaches one service and *not* the other, which cannot be observed if both names
+ * resolve to the same mock.
+ */
+const fexRequestAuthorization = jest.fn<(auth: unknown, req: any) => Promise<FexInvoiceResult>>();
+const fexQueryVoucher = jest.fn<(auth: unknown, sp: number, vt: number, n: number) => Promise<FexInvoiceResult>>();
+const fexGetLastAuthorizedNumber = jest.fn<() => Promise<number>>();
+const fexGetLastRequestId = jest.fn<() => Promise<number>>();
+const fexGetPointsOfSale = jest.fn<() => Promise<Array<PointOfSaleInfo>>>();
+
 jest.unstable_mockModule('../clients.js', () => ({
     commonInvoiceService: () => ({
         getLastAuthorizedNumber,
@@ -64,6 +78,13 @@ jest.unstable_mockModule('../clients.js', () => ({
         getPointsOfSale,
         getCurrencyRate,
         getCurrencyTypes,
+    }),
+    fexInvoiceService: () => ({
+        requestAuthorization: fexRequestAuthorization,
+        queryVoucher: fexQueryVoucher,
+        getLastAuthorizedNumber: fexGetLastAuthorizedNumber,
+        getLastRequestId: fexGetLastRequestId,
+        getPointsOfSale: fexGetPointsOfSale,
     }),
     // The padrón factories return concrete services carrying the WSAA service id the provider keys the
     // ticket on, so the fakes must expose `service` as well as the operations.
@@ -2009,5 +2030,169 @@ describe('CurrencyRatesRequestDto validation', () => {
             }),
         );
         expect(errors.map((e) => e.property)).toContain('date');
+    });
+});
+
+/**
+ * The routing decision, observed end to end.
+ *
+ * These are the tests that justify one endpoint serving both services: they assert a document type reaches
+ * one service and *not* the other, and that it authenticates against that service's own WSAA scope. A
+ * shared mock could not show either.
+ */
+describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
+    const fexApproved: FexInvoiceResult = {
+        result: 'A',
+        cae: '69000000000001',
+        caeExpiration: '20261015',
+        voucherNumber: 7,
+        voucherDate: '20260904',
+        requestId: 41,
+        reprocessed: false,
+        observations: [],
+        raw: {},
+    };
+
+    /** UC-2, the shape with the fewest conditional fields switched on. */
+    function exportInvoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
+        return {
+            documentTypeCode: 19,
+            pointOfSaleNumber: 3,
+            voucherNumberFrom: 7,
+            voucherNumberTo: 7,
+            currencyCode: 'DOL',
+            currencyRate: 1508,
+            issueDate: '2026-08-05',
+            requestId: 41,
+            lines: [],
+            items: [{description: 'Consultoría', quantity: 1, unitOfMeasureCode: 7, unitPrice: 500, totalAmount: 500}],
+            export: {
+                exportType: 'SERVICES',
+                destinationCode: '203',
+                clientName: 'Joao Da Silva',
+                clientAddress: 'Rua 76 km 34.5 Alagoas',
+                clientTaxId: 'PJ54482221-l',
+                language: 'es',
+                paymentTerms: 'Contado',
+                paymentDate: '2026-08-31',
+            },
+            ...overrides,
+        };
+    }
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+        requestAuthorization.mockResolvedValue(approved);
+        fexRequestAuthorization.mockResolvedValue(fexApproved);
+        getLastAuthorizedNumber.mockResolvedValue(16);
+        fexGetLastAuthorizedNumber.mockResolvedValue(6);
+    });
+
+    it('authorizes a domestic voucher through WSFEv1, on a wsfe ticket', async () => {
+        await new ArcaProvider().authorizeInvoice(ENTITY, invoice({documentTypeCode: 6}));
+
+        expect(requestAuthorization).toHaveBeenCalledTimes(1);
+        expect(fexRequestAuthorization).not.toHaveBeenCalled();
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfe');
+    });
+
+    it('authorizes an export voucher through WSFEXv1, on a wsfex ticket', async () => {
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexRequestAuthorization).toHaveBeenCalledTimes(1);
+        expect(requestAuthorization).not.toHaveBeenCalled();
+        // A separate WSAA scope, needing its own certificate enrolment -- not the wsfe ticket.
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
+        expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
+    });
+
+    it('carries reprocessed out to the caller, who alone knows if it meant to retry', async () => {
+        fexRequestAuthorization.mockResolvedValue({...fexApproved, reprocessed: true});
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(result.reprocessed).toBe(true);
+    });
+
+    it('never runs WSFEv1 idempotent recovery on an export voucher', async () => {
+        // WSFEX has the mechanism natively -- re-sending Cmp.Id replays the stored answer -- so there is
+        // nothing to reconcile and FEXGetCMP must not be called to reconcile it.
+        await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexQueryVoucher).not.toHaveBeenCalled();
+        expect(queryVoucher).not.toHaveBeenCalled();
+    });
+
+    it('emits no QR for an export voucher, RG 4892 being a domestic specification', async () => {
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(result.qr).toBeUndefined();
+    });
+
+    it('refuses a voucher whose selector and document type disagree, before spending a ticket', async () => {
+        await expect(
+            new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice({webService: 'WSFEv1'})),
+        ).rejects.toMatchObject({code: 'ARCA_VALIDATION'});
+
+        expect(resolve).not.toHaveBeenCalled();
+        expect(fexRequestAuthorization).not.toHaveBeenCalled();
+    });
+
+    it('answers 501 for WSMTXCA rather than falling back to WSFEv1', async () => {
+        // Reachable today: contract section 7 lists it in configuration.webService, so core can name it
+        // before any implementation exists. Falling back would authorize through a service nobody chose.
+        await expect(
+            new ArcaProvider().authorizeInvoice(ENTITY, invoice({documentTypeCode: 6, webService: 'WSMTXCA'})),
+        ).rejects.toMatchObject({code: 'NOT_IMPLEMENTED'});
+
+        expect(requestAuthorization).not.toHaveBeenCalled();
+    });
+
+    it('routes last-authorized and query by document type', async () => {
+        const provider = new ArcaProvider();
+
+        expect(await provider.lastAuthorized(ENTITY, 3, 19)).toEqual({number: 6});
+        expect(fexGetLastAuthorizedNumber).toHaveBeenCalledTimes(1);
+        expect(getLastAuthorizedNumber).not.toHaveBeenCalled();
+
+        fexQueryVoucher.mockResolvedValue(fexApproved);
+        await provider.queryVoucher(ENTITY, 3, 21, 4);
+        expect(fexQueryVoucher).toHaveBeenCalledTimes(1);
+        expect(queryVoucher).not.toHaveBeenCalled();
+    });
+
+    it('answers next-numbers for both services in one request', async () => {
+        // The one method whose request can legitimately span both: separate numbering, separate registers.
+        const result = await new ArcaProvider().nextNumbers(ENTITY, 3, [6, 19]);
+
+        expect(result.numbers).toEqual([
+            {documentTypeCode: 6, nextNumber: 17},
+            {documentTypeCode: 19, nextNumber: 7},
+        ]);
+        // One ticket per distinct scope, not one per code.
+        expect(resolve.mock.calls.map((call) => call[2]).sort()).toEqual(['wsfe', 'wsfex']);
+    });
+
+    it('reads the FEEWS register only when asked for it', async () => {
+        // A point of sale good for WSFEv1 is not usable for a Factura E, so showing the wrong list would let
+        // a caller conclude it can issue one when it cannot.
+        fexGetPointsOfSale.mockResolvedValue([{number: 1, blocked: false}]);
+        getPointsOfSale.mockResolvedValue([{number: 9, blocked: false}]);
+        const provider = new ArcaProvider();
+
+        expect(await provider.pointsOfSale(ENTITY, 'WSFEXv1')).toEqual({
+            pointsOfSale: [{number: 1, blocked: false, issuanceMode: undefined, dischargeDate: undefined}],
+        });
+        expect(await provider.pointsOfSale(ENTITY)).toEqual({
+            pointsOfSale: [{number: 9, blocked: false, issuanceMode: undefined, dischargeDate: undefined}],
+        });
+    });
+
+    it('answers the last request id off WSFEXv1', async () => {
+        fexGetLastRequestId.mockResolvedValue(41);
+
+        expect(await new ArcaProvider().lastRequestId(ENTITY)).toEqual({requestId: 41});
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
     });
 });
