@@ -1,7 +1,18 @@
 import {SoapClient} from '../core/soap-client/soap-client.js';
-import {ArcaServiceError, NotImplementedError, type ArcaErrorEntry} from '../core/errors.js';
+import {
+    ArcaServiceError,
+    NotImplementedError,
+    type ArcaCodeMessage,
+    type ArcaErrorEntry,
+} from '../core/errors.js';
 import type {ArcaEnvironment} from '../core/constants.js';
-import {codeMsgPairs} from './common/common-helpers.js';
+import {
+    codeMsgPairs,
+    isNoErrorCode,
+    WSFEV1_ERRORS,
+    WSFEV1_EVENTS,
+    type CodeMessageDialect,
+} from './common/common-helpers.js';
 import type {
     ArcaAuth,
     CurrencyRateInfo,
@@ -114,19 +125,48 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
     }
 
     /**
-     * Raises if the result carries a non-empty `Errors.Err`. Shares `codeMsgPairs` with the observation
-     * reader, since `Obs` and `Err` are the same wire structure — reading them two ways is how this one came
-     * to render a missing `Code` as the literal `"undefined"` while the other had been fixed not to.
+     * Where this service puts its error and event blocks, and what it calls the fields inside them. WSFEv1's
+     * spelling is the default because it was the only one when this class was written; WSFEXv1 overrides all
+     * four and needs no other envelope code.
+     *
+     * Getting `errorNode`/`errorDialect` wrong is not a partial failure. WSFEX reports every rejection in an
+     * element WSFEv1 never sends, so reading it the WSFEv1 way finds nothing and reports each rejection as a
+     * success — which is why these are declared rather than sniffed.
+     */
+    protected readonly errorNode: string = 'Errors';
+    protected readonly errorDialect: CodeMessageDialect = WSFEV1_ERRORS;
+    protected readonly eventNode: string = 'Events';
+    protected readonly eventDialect: CodeMessageDialect = WSFEV1_EVENTS;
+
+    /**
+     * Raises if the result carries a non-empty error block. Shares `codeMsgPairs` with the observation and
+     * event readers, since all three are the same wire structure — reading them separately is how this one
+     * came to render a missing `Code` as the literal `"undefined"` while another had been fixed not to.
+     *
+     * Zero codes are dropped rather than raised on: WSFEX sends its error element on success too, marked
+     * `ErrCode` `0`, so presence alone cannot mean failure. See {@link isNoErrorCode}.
      */
     protected assertNoErrors(result: Record<string, unknown>): void {
         const entries: Array<ArcaErrorEntry> = codeMsgPairs(
-            (result as {Errors?: unknown}).Errors,
-            'Err',
-        );
+            (result as Record<string, unknown>)[this.errorNode],
+            this.errorDialect,
+        ).filter((entry) => !isNoErrorCode(entry.code));
         if (entries.length === 0) {
             return;
         }
         throw new ArcaServiceError(entries.map((e) => `[${e.code}] ${e.message}`).join('; '), entries);
+    }
+
+    /**
+     * The authority's events for this response. Informational in both manuals — a maintenance window, a
+     * deprecation notice — so this never throws and callers are free to ignore it.
+     *
+     * Read through the same dialect machinery as errors so a service declares its spelling once. Kept as a
+     * reader rather than wired into `invoke`, since nothing yet surfaces events to the caller and a silent
+     * side effect would be the wrong place to start.
+     */
+    protected readEvents(result: Record<string, unknown>): Array<ArcaCodeMessage> {
+        return codeMsgPairs(result[this.eventNode], this.eventDialect);
     }
 
     protected readonly authorizeOperation: string = '';

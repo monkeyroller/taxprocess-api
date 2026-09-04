@@ -18,6 +18,7 @@ import {
     cleanArcaDate,
     cleanCode,
     codeMsgPairs,
+    WSFEV1_OBSERVATIONS,
     money,
     normalizeResultCode,
     toIntOrZero
@@ -150,7 +151,7 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
             caeExpiration: cae ? cleanArcaDate(detail?.CAEFchVto) : undefined,
             voucherNumberFrom: toIntOrZero(detail?.CbteDesde),
             voucherNumberTo: toIntOrZero(detail?.CbteHasta),
-            observations: codeMsgPairs(detail?.Observaciones, 'Obs'),
+            observations: codeMsgPairs(detail?.Observaciones, WSFEV1_OBSERVATIONS),
             raw: detail ?? result,
         };
     }
@@ -278,7 +279,7 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
             caeExpiration: cae ? cleanArcaDate(info.FchVto) : undefined,
             voucherNumberFrom: toIntOrZero(info.CbteDesde),
             voucherNumberTo: toIntOrZero(info.CbteHasta),
-            observations: codeMsgPairs(info.Observaciones, 'Obs'),
+            observations: codeMsgPairs(info.Observaciones, WSFEV1_OBSERVATIONS),
             raw: info,
         };
     }
