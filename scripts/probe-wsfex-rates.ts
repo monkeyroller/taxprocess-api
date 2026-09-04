@@ -17,6 +17,10 @@
  *   3. Which currencies the batch omits for the day. That set is rule 1600's practical effect -- a service
  *      export invoice may only name a currency that has a close for the previous business day -- and it is
  *      narrower than the catalogue.
+ *   4. Whether the batch resolves the day ITSELF. The domestic branch asks about the previous working day,
+ *      because ARCA labels a row by the business day it closed on; the export branch has been asking
+ *      about the voucher's own day and taking whatever `Fecha_ctz` came back. Sharing one day rule
+ *      between them is only safe if handing the batch an already-stepped-back day does not step it again.
  *
  * Ask PRODUCTION. Homologacion's cotizaciones are generated, so a difference measured there means nothing.
  *
@@ -38,6 +42,7 @@ import {delegateCredentialStore} from '../src/providers/arca/auth/delegate-crede
 import {toArcaEnvironment} from '../src/providers/arca/auth/environment/environment.js';
 import {formatArcaDate} from '../src/providers/arca/sdk/invoicing/arca-qr/arca-qr.js';
 import {isArcaDay} from '../src/providers/arca/mapping/authority-day/authority-day.js';
+import {rateDayCandidates} from '../src/providers/arca/mapping/cotizacion/cotizacion.js';
 import type {GenericEnvironment} from '../src/providers/provider/environment.js';
 import type {ServiceIdValue} from '../src/providers/arca/sdk/core/constants.js';
 
@@ -221,6 +226,43 @@ async function main(): Promise<void> {
     console.log('');
     console.log('  Read the two counts separately. The first decides whether a cached rate has to be keyed by');
     console.log('  service; the second decides whether the batch is safe to sync from.');
+
+    await dayResolution(day, batch);
+}
+
+/**
+ * Does the batch step the day back on its own?
+ *
+ * The domestic series asks about `rateDayCandidates(D)[0]` -- the previous working day -- because a row is
+ * labelled by the business day it closed on. If the batch also steps back internally, then handing it that
+ * same already-stepped day would land a publication earlier than the domestic branch, and the two series
+ * would answer different days for one request. That is the thing to know before sharing a day rule.
+ */
+async function dayResolution(day: string, forDay: Map<string, Answer>): Promise<void> {
+    const previous = rateDayCandidates(day)[0];
+    if (previous === undefined) {
+        return;
+    }
+
+    const forPrevious = await fexBatch(previous);
+    const domestic = await wsfeRate('DOL', previous);
+
+    // Every row in one answer carries the same Fecha_ctz, so one is enough to name the day it resolved to.
+    const resolvedFor = (rows: Map<string, Answer>): string => rows.get('DOL')?.day ?? '(no DOL row)';
+
+    console.log('');
+    console.log('-- day resolution --');
+    console.log('| asked | what the batch answered for | rows |');
+    console.log('| --- | --- | --- |');
+    console.log(`| ${day} (the day itself) | ${resolvedFor(forDay)} | ${String(forDay.size)} |`);
+    console.log(`| ${previous} (previous working day) | ${resolvedFor(forPrevious)} | ${String(forPrevious.size)} |`);
+    console.log('');
+    console.log(`  wsfe FEParamGetCotizacion(DOL, ${previous}) answered for : ${domestic.day ?? domestic.error ?? ''}`);
+    console.log('');
+    console.log('  If the two batch rows name the SAME day, the batch resolves internally and the shared day');
+    console.log('  rule must send the voucher day. If they name DIFFERENT days, the batch honours what it is');
+    console.log('  given and the shared rule can send the previous working day, matching the domestic series.');
+    console.log('  Either way, the wsfe line above is the day the domestic branch would have used.');
 }
 
 await main();

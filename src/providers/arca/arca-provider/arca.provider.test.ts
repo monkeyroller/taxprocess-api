@@ -2272,6 +2272,70 @@ describe('ArcaProvider export currency rates', () => {
         expect(result.rates.map((rate) => rate.currencyCode).sort()).toEqual(['DOL', 'PES']);
     });
 
+    it('asks about the previous WORKING day, exactly as the domestic series does', async () => {
+        // Not a preference -- a measurement. The batch answers "the close of the day asked, or the latest
+        // before it", while FEParamGetCotizacion answers 602 and falls back to nothing. Asking the voucher's
+        // own day here would make the export series jump to that day's close the moment it is published
+        // while the domestic series still answered with the previous one: same request, two days, no
+        // diagnostic. Asking both about the previous working day makes them agree by construction.
+        await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-05', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay.mock.calls[0]?.[1]).toBe('20260804');
+    });
+
+    it('steps over a weekend rather than asking about one', async () => {
+        // Monday resolves to Friday in one read, which is what rateDayCandidates already guarantees for the
+        // domestic series. Sharing the rule means it holds here for free.
+        await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-03', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay.mock.calls[0]?.[1]).toBe('20260731');
+    });
+
+    it('walks back when a day priced nothing at all', async () => {
+        // A safety net rather than the normal path: the authority falls back on its own, so a second
+        // candidate is only reached when it has nothing. An empty answer means "walk", never "every code is
+        // unavailable" -- those two readings differ by a whole day of rates.
+        fexGetCurrencyRatesForDay
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([{monId: 'DOL', rate: 1508, rateDate: '20260803'}]);
+
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-05', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay).toHaveBeenCalledTimes(2);
+        expect(fexGetCurrencyRatesForDay.mock.calls[1]?.[1]).toBe('20260803');
+        // The day that ANSWERED is reported, never the day asked about.
+        expect(result.rates).toEqual([
+            expect.objectContaining({currencyCode: 'DOL', rateDate: '2026-08-03'}),
+        ]);
+    });
+
+    it('gives up after the bounded walk and reports NO_PUBLICATION', async () => {
+        fexGetCurrencyRatesForDay.mockResolvedValue([]);
+
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-05', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay).toHaveBeenCalledTimes(RATE_DAY_RULE.walkBackLimit + 1);
+        expect(result.unavailable).toEqual([{currencyCode: 'DOL', reason: 'NO_PUBLICATION'}]);
+        expect(result.rates).toEqual([]);
+    });
+
+    it('reports a priced code this service does not know as catalogue drift', async () => {
+        // The same signal the domestic whole-table sync gives, and stronger here: the input is what the day
+        // actually priced, so a code we deliberately refuse to quote turning up with a rate is the
+        // reconciliation ARCA_UNQUOTABLE_CODES says to watch for.
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        fexGetCurrencyRatesForDay.mockResolvedValue([
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            {monId: 'ZZZ', rate: 5, rateDate: '20260903'},
+        ]);
+
+        const result = await new ArcaProvider().currencyRates('testing', undefined, '2026-08-05', 'WSFEXv1');
+
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('ZZZ'));
+        expect(result.rates.map((rate) => rate.currencyCode)).toEqual(['PES', 'DOL']);
+        warn.mockRestore();
+    });
+
     it('says which service priced the batch, on both series', async () => {
         // A rate is only valid against the service that will band it. The two agree today, so this field is
         // what makes a future divergence diagnosable instead of silent -- key a cache by it.

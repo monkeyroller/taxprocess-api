@@ -46,6 +46,7 @@ import {
     vintageOf,
     withValidity,
     REFERENCE_MON_ID,
+    type CurrencyCodePartition,
     type RateValidity,
     type UnscopedRate,
 } from '../mapping/cotizacion/cotizacion.js';
@@ -678,25 +679,20 @@ export class ArcaProvider extends TaxEntityProvider {
             );
         }
 
-        const localRates: Array<UnscopedRate> = [];
-        const localUnavailable: Array<CurrencyRateUnavailableDto> = [];
+        const local = this.localAnswers(currencyCodes, referenceDay, route);
+        const localRates = local.rates;
+        const localUnavailable = local.unavailable;
         let toFetch: Array<string>;
         let auth: ArcaAuth;
         // One instance for the whole request: the catalogue read and every rate read share it.
         const service = commonInvoiceService(toArcaEnvironment(environment));
 
-        if (currencyCodes == null) {
+        if (local.requested === undefined) {
             // Whole table. Enumerating costs one call on the same ticket the rates then use.
             auth = await this.delegateAuth(environment, ServiceId.WSFEV1);
             const catalogue = await this.delegateCall(environment, ServiceId.WSFEV1, () =>
                 service.getCurrencyTypes(auth),
             );
-            // The one place the whole-table answer is not an intersection with what ARCA returned. The
-            // reference row is our own answer rather than a catalogue entry, and `toMonId` accepts `PES` on
-            // `/invoices/authorize` regardless, so the two endpoints still agree. Conditioning it would let a
-            // short catalogue read silently drop the currency most vouchers are in. The partition below skips
-            // it, so a catalogue that does list it still produces one row.
-            localRates.push(this.referenceRate(referenceDay));
 
             // Fetching only the codes this service can also bill in is what stops the two endpoints
             // disagreeing. Unfiltered, a sync would surface a rate for a code `/invoices/authorize` then
@@ -705,48 +701,9 @@ export class ArcaProvider extends TaxEntityProvider {
             const catalogued = partitionCurrencyCodes(catalogue.map((entry) => entry.id), route);
             toFetch = catalogued.toFetch;
 
-            // A catalogue entry we do not know is the only signal that `ARCA_CURRENCY_CODES` has fallen
-            // behind, and it arrives on the daily sync — so it is logged rather than dropped in silence.
-            //
-            // Split first, because the two halves want opposite actions and one of them fires on every
-            // single sync. `ARCA_UNQUOTABLE_CODES` are catalogue entries we left out on purpose, ARCA's own
-            // cotización service having rejected them with a `12000`; telling an operator to "add them to
-            // ARCA_CURRENCY_CODES" every night would be advice that undoes a deliberate measurement, and a
-            // warning nobody can act on is a warning everybody learns to skip. What is worth knowing is the
-            // day that stops being true, so the expected half is logged as the standing note it is.
-            const drifted = catalogued.unsupported.filter((code) => !ARCA_UNQUOTABLE_CODES.has(code));
-            const unquotable = catalogued.unsupported.filter((code) => ARCA_UNQUOTABLE_CODES.has(code));
-
-            if (drifted.length > 0) {
-                console.warn(
-                    `ARCA currency catalogue (${environment}) holds ${drifted.length} code(s) ` +
-                        `this service does not know: ${drifted.join(', ')}. Rates for them ` +
-                        `are not served and invoices naming them are refused — add them to ` +
-                        `ARCA_CURRENCY_CODES.`,
-                );
-            }
-            if (unquotable.length > 0) {
-                console.info(
-                    `ARCA currency catalogue (${environment}) still lists ${unquotable.join(', ')}, which ` +
-                        `FEParamGetCotizacion rejects with a 12000 — not served, by measurement. Re-check ` +
-                        `with \`PROBE_CURRENCY=${unquotable[0] ?? ''} pnpm probe:cotizacion-day\` and see ` +
-                        `ARCA_UNQUOTABLE_CODES.`,
-                );
-            }
+            ArcaProvider.logCatalogueDrift(environment, catalogued.unsupported);
         } else {
-            // An explicit list, split by the same rule the catalogue is. Only the meaning of the two
-            // non-fetchable buckets differs once a caller named them rather than the authority.
-            const requested = partitionCurrencyCodes(currencyCodes, route);
-            toFetch = requested.toFetch;
-
-            if (requested.namesReference) {
-                localRates.push(this.referenceRate(referenceDay));
-            }
-            // Caught locally rather than relayed as ARCA's `12000`, so an unknown code costs neither a ticket
-            // nor a round trip.
-            for (const code of requested.unsupported) {
-                localUnavailable.push({currencyCode: code, reason: 'UNKNOWN_CODE'});
-            }
+            toFetch = local.requested.toFetch;
 
             // Every code answered without the authority, so resolve no ticket at all: the peso-only till
             // must not be able to fail because ARCA was unreachable.
@@ -815,6 +772,91 @@ export class ArcaProvider extends TaxEntityProvider {
     }
 
     /** The reference currency's row: `1/1/1`, no authority call. */
+    /**
+     * The part of an answer this service produces without asking the authority: the reference row, and the
+     * codes it will not ask about.
+     *
+     * Shared by both series because the guarantee is: a request every code of which can be answered locally
+     * resolves no ticket at all, so a peso-only till cannot fail because ARCA was unreachable. It was
+     * written twice, and two copies of that guarantee is one too many.
+     *
+     * `requested` is `undefined` for a whole-table request, whose partition comes from the authority's own
+     * catalogue and so cannot be computed before the call.
+     */
+    private localAnswers(
+        currencyCodes: ReadonlyArray<string> | undefined,
+        referenceDay: string,
+        route: InvoiceRoute,
+    ): {
+        rates: Array<UnscopedRate>;
+        unavailable: Array<CurrencyRateUnavailableDto>;
+        requested: CurrencyCodePartition | undefined;
+    } {
+        const rates: Array<UnscopedRate> = [];
+        const unavailable: Array<CurrencyRateUnavailableDto> = [];
+        // `== null` rather than `=== undefined`: `@IsOptional()` skips a property's validators for `null`
+        // too, so an explicit `{"currencyCodes": null}` arrives meaning the omitted case.
+        const requested = currencyCodes == null ? undefined : partitionCurrencyCodes(currencyCodes, route);
+
+        // On a whole-table request the reference row is unconditional, and it is the one place the answer is
+        // not an intersection with what ARCA returned: the row is our own answer rather than a catalogue
+        // entry, and `toMonId` accepts `PES` on `/invoices/authorize` regardless, so the two endpoints still
+        // agree. Conditioning it would let a short catalogue read silently drop the currency most vouchers
+        // are in. Every partition skips the reference code, so a catalogue that does list it still produces
+        // exactly one row.
+        if (requested === undefined || requested.namesReference) {
+            rates.push(this.referenceRate(referenceDay));
+        }
+        // Caught locally rather than relayed as ARCA's `12000`, so an unknown code costs neither a ticket nor
+        // a round trip.
+        for (const code of requested?.unsupported ?? []) {
+            unavailable.push({currencyCode: code, reason: 'UNKNOWN_CODE'});
+        }
+
+        return {rates, unavailable, requested};
+    }
+
+    /**
+     * Reports catalogue codes this service does not know, which is the only signal that
+     * `ARCA_CURRENCY_CODES` has fallen behind — and it arrives on the daily sync, so it is logged rather
+     * than dropped in silence.
+     *
+     * Split first, because the two halves want opposite actions and one of them fires on every single sync.
+     * `ARCA_UNQUOTABLE_CODES` are catalogue entries we left out on purpose, ARCA's own cotización service
+     * having rejected them with a `12000`; telling an operator to "add them to ARCA_CURRENCY_CODES" every
+     * night would be advice that undoes a deliberate measurement, and a warning nobody can act on is a
+     * warning everybody learns to skip. What is worth knowing is the day that stops being true, so the
+     * expected half is logged as the standing note it is.
+     *
+     * Shared by both series. On the export side the input is the codes the day *priced*, which makes the
+     * second half stronger rather than weaker: a code we refuse to quote turning up with a rate is exactly
+     * the reconciliation the note says to watch for.
+     */
+    private static logCatalogueDrift(
+        environment: GenericEnvironment,
+        unsupported: ReadonlyArray<string>,
+    ): void {
+        const drifted = unsupported.filter((code) => !ARCA_UNQUOTABLE_CODES.has(code));
+        const unquotable = unsupported.filter((code) => ARCA_UNQUOTABLE_CODES.has(code));
+
+        if (drifted.length > 0) {
+            console.warn(
+                `ARCA currency catalogue (${environment}) holds ${String(drifted.length)} code(s) ` +
+                    `this service does not know: ${drifted.join(', ')}. Rates for them ` +
+                    `are not served and invoices naming them are refused — add them to ` +
+                    `ARCA_CURRENCY_CODES.`,
+            );
+        }
+        if (unquotable.length > 0) {
+            console.info(
+                `ARCA currency catalogue (${environment}) still lists ${unquotable.join(', ')}, which the ` +
+                    `cotización service rejects with a 12000 — not served, by measurement. Re-check with ` +
+                    `\`PROBE_CURRENCY=${unquotable[0] ?? ''} pnpm probe:cotizacion-day\` and see ` +
+                    `ARCA_UNQUOTABLE_CODES.`,
+            );
+        }
+    }
+
     private referenceRate(rateDate: string): UnscopedRate {
         return toUnscopedRate(REFERENCE_MON_ID, referenceBand(), rateDate);
     }
@@ -823,13 +865,24 @@ export class ArcaProvider extends TaxEntityProvider {
      * The export series' rates: `FEXGetPARAM_MON_CON_COTIZACION`, which prices the whole table for one day
      * in a single call.
      *
-     * Simpler than the WSFEv1 fan-out it replaces, and in three ways that are measurements rather than
-     * assumptions (production, 2026-09-04):
+     * A different *fetch*, not a different pipeline. The day rule, the local answers, the band, the vintage
+     * and the assembly are the domestic ones; only the call in the middle differs, because WSFEX prices the
+     * whole day in one request where WSFEv1 has to be asked per code.
      *
-     * - **No day walking.** Asked for a Saturday or a Sunday, ARCA answers with the previous business day's
-     *   close and says so in each row's `Fecha_ctz`. So `rateDayCandidates` is not needed here: the
-     *   authority resolves the day itself and reports which one it used, and the answer's own `rateDate` is
-     *   what the contract already tells callers to read.
+     * **It asks about the same day the domestic series asks about** — `rateDayCandidates`, the previous
+     * working day — and that is a measurement rather than a preference (production, 2026-09-04):
+     *
+     * - Handed an already-stepped-back day the batch does **not** step again: asked `20260903` it answered
+     *   *for* `20260903`. So the shared rule is safe to apply here.
+     * - The two services fall back **differently**, which is why sharing it matters. The batch answers "the
+     *   close of the day asked, or the latest before it"; `FEParamGetCotizacion` answers `602` and falls
+     *   back to nothing. Asked about the voucher's own day, the export series would therefore start
+     *   answering with *that day's* close the moment it is published, while the domestic series still
+     *   answered with the previous one — the same request, two days, no diagnostic. Asking both about the
+     *   previous working day makes them agree by construction, and it is the day rule 2053 names outright.
+     *
+     * What is still genuinely simpler here:
+     *
      * - **No straddling.** One call cannot land either side of a publication boundary, which is the risk the
      *   domestic fan-out is batched to mitigate rather than remove.
      * - **`unavailable` comes free.** The set returned is narrower than the catalogue — 27 of 49 on the day
@@ -850,21 +903,10 @@ export class ArcaProvider extends TaxEntityProvider {
         validity: RateValidity,
         refreshAfter: string,
     ): Promise<CurrencyRatesResult> {
-        const requested =
-            currencyCodes === undefined ? undefined : partitionCurrencyCodes(currencyCodes, EXPORT_ROUTE);
-
-        const rates: Array<UnscopedRate> = [];
-        const unavailable: Array<CurrencyRateUnavailableDto> = [];
-
-        // The peso is answered locally on both series, for the reason it always was: ARCA publishes no
-        // aduanera row for it, and a peso-only request must not be able to fail because ARCA was
-        // unreachable.
-        if (requested === undefined || requested.namesReference) {
-            rates.push(this.referenceRate(referenceDay));
-        }
-        for (const code of requested?.unsupported ?? []) {
-            unavailable.push({currencyCode: code, reason: 'UNKNOWN_CODE'});
-        }
+        const local = this.localAnswers(currencyCodes, referenceDay, EXPORT_ROUTE);
+        const rates = local.rates;
+        const unavailable = local.unavailable;
+        const requested = local.requested;
 
         // Every code answered without the authority, so resolve no ticket at all — the same guarantee the
         // domestic path makes: a peso-only till must not be able to fail because ARCA was unreachable.
@@ -882,25 +924,42 @@ export class ArcaProvider extends TaxEntityProvider {
 
         const auth = await this.delegateAuth(environment, ServiceId.WSFEXV1);
         const service = fexInvoiceService(toArcaEnvironment(environment));
-        const priced = await this.delegateCall(environment, ServiceId.WSFEXV1, () =>
-            service.getCurrencyRatesForDay(auth, arcaDay ?? answeredDay),
-        );
+
+        // The same candidates the fan-out walks, for the same reason: a row is labelled by the business day
+        // it closed on, so the voucher's own day is one publication too new. `Fecha_CTZ` is mandatory here
+        // (2054), so a request that named no day still resolves one rather than asking for "the latest".
+        //
+        // The walk is a safety net rather than the normal path: the batch already falls back to the most
+        // recent close at or before the day asked, so a second candidate is only reached when the authority
+        // has nothing at all. The domestic walk exists because `FEParamGetCotizacion` does not fall back.
+        const days = rateDayCandidates(arcaDay ?? answeredDay);
+        let priced: Awaited<ReturnType<typeof service.getCurrencyRatesForDay>> = [];
+        for (const day of days) {
+            priced = await this.delegateCall(environment, ServiceId.WSFEXV1, () =>
+                service.getCurrencyRatesForDay(auth, day),
+            );
+            if (priced.length > 0) {
+                break;
+            }
+        }
 
         const byCode = new Map(priced.map((row) => [normalizeCurrencyCode(row.monId), row]));
         const rateDays: Array<string> = [];
         // Whatever the caller asked for, or everything the day priced intersected with what this service
         // supports — the same intersection the domestic whole-table branch applies, so the two endpoints
         // still agree about which currencies can be invoiced in.
-        const wanted =
-            requested?.toFetch ?? partitionCurrencyCodes([...byCode.keys()], EXPORT_ROUTE).toFetch;
+        const catalogued = partitionCurrencyCodes([...byCode.keys()], EXPORT_ROUTE);
+        const wanted = requested?.toFetch ?? catalogued.toFetch;
+        // The same drift signal the domestic whole-table sync reports, and on this series the input is the
+        // codes the day actually priced — so a code we refuse to quote turning up here is worth knowing.
+        ArcaProvider.logCatalogueDrift(environment, catalogued.unsupported);
 
         for (const code of wanted) {
             const row = byCode.get(normalizeCurrencyCode(code));
-            // A rate of `0` or a missing one is unusable rather than a value: `Number('')` is a finite zero,
             // Absent from the day's answer is exactly the existing `NO_PUBLICATION`: the authority has no
-            // rate for this code, which for the export series also means an export voucher may not name it.
-            // A rate of `0` is unusable rather than a value -- `Number('')` is a finite zero, and a zero
-            // rate would divide a total to nothing.
+            // rate for this code, which on this series also means an export voucher may not name it. A rate
+            // of `0` is unusable rather than a value — `Number('')` is a finite zero, and a zero rate would
+            // divide a total to nothing.
             if (row?.rate === undefined || row.rate <= 0) {
                 unavailable.push({currencyCode: code, reason: 'NO_PUBLICATION'});
                 continue;

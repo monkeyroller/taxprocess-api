@@ -218,9 +218,13 @@ name — **27 of 49** on the day measured, which is ARCA's rule 1600. So `webSer
 "which currencies may an export voucher name today, and at what rate" in one call instead of a fan-out. A
 requested code the day did not price comes back `unavailable` with `reason: "NO_PUBLICATION"`.
 
-One more measurement worth having: asked for a **Saturday or Sunday**, the batch does not return empty — it
-returns the previous business day's close and says so in each row's `Fecha_ctz`. So the authority resolves
-the day itself, and `rateDate` on our answer still means what §3 says it means.
+**Both series now resolve the same day for the same request**, so `rateDate` does not depend on which one
+you asked. That took a second measurement to get right. The two fall back *differently* — WSFEX's batch
+answers "the close of the day asked, or the latest before it", while `FEParamGetCotizacion` answers `602`
+and falls back to nothing — so asking each about the day that seemed natural to it made them agree only
+until the current day's close was published, after which the same request would have answered two different
+days with nothing to say why. Both are now asked about the previous working day, which is what a row is
+labelled by, and which is the day ARCA's own rule 2053 names.
 
 ### 🟡 `common.fiscal_rate_service`, which 18.9 now depends on
 

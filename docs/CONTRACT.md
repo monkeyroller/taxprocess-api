@@ -720,9 +720,12 @@ question as well as the price, in **one call** rather than a fan-out. A requeste
 comes back under `unavailable` with `reason: "NO_PUBLICATION"`, which for that series also means an export
 voucher may not name it.
 
-One consequence worth knowing: asked for a **Saturday or Sunday**, the export series does not answer empty —
-the authority returns the previous working day's close and states which day that was, so `rateDate` still
-means what it means above.
+**Both series resolve the same day for the same request**, so `rateDate` does not depend on which one you
+asked. Each answers off the previous working day's close, because a row is labelled by the business day it
+closed on — a weekend or a feriado steps back further, and the day that answered is reported rather than the
+day you asked about. That is the same rule §3 already describes for the domestic series, and it is now
+shared rather than approximated: the two used to fall back differently, which would have made them disagree
+by a day as soon as the current day's close was published.
 `200 →`
 ```jsonc
 { "entityCode": "ARCA", "environment": "production",
