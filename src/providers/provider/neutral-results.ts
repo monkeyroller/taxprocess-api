@@ -5,6 +5,7 @@
  */
 import type {
     LastAuthorizedResultDto,
+    LastRequestIdResultDto,
     NeutralAuthorizationResultDto,
 } from '../../http/dto/authorization-result.dto.js';
 import type {AuthorityStatusResultDto} from '../../http/dto/authority-status-result.dto.js';
@@ -18,6 +19,9 @@ export type TaxAuthorizationResult = NeutralAuthorizationResultDto;
 
 /** The authority's last authorized voucher number for one (point of sale, document type). */
 export type LastAuthorizedResult = LastAuthorizedResultDto;
+
+/** The highest idempotency key the authority has seen for this issuer, where it keeps one. */
+export type LastRequestIdResult = LastRequestIdResultDto;
 
 /** Neutral taxpayer-registry lookup result (reuses the country-agnostic result DTO). */
 export type TaxpayerResult = TaxpayerResultDto;

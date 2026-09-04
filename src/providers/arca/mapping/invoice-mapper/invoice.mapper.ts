@@ -110,6 +110,9 @@ function argentinaMidnight(date: Date): number {
  * already-authorized voucher must still get its CAE back.
  */
 export function concept1DateWindowError(invoice: NeutralInvoice, now: Date): ArcaValidationError | undefined {
+    // An absent concept means an export voucher, which has no `Concepto` and its own date rule (WSFEX 1500,
+    // a ±5-day window plus a current-month ceiling for services). ARCA applies that one, so this returns
+    // nothing rather than guessing which of the two it should enforce.
     if (invoice.concept !== 1) {
         return undefined;
     }
@@ -198,12 +201,30 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
     // after idempotent recovery has had its chance.
     const issueDate = parseAuthorityDate(invoice.issueDate, 'issueDate');
 
+    // Both became optional on the neutral invoice when the export document joined it, since an export
+    // identifies its buyer by free text plus a destination and has no `Concepto` at all. On this path they
+    // are still required, and the DTO already refuses a payload carrying neither `receiver` nor `export` —
+    // so reaching either throw means an internal caller bypassed validation.
+    const {concept, receiver} = invoice;
+    if (concept === undefined) {
+        throw new ArcaValidationError(
+            'invoice names no concept — required for a domestic voucher',
+            'MISSING_CONCEPT',
+        );
+    }
+    if (receiver === undefined) {
+        throw new ArcaValidationError(
+            'invoice names no receiver — required for a domestic voucher',
+            'MISSING_RECEIVER',
+        );
+    }
+
     const request: CommonInvoiceRequest = {
         pointOfSaleNumber: invoice.pointOfSaleNumber,
         voucherType,
-        concept: invoice.concept,
-        docType: toDocTipo(invoice.receiver.identificationTypeCode),
-        docNumber: parseArcaId(invoice.receiver.identificationNumber, 'receiver.identificationNumber'),
+        concept,
+        docType: toDocTipo(receiver.identificationTypeCode),
+        docNumber: parseArcaId(receiver.identificationNumber, 'receiver.identificationNumber'),
         voucherNumberFrom: voucherNumber,
         voucherNumberTo: voucherNumber,
         voucherDate: formatArcaDate(issueDate),
@@ -213,7 +234,7 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
         exempt,
         vatAmount: totals.vat,
         tributesAmount: perceptions,
-        receiverIvaConditionId: toCondicionIvaReceptorId(invoice.receiver.fiscalConditionCode),
+        receiverIvaConditionId: toCondicionIvaReceptorId(receiver.fiscalConditionCode),
         currencyId: invoiceCurrencyId(invoice),
         currencyRate: invoice.currencyRate,
         vatSubtotals: totals.subtotals,
@@ -223,7 +244,7 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
     // Services (concept 2/3) require the FchServ*/FchVtoPago dates. `!= null` for the same reason
     // `invoiceCurrencyId` uses it: a `null` that slipped past validation would throw a `TypeError` off
     // `.trim()`, and an omitted element is the honest rendering of a field the caller left blank.
-    if (invoice.concept !== 1) {
+    if (concept !== 1) {
         if (invoice.serviceDateFrom != null) {
             request.serviceDateFrom = formatArcaDate(parseAuthorityDate(invoice.serviceDateFrom, 'serviceDateFrom'));
         }
