@@ -11,7 +11,12 @@ import type {
     CommonInvoiceRequest,
     CommonInvoiceResult,
 } from '../common-invoice.types.js';
-import {asArray, decimal, firstOf, integer, text} from '../../../../../xml-node/xml-node.js';
+import {decimal, firstOf, integer, text} from '../../../../../xml-node/xml-node.js';
+import {
+    catalogueRows,
+    WSFEV1_CURRENCIES,
+    WSFEV1_POINTS_OF_SALE,
+} from '../catalogue-rows/catalogue-rows.js';
 import {ArcaServiceError} from '../../../core/errors.js';
 import {
     authElement,
@@ -186,14 +191,16 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
         return {Auth: authElement(auth)};
     }
 
+    /**
+     * `catalogueRows` reads an absent element as `[]` — a CUIT with no registered points of sale — and drops
+     * a row with no usable `Nro`. The two columns this table carries beyond the shared shape come off `raw`.
+     */
     protected override parsePointsOfSale(result: Record<string, unknown>): Array<PointOfSaleInfo> {
-        // `asArray` reads an absent element as `[]` — a CUIT with no registered points of sale.
-        const node = (result.ResultGet as {PtoVenta?: unknown} | undefined)?.PtoVenta;
-        return asArray(node).map((p) => ({
-            number: toIntOrZero(p.Nro),
-            issuanceMode: cleanCode(p.EmisionTipo),
-            blocked: text(p.Bloqueado)?.toUpperCase() === 'S',
-            dischargeDate: cleanArcaDate(p.FchBaja),
+        return catalogueRows(result, WSFEV1_POINTS_OF_SALE).map((row) => ({
+            number: toIntOrZero(row.id),
+            issuanceMode: cleanCode(row.raw.EmisionTipo),
+            blocked: text(row.raw.Bloqueado)?.toUpperCase() === 'S',
+            dischargeDate: row.validTo,
         }));
     }
 
@@ -240,18 +247,16 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
 
     /**
      * A catalogue entry with no usable `Id` is dropped rather than surfaced as an empty code, which could
-     * only ever fail a later cotización call with a 12000.
+     * only ever fail a later cotización call with a 12000. That rule lives in `catalogueRows` now, so every
+     * table both services publish gets it.
      */
     protected override parseCurrencyTypes(result: Record<string, unknown>): Array<CurrencyTypeInfo> {
-        const node = (result.ResultGet as {Moneda?: unknown} | undefined)?.Moneda;
-        return asArray(node)
-            .map((m) => ({
-                id: text(m.Id) ?? '',
-                description: text(m.Desc) ?? '',
-                validFrom: cleanArcaDate(m.FchDesde) ?? '',
-                validTo: cleanArcaDate(m.FchHasta),
-            }))
-            .filter((m) => m.id !== '');
+        return catalogueRows(result, WSFEV1_CURRENCIES).map((row) => ({
+            id: row.id,
+            description: row.description,
+            validFrom: row.validFrom ?? '',
+            validTo: row.validTo,
+        }));
     }
 
     protected override buildQueryRequest(
