@@ -1,0 +1,311 @@
+import {describe, expect, it} from '@jest/globals';
+import {buildFexInvoiceRequest, toNeutralExportResult} from './export-invoice.mapper.js';
+import {ArcaValidationError} from '../../sdk/core/errors.js';
+import type {NeutralInvoice} from '../../../provider/neutral-invoice.js';
+import type {FexInvoiceResult} from '../../sdk/invoicing/export/fex-invoice.types.js';
+
+/** UC-2: an export of services, which is the shape with the fewest conditional fields switched on. */
+const SERVICES: NeutralInvoice = {
+    documentTypeCode: 19,
+    pointOfSaleNumber: 3,
+    voucherNumberFrom: 7,
+    voucherNumberTo: 7,
+    currencyCode: 'DOL',
+    currencyRate: 1508,
+    issueDate: '2026-09-04',
+    requestId: 41,
+    lines: [],
+    items: [
+        {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
+    ],
+    export: {
+        exportType: 'SERVICES',
+        destinationCode: '203',
+        clientName: 'Joao Da Silva',
+        clientAddress: 'Rua 76 km 34.5 Alagoas',
+        clientTaxId: 'PJ54482221-l',
+        language: 'es',
+        paymentTerms: 'Contado',
+        paymentDate: '2026-09-30',
+    },
+};
+
+/** UC-1: goods into the Área Aduanera Especial, in pesos. */
+const TIERRA_DEL_FUEGO: NeutralInvoice = {
+    ...SERVICES,
+    currencyCode: 'PES',
+    currencyRate: 1,
+    export: {
+        exportType: 'GOODS',
+        destinationCode: '250',
+        shippingPermitPresent: false,
+        clientName: 'Electrónica Fueguina SA',
+        clientAddress: 'Av. Perito Moreno 1234, Río Grande',
+        clientTaxId: '30711111118',
+        language: 'es',
+        incoterm: 'DAP',
+        paymentTerms: 'Cuenta corriente',
+    },
+};
+
+describe('buildFexInvoiceRequest', () => {
+    it('translates a services export', () => {
+        const request = buildFexInvoiceRequest(SERVICES, 7);
+
+        expect(request).toMatchObject({
+            requestId: 41,
+            voucherType: 19,
+            pointOfSaleNumber: 3,
+            voucherNumber: 7,
+            voucherDate: '20260904',
+            exportType: 2,
+            destinationCode: 203,
+            clientName: 'Joao Da Silva',
+            clientTaxId: 'PJ54482221-l',
+            currencyId: 'DOL',
+            currencyRate: 1508,
+            language: 1,
+            paymentTerms: 'Contado',
+            paymentDate: '20260930',
+            totalAmount: 500,
+        });
+    });
+
+    it('translates the Tierra del Fuego case, whose destination ISO cannot name', () => {
+        const request = buildFexInvoiceRequest(TIERRA_DEL_FUEGO, 7);
+
+        expect(request.destinationCode).toBe(250);
+        expect(request.currencyId).toBe('PES');
+        expect(request.exportType).toBe(1);
+        expect(request.incoterm).toBe('DAP');
+    });
+
+    it('derives the total from the items, so the two cannot disagree', () => {
+        // ARCA compares them (1610) and names neither side when they differ, so the only safe total is one
+        // this service did not have a second chance to get wrong.
+        const request = buildFexInvoiceRequest(
+            {
+                ...SERVICES,
+                items: [
+                    {description: 'a', unitOfMeasureCode: 7, totalAmount: 100.01},
+                    {description: 'b', unitOfMeasureCode: 7, totalAmount: 50.1},
+                ],
+            },
+            7,
+        );
+
+        expect(request.totalAmount).toBe(150.11);
+    });
+
+    it('rounds the derived total to two decimals, absorbing float drift', () => {
+        // 0.1 + 0.2 is 0.30000000000000004 unrounded, which ARCA rejects on precision alone.
+        const request = buildFexInvoiceRequest(
+            {
+                ...SERVICES,
+                items: [
+                    {description: 'a', unitOfMeasureCode: 7, totalAmount: 0.1},
+                    {description: 'b', unitOfMeasureCode: 7, totalAmount: 0.2},
+                ],
+            },
+            7,
+        );
+
+        expect(request.totalAmount).toBe(0.3);
+    });
+
+    describe('Permiso_existente, which ARCA wants only in one combination', () => {
+        it('sends S/N for a goods Factura', () => {
+            expect(buildFexInvoiceRequest(TIERRA_DEL_FUEGO, 7).permitPresent).toBe('N');
+            expect(
+                buildFexInvoiceRequest(
+                    {...TIERRA_DEL_FUEGO, export: {...TIERRA_DEL_FUEGO.export!, shippingPermitPresent: true}},
+                    7,
+                ).permitPresent,
+            ).toBe('S');
+        });
+
+        it('omits it for a services export, where informing it is a rejection (1730)', () => {
+            expect(buildFexInvoiceRequest(SERVICES, 7).permitPresent).toBeUndefined();
+        });
+
+        it('omits it on a nota, which never carries it', () => {
+            const nota = {...TIERRA_DEL_FUEGO, documentTypeCode: 21};
+            expect(buildFexInvoiceRequest(nota, 7).permitPresent).toBeUndefined();
+        });
+    });
+
+    describe('CanMisMonExt, which must not be sent in two cases (1605)', () => {
+        it('passes the flag through on a foreign-currency Factura', () => {
+            const request = buildFexInvoiceRequest(
+                {...SERVICES, export: {...SERVICES.export!, settledInInvoiceCurrency: true}},
+                7,
+            );
+            expect(request.settledInInvoiceCurrency).toBe('S');
+        });
+
+        it('drops it on a peso Factura even when the caller sent it', () => {
+            // The one place this mapper overrides what it was told: sending the field at all is the
+            // rejection, so relaying it would turn a caller slip into an ARCA error.
+            const request = buildFexInvoiceRequest(
+                {
+                    ...TIERRA_DEL_FUEGO,
+                    export: {...TIERRA_DEL_FUEGO.export!, settledInInvoiceCurrency: true},
+                },
+                7,
+            );
+            expect(request.settledInInvoiceCurrency).toBeUndefined();
+        });
+
+        it('drops it on a nota', () => {
+            const request = buildFexInvoiceRequest(
+                {
+                    ...SERVICES,
+                    documentTypeCode: 20,
+                    export: {...SERVICES.export!, settledInInvoiceCurrency: true},
+                },
+                7,
+            );
+            expect(request.settledInInvoiceCurrency).toBeUndefined();
+        });
+    });
+
+    it('drops Fecha_pago on a nota, where informing it is a rejection (1674)', () => {
+        const request = buildFexInvoiceRequest({...SERVICES, documentTypeCode: 21}, 7);
+        expect(request.paymentDate).toBeUndefined();
+    });
+
+    it('maps associated vouchers and their issuer', () => {
+        const request = buildFexInvoiceRequest(
+            {
+                ...SERVICES,
+                documentTypeCode: 21,
+                associatedVouchers: [
+                    {documentTypeCode: 19, pointOfSaleNumber: 3, number: 6, issuerTaxId: '30711111118'},
+                ],
+            },
+            8,
+        );
+
+        expect(request.associatedVouchers).toEqual([
+            {voucherType: 19, pointOfSaleNumber: 3, number: 6, cuit: 30711111118},
+        ]);
+    });
+
+    it('maps shipping permits through the same destination catalogue', () => {
+        const request = buildFexInvoiceRequest(
+            {
+                ...TIERRA_DEL_FUEGO,
+                export: {
+                    ...TIERRA_DEL_FUEGO.export!,
+                    shippingPermitPresent: true,
+                    shippingPermits: [{permitId: '09052EC01006154G', destinationCode: '203'}],
+                },
+            },
+            7,
+        );
+
+        expect(request.permits).toEqual([{permitId: '09052EC01006154G', destinationCode: 203}]);
+    });
+
+    describe('what it refuses rather than guessing', () => {
+        it('refuses a voucher with no export block', () => {
+            const {export: _dropped, ...rest} = SERVICES;
+            expect(() => buildFexInvoiceRequest(rest, 7)).toThrow(ArcaValidationError);
+        });
+
+        it('refuses a voucher with no requestId, which it cannot invent', () => {
+            // This service has no database to allocate one from, and a fabricated value that collides
+            // replays a stored voucher and reports it as a success.
+            const {requestId: _dropped, ...rest} = SERVICES;
+            expect(() => buildFexInvoiceRequest(rest, 7)).toThrow(/requestId/);
+        });
+
+        it('refuses a voucher with no items', () => {
+            expect(() => buildFexInvoiceRequest({...SERVICES, items: []}, 7)).toThrow(/items/);
+        });
+
+        it('refuses a currencyIso-only voucher rather than reaching the deprecated bridge', () => {
+            const {currencyCode: _dropped, ...rest} = SERVICES;
+            expect(() => buildFexInvoiceRequest({...rest, currencyIso: 'USD'}, 7)).toThrow(/currencyCode/);
+        });
+
+        it('refuses an unknown destination, incoterm or unit with UNKNOWN_CODE', () => {
+            expect(() =>
+                buildFexInvoiceRequest({...SERVICES, export: {...SERVICES.export!, destinationCode: '999'}}, 7),
+            ).toThrow(ArcaValidationError);
+            expect(() =>
+                buildFexInvoiceRequest({...SERVICES, export: {...SERVICES.export!, incoterm: 'DDU'}}, 7),
+            ).toThrow(ArcaValidationError);
+            expect(() =>
+                buildFexInvoiceRequest(
+                    {...SERVICES, items: [{description: 'a', unitOfMeasureCode: 12, totalAmount: 1}]},
+                    7,
+                ),
+            ).toThrow(ArcaValidationError);
+        });
+
+        it('refuses a country tax id the authority does not publish', () => {
+            expect(() =>
+                buildFexInvoiceRequest(
+                    {...SERVICES, export: {...SERVICES.export!, clientCountryTaxId: '20111111112'}},
+                    7,
+                ),
+            ).toThrow(ArcaValidationError);
+        });
+    });
+});
+
+describe('toNeutralExportResult', () => {
+    const authorized: FexInvoiceResult = {
+        result: 'A',
+        cae: '69000000000001',
+        caeExpiration: '20261015',
+        voucherNumber: 7,
+        voucherDate: '20260904',
+        requestId: 41,
+        reprocessed: false,
+        observations: [],
+        raw: {},
+    };
+
+    it('maps an authorized voucher', () => {
+        expect(toNeutralExportResult(authorized)).toEqual({
+            authorizationCode: '69000000000001',
+            expiration: new Date(Date.UTC(2026, 9, 15, 3, 0, 0)).toISOString(),
+            authorizedNumber: 7,
+            status: 'AUTHORIZED',
+            observations: [],
+            reprocessed: false,
+            providerMetadata: {},
+        });
+    });
+
+    it('carries reprocessed through, which is the only way a caller can spot a replay', () => {
+        expect(toNeutralExportResult({...authorized, reprocessed: true}).reprocessed).toBe(true);
+    });
+
+    it('emits no QR, RG 4892 being specified for the domestic voucher', () => {
+        expect(toNeutralExportResult(authorized)).not.toHaveProperty('qr');
+    });
+
+    it('surfaces an unreadable expiration verbatim rather than throwing over a granted CAE', () => {
+        expect(toNeutralExportResult({...authorized, caeExpiration: '20261345'}).expiration).toBe('20261345');
+    });
+
+    it('maps a rejection', () => {
+        const rejected = toNeutralExportResult({
+            ...authorized,
+            result: 'R',
+            cae: undefined,
+            caeExpiration: undefined,
+            observations: [{code: '', message: '1601 - Moneda_ctz debe ser 1'}],
+        });
+
+        expect(rejected).toMatchObject({
+            authorizationCode: '',
+            expiration: '',
+            status: 'REJECTED',
+            observations: [{code: '', message: '1601 - Moneda_ctz debe ser 1'}],
+        });
+    });
+});
