@@ -309,3 +309,135 @@ describe('toNeutralExportResult', () => {
         });
     });
 });
+
+describe('the rules that need ARCA\'s own codes', () => {
+    /** Every one of these is a 400 naming the field instead of a 502 relaying ARCA's Spanish rejection. */
+    const codeOf = (build: () => unknown): string | undefined => {
+        try {
+            build();
+        } catch (err) {
+            expect(err).toBeInstanceOf(ArcaValidationError);
+            return (err as ArcaValidationError).code;
+        }
+        throw new Error('expected a validation error');
+    };
+
+    it('requires the rate to be exactly 1 in pesos (1601)', () => {
+        // Which code is the local currency is ARCA's, which is why the neutral DTO cannot state this.
+        expect(codeOf(() => buildFexInvoiceRequest({...TIERRA_DEL_FUEGO, currencyRate: 1508}, 7))).toBe(
+            'CURRENCY_RATE_MISMATCH',
+        );
+        expect(() => buildFexInvoiceRequest(TIERRA_DEL_FUEGO, 7)).not.toThrow();
+    });
+
+    it('leaves a foreign rate alone, band and all', () => {
+        // The band is ARCA's -- it needs a reference this service did not read. Only the peso is decidable.
+        expect(() => buildFexInvoiceRequest({...SERVICES, currencyRate: 0.01}, 7)).not.toThrow();
+    });
+
+    it('requires an incoterm on an invoice for goods, and only there (1640)', () => {
+        const noIncoterm = {
+            ...TIERRA_DEL_FUEGO,
+            export: {...TIERRA_DEL_FUEGO.export!, incoterm: undefined},
+        };
+        expect(codeOf(() => buildFexInvoiceRequest(noIncoterm, 7))).toBe('MISSING_INCOTERM');
+        // A nota for the same goods needs none.
+        expect(() =>
+            buildFexInvoiceRequest({...noIncoterm, documentTypeCode: 21}, 7),
+        ).not.toThrow();
+        // Neither does a services invoice.
+        expect(() => buildFexInvoiceRequest(SERVICES, 7)).not.toThrow();
+    });
+
+    it('requires a payment date on an invoice for services or other (1673)', () => {
+        const unpaid = {...SERVICES, export: {...SERVICES.export!, paymentDate: undefined}};
+        expect(codeOf(() => buildFexInvoiceRequest(unpaid, 7))).toBe('MISSING_PAYMENT_DATE');
+        expect(
+            codeOf(() =>
+                buildFexInvoiceRequest(
+                    {...unpaid, export: {...unpaid.export!, exportType: 'OTHER'}},
+                    7,
+                ),
+            ),
+        ).toBe('MISSING_PAYMENT_DATE');
+        // Goods are dated by the shipment instead, and a nota is forbidden from carrying one at all.
+        expect(() => buildFexInvoiceRequest({...unpaid, documentTypeCode: 20}, 7)).not.toThrow();
+    });
+
+    it('refuses a shipping permit on a nota rather than dropping it (1720/1730)', () => {
+        // The bug this closes: the DTO short-circuits on GOODS, so a GOODS *nota* carrying permits used to
+        // reach the wire with Permisos sent and Permiso_existente omitted -- the exact pair ARCA rejects.
+        const notaWithPermit: NeutralInvoice = {
+            ...TIERRA_DEL_FUEGO,
+            documentTypeCode: 21,
+            export: {
+                ...TIERRA_DEL_FUEGO.export!,
+                shippingPermits: [{permitId: '99999AAXX999999A', destinationCode: '250'}],
+            },
+        };
+        expect(codeOf(() => buildFexInvoiceRequest(notaWithPermit, 7))).toBe(
+            'SHIPPING_PERMIT_NOT_ALLOWED',
+        );
+        // Refused, not silently discarded: authorizing a different document than the caller described
+        // would be worse than the rejection.
+        expect(() =>
+            buildFexInvoiceRequest({...notaWithPermit, documentTypeCode: 19}, 7),
+        ).not.toThrow();
+    });
+
+    it('holds a mode line to zero quantity, price and discount (1775)', () => {
+        const withMode = (overrides: Record<string, unknown>): NeutralInvoice => ({
+            ...SERVICES,
+            items: [
+                {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
+                {description: 'Bonificación', unitOfMeasureCode: 99, totalAmount: -50, ...overrides},
+            ],
+        });
+        expect(codeOf(() => buildFexInvoiceRequest(withMode({quantity: 1}), 7))).toBe(
+            'INVALID_ITEM_AMOUNT',
+        );
+        expect(codeOf(() => buildFexInvoiceRequest(withMode({unitPrice: 50}), 7))).toBe(
+            'INVALID_ITEM_AMOUNT',
+        );
+        expect(codeOf(() => buildFexInvoiceRequest(withMode({discount: 5}), 7))).toBe(
+            'INVALID_ITEM_AMOUNT',
+        );
+        // An explicit zero is what the rule asks for, not an omission -- both pass.
+        expect(() => buildFexInvoiceRequest(withMode({quantity: 0, unitPrice: 0}), 7)).not.toThrow();
+        expect(() => buildFexInvoiceRequest(withMode({}), 7)).not.toThrow();
+    });
+
+    it('requires a discount line to subtract, and lets a deposit go either way (1815)', () => {
+        const line = (unitOfMeasureCode: number, totalAmount: number): NeutralInvoice => ({
+            ...SERVICES,
+            items: [
+                {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
+                {description: 'Ajuste', unitOfMeasureCode, totalAmount},
+            ],
+        });
+        expect(codeOf(() => buildFexInvoiceRequest(line(99, 50), 7))).toBe('INVALID_ITEM_AMOUNT');
+        expect(codeOf(() => buildFexInvoiceRequest(line(99, 0), 7))).toBe('INVALID_ITEM_AMOUNT');
+        expect(() => buildFexInvoiceRequest(line(99, -50), 7)).not.toThrow();
+        // 97 is a seña/anticipo, which ARCA leaves unrestricted.
+        expect(() => buildFexInvoiceRequest(line(97, 50), 7)).not.toThrow();
+        expect(() => buildFexInvoiceRequest(line(97, -50), 7)).not.toThrow();
+    });
+
+    it('says nothing about an ordinary unit, including the escape hatch', () => {
+        // 98 "otras unidades" looks like a mode and is not one -- it is an ordinary unit with no extra rule.
+        const ordinary: NeutralInvoice = {
+            ...SERVICES,
+            items: [{description: 'Servicio', quantity: 3, unitOfMeasureCode: 98, unitPrice: 100, totalAmount: 300}],
+        };
+        expect(() => buildFexInvoiceRequest(ordinary, 7)).not.toThrow();
+    });
+
+    it('still leaves the authority its own rules', () => {
+        // 1620 (forma de pago) and the 2040-2055 nota cross-checks need ARCA's state, not its codes, so a
+        // voucher missing them is built and sent rather than refused here.
+        const noTerms = {...SERVICES, export: {...SERVICES.export!, paymentTerms: undefined}};
+        expect(() => buildFexInvoiceRequest(noTerms, 7)).not.toThrow();
+        const nota = {...SERVICES, documentTypeCode: 21, associatedVouchers: undefined};
+        expect(() => buildFexInvoiceRequest(nota, 7)).not.toThrow();
+    });
+});

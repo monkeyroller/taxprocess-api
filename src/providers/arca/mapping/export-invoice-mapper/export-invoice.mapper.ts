@@ -12,10 +12,18 @@ import {toCbteTipo} from '../code-maps/code-maps.js';
 import {toMonId} from '../currency-codes/currency-codes.js';
 import {toCountryTaxId, toDstCmp} from '../destination-codes/destination-codes.js';
 import {toIdiomaCbte, toIncoterms, toTipoExpo} from '../export-codes/export-codes.js';
-import {toProUmed} from '../unit-of-measure-codes/unit-of-measure-codes.js';
+import {
+    UNIT_DISCOUNT,
+    isUnitModeCode,
+    toProUmed,
+} from '../unit-of-measure-codes/unit-of-measure-codes.js';
 import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
-import type {NeutralInvoice, NeutralInvoiceExport} from '../../../provider/neutral-invoice.js';
+import type {
+    NeutralInvoice,
+    NeutralInvoiceExport,
+    NeutralInvoiceItem,
+} from '../../../provider/neutral-invoice.js';
 import type {
     NeutralAuthorizationResultDto,
     NeutralAuthorizationStatus,
@@ -28,13 +36,25 @@ import type {
  * and nothing else, so one function carrying both would be a sequence of mutually exclusive `if`s over a
  * type where every field is optional.
  *
- * The conditional-mandatory rules are the DTO's, not this file's. Everything here is a translation, so a
- * field the caller omitted is omitted on the wire — which is itself what several of ARCA's rules require,
- * since an empty element is a value it validates.
+ * **This file owns the conditional rules that need ARCA's own codes**, which is the half of the boundary
+ * `invoice-export.dto.ts` cannot enforce: which code is the peso, which voucher type is a Factura and which
+ * are notas, and which unit ids mean "discount line" rather than a unit. The DTO owns the other half —
+ * shape, membership, and the rules decidable in the neutral vocabulary alone. Neither half is left to ARCA's
+ * Spanish rejection when it is decidable here, because a `400` naming the field is worth more than a relayed
+ * `502`.
+ *
+ * What stays the authority's is what needs its *state* rather than its codes: the rate band, and the
+ * cross-checks a nota's referenced voucher must satisfy (2040-2055). Those arrive as its own rejection.
+ *
+ * Two rules are enforced by *omission* rather than by a check, because for them an empty element is itself
+ * the rejection — a field the caller omitted is omitted on the wire, never sent blank.
  */
 
 /** The document types this mapper builds — a Factura E and its notas. */
 const INVOICE = 19;
+
+/** ARCA's code for the peso, which several of its rules are stated in terms of. */
+const LOCAL_CURRENCY = 'PES';
 
 function exportBlock(invoice: NeutralInvoice): NeutralInvoiceExport {
     if (invoice.export === undefined) {
@@ -70,20 +90,83 @@ function toFexItems(invoice: NeutralInvoice): Array<FexItem> {
             'MISSING_ITEMS',
         );
     }
-    return items.map((item) => ({
-        code: item.code,
-        description: item.description,
-        quantity: item.quantity,
-        unitOfMeasure: toProUmed(item.unitOfMeasureCode),
-        unitPrice: item.unitPrice,
-        discount: item.discount,
-        totalAmount: item.totalAmount,
-    }));
+    return items.map((item, index) => {
+        assertItemAmounts(item, index);
+        return {
+            code: item.code,
+            description: item.description,
+            quantity: item.quantity,
+            unitOfMeasure: toProUmed(item.unitOfMeasureCode),
+            unitPrice: item.unitPrice,
+            discount: item.discount,
+            totalAmount: item.totalAmount,
+        };
+    });
 }
 
-function toFexPermits(block: NeutralInvoiceExport): Array<FexShippingPermit> | undefined {
+/**
+ * The amount rules that follow from an item's unit id being a *mode* rather than a unit (1775/1815).
+ *
+ * Needs ARCA's own numbering to state at all — `99` is bonificación, `97` seña/anticipo, `0` no unit — which
+ * is why it lives here rather than in the DTO, where those ids would be foreign vocabulary. Contract §5
+ * publishes the three, so a caller can read the rule it is being held to.
+ */
+function assertItemAmounts(item: NeutralInvoiceItem, index: number): void {
+    if (!isUnitModeCode(item.unitOfMeasureCode)) {
+        return;
+    }
+    const at = 'items[' + String(index) + ']';
+    // A mode line describes the kind of line, so there is no quantity to price (1775). An explicit zero
+    // passes: the caller sent the field and set it to nothing, which is what the rule asks for.
+    const amounts = [
+        ['quantity', item.quantity],
+        ['unitPrice', item.unitPrice],
+        ['discount', item.discount],
+    ] as const;
+    for (const [field, value] of amounts) {
+        if (value !== undefined && value !== 0) {
+            throw new ArcaValidationError(
+                at +
+                    '.' +
+                    field +
+                    ' must be zero or absent on a line whose unitOfMeasureCode is a mode rather than a ' +
+                    'unit (' +
+                    String(item.unitOfMeasureCode) +
+                    ')',
+                'INVALID_ITEM_AMOUNT',
+            );
+        }
+    }
+    // A discount subtracts, so its total is negative. A deposit is unrestricted and may be either (1815).
+    if (item.unitOfMeasureCode === UNIT_DISCOUNT && item.totalAmount >= 0) {
+        throw new ArcaValidationError(
+            at + '.totalAmount must be negative on a discount line (unitOfMeasureCode ' +
+                String(UNIT_DISCOUNT) + ')',
+            'INVALID_ITEM_AMOUNT',
+        );
+    }
+}
+
+/**
+ * `Permisos`, which only a Factura may carry (1720/1730).
+ *
+ * The DTO already refuses permits on a services or other export, which it can decide in its own vocabulary.
+ * The case left over needs ARCA's numbering — a *nota* takes no permit whatever it covers — so it is caught
+ * here. Refused rather than dropped: silently discarding a despacho the caller named would authorize a
+ * different document than the one it asked for.
+ */
+function toFexPermits(
+    block: NeutralInvoiceExport,
+    voucherType: number,
+): Array<FexShippingPermit> | undefined {
     if (block.shippingPermits === undefined || block.shippingPermits.length === 0) {
         return undefined;
+    }
+    if (voucherType !== INVOICE) {
+        throw new ArcaValidationError(
+            'export.shippingPermits belongs to an invoice, not to a debit or credit note',
+            'SHIPPING_PERMIT_NOT_ALLOWED',
+        );
     }
     return block.shippingPermits.map((permit) => ({
         permitId: permit.permitId,
@@ -130,6 +213,48 @@ function permitPresence(
 }
 
 /**
+ * The rate is exactly `1` when the voucher is in the local currency (1601).
+ *
+ * Which code *is* the local currency is ARCA's own — `PES` — so the rule cannot be stated in the neutral
+ * layer without putting that code there.
+ */
+function assertLocalCurrencyRate(currencyId: string, currencyRate: number): void {
+    if (currencyId === LOCAL_CURRENCY && currencyRate !== 1) {
+        throw new ArcaValidationError(
+            'currencyRate must be exactly 1 for currencyCode "' + LOCAL_CURRENCY + '", not ' +
+                String(currencyRate),
+            'CURRENCY_RATE_MISMATCH',
+        );
+    }
+}
+
+/**
+ * The two fields a Factura requires depending on what it exports (1640, 1673).
+ *
+ * Both hinge on the voucher type being a Factura rather than a nota, which is ARCA's numbering. `GOODS`
+ * moves under an incoterm; `SERVICES` and `OTHER` ship nothing and are dated instead by when they are paid.
+ * A nota requires neither — and `paymentDate` on one is forbidden outright, which is handled where it is
+ * built.
+ */
+function assertRequiredForInvoice(block: NeutralInvoiceExport, voucherType: number): void {
+    if (voucherType !== INVOICE) {
+        return;
+    }
+    if (block.exportType === 'GOODS' && block.incoterm === undefined) {
+        throw new ArcaValidationError(
+            'export.incoterm is required on an invoice for a GOODS export',
+            'MISSING_INCOTERM',
+        );
+    }
+    if (block.exportType !== 'GOODS' && block.paymentDate === undefined) {
+        throw new ArcaValidationError(
+            'export.paymentDate is required on an invoice for a ' + block.exportType + ' export',
+            'MISSING_PAYMENT_DATE',
+        );
+    }
+}
+
+/**
  * `CanMisMonExt`, which must **not** be sent on a peso Factura or on any nota (1605).
  *
  * So the caller's flag is dropped in exactly those cases rather than passed through — the one place this
@@ -169,6 +294,8 @@ export function buildFexInvoiceRequest(
         );
     }
     const currencyId = toMonId(invoice.currencyCode);
+    assertLocalCurrencyRate(currencyId, invoice.currencyRate);
+    assertRequiredForInvoice(block, voucherType);
 
     const request: FexInvoiceRequest = {
         requestId: requestIdOf(invoice),
@@ -178,7 +305,7 @@ export function buildFexInvoiceRequest(
         voucherDate: formatArcaDate(parseAuthorityDate(invoice.issueDate, 'issueDate')),
         exportType: toTipoExpo(block.exportType),
         permitPresent: permitPresence(block, voucherType),
-        permits: toFexPermits(block),
+        permits: toFexPermits(block, voucherType),
         destinationCode: toDstCmp(block.destinationCode),
         clientName: block.clientName,
         clientCountryTaxId:

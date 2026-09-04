@@ -30,11 +30,12 @@ import {IsAuthorityDate} from '../authority-date/authority-date.js';
  * - "the rate must be exactly 1 in the local currency" needs to know which code is local (AR: `PES`);
  * - "a discount line must carry a negative total" needs to know which unit codes mean discount (AR: `97`,
  *   `99`);
- * - "a nota must reference an invoice" needs to know which document types are notas (AR: `20`, `21`);
- * - "an incoterm is mandatory for a goods invoice" needs to know which type code is a Factura (AR: `19`).
+ * - "an incoterm is mandatory for a goods invoice" needs to know which type code is a Factura (AR: `19`);
+ * - "a nota must reference an invoice" needs to know which document types are notas (AR: `20`, `21`).
  *
- * Those are enforced where the entity's codes are already known — in the provider's mapper, which raises the
- * same `400` — or left to the authority, which owns them. Encoding them here would put ARCA's numbers in the
+ * The first three are enforced in `export-invoice.mapper.ts`, where the entity's codes are already known
+ * and which raises the same `400`. The fourth is the authority's: the cross-checks need the referenced
+ * voucher, which this service does not hold. Encoding any of them here would put ARCA's numbers in the
  * neutral HTTP layer to save one round trip, and the next entity would inherit them.
  */
 
@@ -216,8 +217,9 @@ export class InvoiceExportDto {
     /**
      * When payment is due (AR: `Fecha_pago`).
      *
-     * Required by AR for a services or other export invoice and forbidden on a nota — both conditions the
-     * provider applies, needing the entity's own type codes to state them.
+     * Required by AR for a services or other export invoice, and forbidden on a nota. Both conditions are
+     * the provider's, needing the entity's own type codes to state them: the required half is a `400`, and
+     * the forbidden half is a silent drop, because there an empty element is itself the rejection.
      */
     @IsOptional()
     @IsAuthorityDate()

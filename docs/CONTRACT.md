@@ -413,12 +413,28 @@ The response is the ordinary authorization result, plus one field:
 > - **goods shipped into the Área Aduanera Especial** → an **export**: `documentTypeCode: 19`,
 >   `export.destinationCode: "250"`, in pesos, with the buyer's real CUIT in `export.clientTaxId`.
 
-Several of the authority's own conditional rules are enforced by this service and reported as
-`400 ARCA_VALIDATION` rather than relayed as a `502`: an unknown destination, unit, incoterm or per-country
-tax id (`details.code: "UNKNOWN_CODE"`), a missing `requestId`, `items` or `currencyCode`, and a
-`webService` that contradicts `documentTypeCode`. The rest — the rate band, whether an incoterm is mandatory
-for this combination, the cross-checks a nota's referenced voucher must satisfy — are the authority's and
-arrive as its own rejection.
+Many of the authority's own conditional rules are enforced by this service and reported as
+`400 ARCA_VALIDATION` rather than relayed as a `502` in Spanish. The `details.code` names which:
+
+| what is refused | `details.code` |
+| --- | --- |
+| an unknown destination, unit, incoterm or per-country tax id | `UNKNOWN_CODE` |
+| no `requestId`, `items`, `currencyCode` or `export` block | `MISSING_REQUEST_ID`, `MISSING_ITEMS`, `UNMAPPED_CURRENCY`, `MISSING_EXPORT` |
+| a `webService` contradicting `documentTypeCode` | `WEB_SERVICE_DOCUMENT_TYPE_MISMATCH` |
+| neither `clientTaxId` nor `clientCountryTaxId` | a `400` from the request body itself |
+| `currencyRate` other than exactly `1` on a peso voucher | `CURRENCY_RATE_MISMATCH` |
+| no `incoterm` on an invoice for `GOODS` | `MISSING_INCOTERM` |
+| no `paymentDate` on an invoice for `SERVICES`/`OTHER` | `MISSING_PAYMENT_DATE` |
+| `shippingPermits` on a debit or credit note | `SHIPPING_PERMIT_NOT_ALLOWED` |
+| an item whose `unitOfMeasureCode` is a mode carrying a quantity, price or discount; or a discount line whose total is not negative | `INVALID_ITEM_AMOUNT` |
+
+Three more are enforced by **omitting** the field rather than by refusing the request, because for them an
+empty element is itself what the authority rejects: `settledInInvoiceCurrency` on a peso invoice or any
+nota, `paymentDate` on a nota, and the shipment flag on anything but a goods invoice. The voucher total is
+derived from `items` for the same reason — there is no field for it to disagree with.
+
+What stays the authority's is what needs *its* state rather than its codes: the rate band, and the
+cross-checks a nota's referenced voucher must satisfy. Those arrive as its own rejection.
 
 ### `POST /api/invoices/last-request-id`
 

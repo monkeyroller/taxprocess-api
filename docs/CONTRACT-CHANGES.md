@@ -37,6 +37,7 @@ blocking, and every existing call behaves exactly as before.
 | 18.11 | **`unitOfMeasureCode`** — a sixth canonical fiscal code (ARCA `Pro_umed`), 49 values, three of which are **not units** | **Seed it**, and read the note on `0`/`97`/`99` |
 | 18.12 | `exportType`, `language`, `incoterm` — neutral, closed sets | **None** beyond using them |
 | 18.14 | **`clientCountryTaxId`** — a seventh canonical fiscal code (ARCA `Cuit_pais_cliente`), 917 values, each with a country and an entity type | **Seed it.** It is how a buyer with no Argentine id is named |
+| 18.15 | Five of the authority's conditional rules now answer `400` with a named `details.code` instead of a Spanish `502` | **None** — a body that was valid stays valid. Read the codes if you surface errors |
 | 18.13 | `WSMTXCA` answers `501 NOT_IMPLEMENTED` | Do not send it yet. It is in §7's enum, so you *can* — it will not silently fall back |
 
 ### 18.1 — the request id, and why it is the one blocking ask
@@ -103,6 +104,32 @@ They look interchangeable and are not. `concept` is 1 goods / 2 services / **3 b
 `GOODS` / `SERVICES` / **`OTHER`**. Each has a member the other lacks — ARCA's own `Tipo_expo` numbering
 skips 3 — so unifying them would make two unrelated vocabularies assignable right up until one gained a
 member. Sending both is a `400` rather than a resolution.
+
+### 18.15 — five rules that used to reach ARCA now answer as a `400`
+
+Each of these was already a rejection; the only thing that changes is where it comes from and whether it
+names the field. Nothing that validated before is refused now — these are all payloads ARCA was already
+turning down, in Spanish, without saying which field it meant.
+
+| refused | `details.code` |
+| --- | --- |
+| `currencyRate` other than exactly `1` on a peso voucher | `CURRENCY_RATE_MISMATCH` |
+| no `incoterm` on an invoice for `GOODS` | `MISSING_INCOTERM` |
+| no `paymentDate` on an invoice for `SERVICES`/`OTHER` | `MISSING_PAYMENT_DATE` |
+| `shippingPermits` on a debit or credit note | `SHIPPING_PERMIT_NOT_ALLOWED` |
+| a mode line (`unitOfMeasureCode` `0`/`97`/`99`) carrying a quantity, price or discount; a `99` line whose total is not negative | `INVALID_ITEM_AMOUNT` |
+
+The fourth was a **defect on our side**, not merely an unnamed rejection. A credit note for goods that
+carried `shippingPermits` used to be sent with the permits present and the accompanying flag omitted —
+which is precisely the combination the authority rejects — because the check that drops the flag on a nota
+knew the voucher type and the one that builds the permit array did not. It is now refused outright rather
+than dropped, since silently discarding a despacho you named would authorize a different document than the
+one you described.
+
+Contract §3 carries the full table of what this service refuses locally and what it relays. The short
+version of the boundary: rules that need the authority's **codes** are ours (which code is the peso, which
+type is a Factura, which unit ids mean discount); rules that need the authority's **state** are its own —
+the rate band, and the cross-checks a nota's referenced voucher must satisfy.
 
 ### The Tierra del Fuego case, and the one thing most likely to be got wrong
 
