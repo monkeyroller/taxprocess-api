@@ -1098,8 +1098,9 @@ future entity codes currencies in three characters.
 
 **Migration order** (this is the additive half): `currencyCode` is accepted now, `currencyIso` is optional
 and still works. Once every caller sends the new field, `currencyIso` and the ISO table are removed as a
-breaking CONTRACT-CHANGES entry. The ordering is not negotiable in the other direction — this service runs
-`forbidNonWhitelisted: true`, so a caller cannot send `currencyCode` until the DTO declares it.
+breaking CONTRACT-CHANGES entry. The ordering is not negotiable in the other direction: a field
+this service does not declare is not read, so `currencyCode` had to be accepted here before it could be
+sent.
 
 #### ARCA's currency catalogue
 
