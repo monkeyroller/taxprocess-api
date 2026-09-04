@@ -32,11 +32,52 @@ import type {GenericEnvironment} from '../../provider/environment.js';
 const TOKEN_VALIDATION_CODE = '600';
 
 /**
+ * The same two roles as WSFEv1's `600`/`601`, under WSFEXv1's own numbers.
+ *
+ * `1000` "Usuario no autorizado a realizar esta operación" is the overloaded one, covering both a genuine
+ * token fault and an authorization problem exactly as `600` does. `1001` "Cuit solicitante no se encuentra
+ * entre sus representados" is the unambiguous delegation failure, `601`'s counterpart.
+ *
+ * These exist because the codes are the only part that differs. Both services phrase the *messages* in the
+ * same Spanish, so `AUTHORIZATION_FAULT` and `TOKEN_FAULT_MESSAGE` stay shared and only the numbers are
+ * looked up per service.
+ */
+const WSFEX_TOKEN_VALIDATION_CODE = '1000';
+const WSFEX_REPRESENTADO_NOT_IN_TOKEN_CODE = '1001';
+
+/**
  * WSFEv1 `CUIT representada no incluida en token`: the delegate's token does not cover the CUIT in
  * `Auth.Cuit`. Unlike the overloaded `600` this is unambiguous, never a cryptographic fault, so a delegated
  * call that hits it always means a missing or insufficient delegation.
  */
 const REPRESENTADO_NOT_IN_TOKEN_CODE = '601';
+
+/** Which numbers carry the two token/delegation roles on one web service. */
+interface ServiceFaultCodes {
+    readonly tokenValidation: string;
+    readonly representadoNotInToken: string;
+}
+
+/**
+ * The web services that report a credential failure as an in-payload error list, and the codes each uses.
+ * Everything else this provider calls under the delegate ticket is a padrón service, which reports a SOAP
+ * fault instead and so has no entry — which is also what makes membership here the dispatch key.
+ *
+ * A table rather than a branch because the *logic* is identical for both — same message rules, same
+ * precedence, same eviction policy — and only the numbers move. Writing it twice is how `wsfex` came to be
+ * classified with `wsfe`'s `600`, a code WSFEX never sends, so no WSFEX credential failure was ever
+ * recognized.
+ */
+const FAULT_CODES: Partial<Record<ServiceIdValue, ServiceFaultCodes>> = {
+    [ServiceId.WSFEV1]: {
+        tokenValidation: TOKEN_VALIDATION_CODE,
+        representadoNotInToken: REPRESENTADO_NOT_IN_TOKEN_CODE,
+    },
+    [ServiceId.WSFEXV1]: {
+        tokenValidation: WSFEX_TOKEN_VALIDATION_CODE,
+        representadoNotInToken: WSFEX_REPRESENTADO_NOT_IN_TOKEN_CODE,
+    },
+};
 
 /**
  * A genuine token fault — for a delegated request this is our certificate or clock, never the represented
@@ -100,21 +141,27 @@ export function isVoucherNotFound(err: unknown): boolean {
  *
  * `delegateCuit` is a thunk rather than a string: resolving it runs inside an error handler, so the caller
  * owns the degradation, and reading it can cost a certificate load only the delegation verdicts need.
+ *
+ * `service` says which numbers to read, and has **no default on purpose**. A default is how the WSFEX path
+ * came to be classified with WSFEv1's codes: silently correct for the only caller that existed, and silently
+ * wrong for the second one. Every call site names its service.
  */
 export function translateDelegatedTokenError(
     err: unknown,
     entity: EntityAuthBlock,
     delegateCuit: () => string,
+    service: ServiceIdValue,
 ): unknown {
-    if (!(err instanceof ArcaServiceError)) {
+    const codes = FAULT_CODES[service];
+    if (!(err instanceof ArcaServiceError) || codes === undefined) {
         return err;
     }
-    // `601` is unambiguous — always a missing delegation, no message needed.
-    const representado = err.errors.find((e) => e.code === REPRESENTADO_NOT_IN_TOKEN_CODE);
+    // The representado code is unambiguous — always a missing delegation, no message needed.
+    const representado = err.errors.find((e) => e.code === codes.representadoNotInToken);
     if (representado !== undefined) {
         return delegationNotAuthorized(entity, delegateCuit(), representado.code, representado.message);
     }
-    const entry = err.errors.find((e) => e.code === TOKEN_VALIDATION_CODE);
+    const entry = err.errors.find((e) => e.code === codes.tokenValidation);
     if (entry === undefined) {
         return err;
     }
@@ -122,12 +169,14 @@ export function translateDelegatedTokenError(
     // Authorization first: a lapsed delegation is worded as an expiry too, and treating it as a token fault
     // would evict the shared delegate ticket on every retry without fixing the cause.
     if (AUTHORIZATION_FAULT.test(message)) {
-        return delegationNotAuthorized(entity, delegateCuit(), TOKEN_VALIDATION_CODE, message);
+        return delegationNotAuthorized(entity, delegateCuit(), codes.tokenValidation, message);
     }
     if (TOKEN_FAULT_MESSAGE.test(message)) {
-        return new ArcaAuthError(`WSFEv1 token validation failed (ARCA ${TOKEN_VALIDATION_CODE}): ${message}`);
+        return new ArcaAuthError(
+            `${service} token validation failed (ARCA ${codes.tokenValidation}): ${message}`,
+        );
     }
-    return err; // ambiguous 600 → leave as the original authority error (502)
+    return err; // ambiguous token code → leave as the original authority error (502)
 }
 
 /** Carries our delegate CUIT and the represented issuer into the error. */
@@ -155,27 +204,31 @@ export function isPadronTicketFault(err: unknown): err is ArcaSoapError {
 }
 
 /**
- * True when a WSFEv1 `Errors` block names our ticket — the `wsfe` reading, where a credential failure
- * arrives in the payload rather than as a SOAP fault.
+ * True when an invoice service's in-payload error block names our ticket — the reading for a service where a
+ * credential failure arrives in the payload rather than as a SOAP fault.
  *
- * Applies the same precedence `translateDelegatedTokenError` does: a `600` whose message names who is
+ * Applies the same precedence `translateDelegatedTokenError` does: a token code whose message names who is
  * refused is an authorization problem re-minting cannot fix, so it evicts nothing, and only the
- * cryptographic or expiry phrasing is a credential fault. An ambiguous `600` evicts nothing either — ARCA's
- * ~12h re-mint refusal makes a false positive far more expensive than a missed one.
+ * cryptographic or expiry phrasing is a credential fault. An ambiguous token code evicts nothing either —
+ * ARCA's ~12h re-mint refusal makes a false positive far more expensive than a missed one.
  *
  * Reads `TOKEN_FAULT_MESSAGE` rather than `CRYPTO_CREDENTIAL_FAULT` because ARCA has already prefixed this
  * message with `ValidacionDeToken:`, so the bare word `token` carries no information and the broader
- * vocabulary would match every overloaded `600`.
+ * vocabulary would match every overloaded token code.
  *
- * The delegated-issuing path asks a different question of the same `600` — is this a missing delegation? —
+ * The delegated-issuing path asks a different question of the same code — is this a missing delegation? —
  * which is why that classifier stays separate. Both read the two message rules in the same order, and
  * neither may be reordered alone.
+ *
+ * `service` selects the numbers: `600` on `wsfe`, `1000` on `wsfex`. A service with no entry in
+ * `FAULT_CODES` reports its credentials some other way and is never classified here.
  */
-export function isWsfeTicketFault(err: unknown): boolean {
-    if (!(err instanceof ArcaServiceError)) {
+export function isInPayloadTicketFault(err: unknown, service: ServiceIdValue): boolean {
+    const codes = FAULT_CODES[service];
+    if (!(err instanceof ArcaServiceError) || codes === undefined) {
         return false;
     }
-    const entry = err.errors.find((e) => e.code === TOKEN_VALIDATION_CODE);
+    const entry = err.errors.find((e) => e.code === codes.tokenValidation);
     if (entry === undefined || AUTHORIZATION_FAULT.test(entry.message)) {
         return false;
     }
@@ -183,29 +236,27 @@ export function isWsfeTicketFault(err: unknown): boolean {
 }
 
 /**
- * The invoice web services, whose failures arrive as an in-payload `Errors` block. Everything else this
- * provider calls under the delegate ticket is a padrón service, which reports a SOAP fault instead.
- */
-const IN_PAYLOAD_ERROR_SERVICES: ReadonlySet<ServiceIdValue> = new Set<ServiceIdValue>([
-    ServiceId.WSFEV1,
-    ServiceId.WSFEXV1,
-]);
-
-/**
  * True when `service` is reporting that our delegate ticket is bad — the single signal `delegateCall` evicts
  * on, whichever web service made the call.
  *
  * Dispatched on the service rather than the error class, which is why this exists instead of OR-ing the two
  * classifiers at the call site. Scoping `isPadronTicketFault` to `ArcaSoapError` looks like it confines it to
- * the padrón and does not: WSFEv1 raises that too for genuine SOAP faults, so a `wsfe` transport fault whose
- * Spanish text merely contains `token` or `firma` would match the padrón vocabulary and evict the shared
- * `wsfe` delegate ticket ARCA refuses to re-mint for ~12h.
+ * the padrón and does not: the invoice services raise that too for genuine SOAP faults, so a `wsfe`
+ * transport fault whose Spanish text merely contains `token` or `firma` would match the padrón vocabulary
+ * and evict the shared delegate ticket ARCA refuses to re-mint for ~12h.
  *
- * The `wsfe` reading of a SOAP-level fault is therefore "not a ticket fault", which is correct: on that
- * service a credential rejection is an in-payload `600`, so a SOAP fault is a retryable transport failure.
+ * An invoice service's reading of a SOAP-level fault is therefore "not a ticket fault", which is correct: on
+ * those services a credential rejection arrives in the payload, so a SOAP fault is a retryable transport
+ * failure.
+ *
+ * Membership in `FAULT_CODES` is the dispatch key, so the two facts that travel together — reports in the
+ * payload, and which numbers it uses to do so — cannot fall out of step. That is what went wrong before:
+ * `wsfex` was listed as an in-payload service while only `wsfe`'s numbers were ever read.
  */
 export function isDelegateTicketFault(err: unknown, service: ServiceIdValue): boolean {
-    return IN_PAYLOAD_ERROR_SERVICES.has(service) ? isWsfeTicketFault(err) : isPadronTicketFault(err);
+    return FAULT_CODES[service] === undefined
+        ? isPadronTicketFault(err)
+        : isInPayloadTicketFault(err, service);
 }
 
 /**

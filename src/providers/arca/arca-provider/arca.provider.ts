@@ -185,8 +185,11 @@ export class ArcaProvider extends TaxEntityProvider {
         } catch (err) {
             // The CUIT is a thunk: only a delegation verdict needs it, and reading it can cost a certificate
             // load.
-            const translated = translateDelegatedTokenError(err, entity, () =>
-                this.delegateCuit(entity.environment),
+            const translated = translateDelegatedTokenError(
+                err,
+                entity,
+                () => this.delegateCuit(entity.environment),
+                service,
             );
             if (translated instanceof ArcaAuthError) {
                 // Evict our delegate ticket so the next request re-mints, rather than every represented CUIT

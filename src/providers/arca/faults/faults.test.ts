@@ -12,7 +12,7 @@ import {ServiceId} from '../sdk/core/constants.js';
 import {
     isDelegateTicketFault,
     isPadronTicketFault,
-    isWsfeTicketFault,
+    isInPayloadTicketFault,
     toProviderFault,
 } from './faults.js';
 import {
@@ -223,14 +223,14 @@ describe('delegate-ticket eviction classifiers', () => {
         });
     });
 
-    describe('isWsfeTicketFault (WSFEv1 in-payload Errors)', () => {
+    describe('isInPayloadTicketFault (an invoice service in-payload error block)', () => {
         it('evicts on a genuine credential fault', () => {
             for (const message of [
                 'ValidacionDeToken: Token expirado',
                 'ValidacionDeToken: El CEE no se corresponde con la firma digital',
                 'ValidacionDeToken: VerificacionDeHash no validó',
             ]) {
-                expect(isWsfeTicketFault(serviceError('600', message))).toBe(true);
+                expect(isInPayloadTicketFault(serviceError('600', message), ServiceId.WSFEV1)).toBe(true);
             }
         });
 
@@ -241,27 +241,27 @@ describe('delegate-ticket eviction classifiers', () => {
                 'ValidacionDeToken: No apareció CUIT en lista de relaciones para acceder al WS',
                 'ValidacionDeToken: Computador no autorizado a acceder al servicio',
             ]) {
-                expect(isWsfeTicketFault(serviceError('600', message))).toBe(false);
+                expect(isInPayloadTicketFault(serviceError('600', message), ServiceId.WSFEV1)).toBe(false);
             }
         });
 
         it('keeps the ticket on an ambiguous 600, erring towards the cheaper mistake', () => {
             // Neither authorization nor crypto wording. A missed eviction costs one request and a wrong one
             // ~12h of delegated invoicing, so silence is the safe default.
-            expect(isWsfeTicketFault(serviceError('600', 'ValidacionDeToken: Token invalido'))).toBe(false);
+            expect(isInPayloadTicketFault(serviceError('600', 'ValidacionDeToken: Token invalido'), ServiceId.WSFEV1)).toBe(false);
         });
 
         it('ignores every other code, including the ones the rates batch handles per currency', () => {
-            expect(isWsfeTicketFault(serviceError('602', 'Sin Resultados'))).toBe(false);
+            expect(isInPayloadTicketFault(serviceError('602', 'Sin Resultados'), ServiceId.WSFEV1)).toBe(false);
             expect(
-                isWsfeTicketFault(serviceError('12000', 'Campo <MonId> debe ser algunos de los habilitados')),
+                isInPayloadTicketFault(serviceError('12000', 'Campo <MonId> debe ser algunos de los habilitados'), ServiceId.WSFEV1),
             ).toBe(false);
             // `601` is a missing delegation, which re-minting the same ticket cannot fix.
-            expect(isWsfeTicketFault(serviceError('601', 'CUIT representada no incluida en token'))).toBe(false);
+            expect(isInPayloadTicketFault(serviceError('601', 'CUIT representada no incluida en token'), ServiceId.WSFEV1)).toBe(false);
         });
 
         it('does NOT read a SOAP fault, whose vocabulary it is not calibrated for', () => {
-            expect(isWsfeTicketFault(new ArcaSoapError('No autorizado, par token/sign invalido.'))).toBe(false);
+            expect(isInPayloadTicketFault(new ArcaSoapError('No autorizado, par token/sign invalido.'), ServiceId.WSFEV1)).toBe(false);
         });
     });
 
@@ -310,12 +310,40 @@ describe('delegate-ticket eviction classifiers', () => {
             ).toBe(false);
         });
 
-        it('covers WSFEXv1 by the same reading as WSFEv1 — both report in-payload Errors', () => {
+        it('reads a wsfex error block with wsfex numbers, not wsfe ones', () => {
+            // Both services report in the payload and phrase the messages identically, but the codes differ:
+            // `1000` here where `wsfe` says `600`. Reading `wsfe`'s numbers on `wsfex` — which is what this
+            // dispatch used to do — recognizes no WSFEX credential failure at all.
             expect(
-                isDelegateTicketFault(serviceError('600', 'ValidacionDeToken: Token expirado'), ServiceId.WSFEXV1),
+                isDelegateTicketFault(
+                    serviceError('1000', 'ValidacionDeToken: Token expirado'),
+                    ServiceId.WSFEXV1,
+                ),
             ).toBe(true);
             expect(
+                isDelegateTicketFault(serviceError('600', 'ValidacionDeToken: Token expirado'), ServiceId.WSFEXV1),
+            ).toBe(false);
+            expect(
                 isDelegateTicketFault(new ArcaSoapError('par token/sign invalido'), ServiceId.WSFEXV1),
+            ).toBe(false);
+        });
+
+        it('keeps the wsfex ticket on an authorization 1000, as it does on a wsfe 600', () => {
+            expect(
+                isDelegateTicketFault(
+                    serviceError('1000', 'Usuario no autorizado a realizar esta operación'),
+                    ServiceId.WSFEXV1,
+                ),
+            ).toBe(false);
+        });
+
+        it('never treats the wsfex representado code as a ticket fault', () => {
+            // `1001` is `601`'s counterpart: a missing delegation, which re-minting cannot fix.
+            expect(
+                isDelegateTicketFault(
+                    serviceError('1001', 'Cuit solicitante no se encuentra entre sus representados'),
+                    ServiceId.WSFEXV1,
+                ),
             ).toBe(false);
         });
 
