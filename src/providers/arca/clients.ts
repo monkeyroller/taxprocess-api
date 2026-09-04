@@ -1,6 +1,7 @@
 import type {ArcaEnvironment} from './sdk/core/constants.js';
 import {SoapClient} from './sdk/core/soap-client/soap-client.js';
 import {CommonInvoiceService} from './sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
+import {FexInvoiceService} from './sdk/invoicing/export/fex-invoice-service/fex-invoice.service.js';
 import {ConstanciaInscripcionService} from './sdk/taxpayer-registry/constancia-inscripcion.service.js';
 import {TaxpayerIdentityService} from './sdk/taxpayer-registry/taxpayer-identity.service.js';
 
@@ -17,6 +18,15 @@ export const soap = new SoapClient();
 
 export function commonInvoiceService(environment: ArcaEnvironment): CommonInvoiceService {
     return new CommonInvoiceService(soap, environment);
+}
+
+/**
+ * WSFEXv1 — Factura de Exportación. Its own service rather than a mode of the common one: it authenticates
+ * against a separate WSAA scope (`wsfex`, needing its own certificate enrolment) and reads a different
+ * point-of-sale register, so the two are never interchangeable for one voucher.
+ */
+export function fexInvoiceService(environment: ArcaEnvironment): FexInvoiceService {
+    return new FexInvoiceService(soap, environment);
 }
 
 /** Constancia de inscripción (ex-alcance 5) — the taxpayer's registration/tax picture. */
