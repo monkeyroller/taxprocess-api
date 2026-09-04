@@ -786,7 +786,7 @@ case a client would otherwise poll hot.
 
 #### `unavailable` — a normal outcome, never a failed batch
 
-One missing currency must not cost the other forty-eight, so a code with no rate is reported rather than
+One missing currency must not cost the other forty-six, so a code with no rate is reported rather than
 raised:
 
 | `reason` | meaning |
@@ -798,7 +798,7 @@ raised:
 Note the deliberate departure from how an unknown code behaves elsewhere: `documentTypeCode` throws a
 `400 UNKNOWN_CODE`, while an unknown currency in a batch lands here instead. If **every** code fails the
 same transient way, that is systemic rather than per-code and the request fails with a `502` — reporting it
-as forty-nine currencies coincidentally having no data would let you cache "nothing is published" and stop
+as forty-seven currencies coincidentally having no data would let you cache "nothing is published" and stop
 asking.
 
 **The reference currency never touches the network.** `PES` is answered locally at `1/1/1`, and a request
@@ -918,6 +918,11 @@ The forty-nine codes ARCA publishes via `FEParamGetTiposMonedas`, so a caller ca
 authority at runtime. `POST /api/currencies` deliberately does not exist: §5's own argument against serving
 a catalogue applies, and a catalogue is build-time data.
 
+**Forty-nine catalogued, forty-seven supported.** `RUB` and `NZD` are listed and in force in ARCA's
+catalogue and are rejected by ARCA's *cotización* service — the two tables contradict each other. They are
+therefore not served and not invoiceable here; the last two rows below mark them, and the note after the
+table has the measurement. Seed them if you want the catalogue complete, but seed them **inactive**.
+
 The **reference currency** is the one row that matters structurally: mark it in your own seed rather than
 hardcoding `"PES"`, which would be an ARCA constant living in a country-agnostic caller.
 
@@ -970,11 +975,66 @@ hardcoding `"PES"`, which would be an ARCA constant living in a country-agnostic
 | `062` | Rupia Hindú | — |  |
 | `063` | Lempira Hondureña | — |  |
 | `064` | Yuan (Rep. Pop. China) | — |  |
-| `RUB` | Rublo (Rusia) | — | added by ARCA in 2025 |
-| `NZD` | Dólar Neozelandes | — | added by ARCA in 2025 |
+| `RUB` | Rublo (Rusia) | `RUB` | ⛔ **catalogued but unquotable — not served, not invoiceable.** Added by ARCA 20250114 |
+| `NZD` | Dólar Neozelandes | `NZD` | ⛔ **catalogued but unquotable — not served, not invoiceable.** Added by ARCA 20250114 |
 
 Codes with an ISO column can be bound to a real currency; the ones without cannot, and a rate bound to
-`049` is therefore unselectable by construction rather than by rule.
+`049` is therefore unselectable by construction rather than by rule. The last two rows are the other kind of
+unselectable, and the distinction is worth holding onto because the two look identical in a database and
+behave nothing alike.
+
+##### The two ⛔ rows — ARCA contradicting itself
+
+`RUB` and `NZD` carry real ISO codes and are real currencies. They are unusable here for a reason that has
+nothing to do with ISO: **`FEParamGetTiposMonedas` publishes them and `FEParamGetCotizacion` refuses them.**
+
+Measured 2026-09-04 ~10:08 ART against **production**, four codes, one ticket, the same minute:
+
+| code | catalogue | cotización | what it means |
+| --- | --- | --- | --- |
+| `DOL` | in force | `MonCotiz 1508`, `FchCotiz 20260903` | the control — the path is healthy |
+| `049` | in force since 2010 | `602 Sin Resultados`, all six calls | **no publication**, a fact about a *day* |
+| `RUB` | `FchDesde 20250114`, no `FchHasta` | **`12000`, all six calls** | the authority refusing the *code* |
+| `NZD` | `FchDesde 20250114`, no `FchHasta` | **`12000`, all six calls** | as above |
+
+The `12000` text is *"El código de moneda ingresado es invalido. Verificar los codigos mediante el metodo
+FEParamGetTiposMonedas"* — pointing at the method that lists them. All six probe calls fail, including the
+one that omits `FchCotiz` entirely, so this is not a day, a weekend, a feriado or an hour.
+
+**Exactly two codes behave this way**, which was measured and not assumed: all 48 non-reference codes were
+asked on one ticket in the same run, and they sort into three groups.
+
+| answer | count | codes |
+| --- | --- | --- |
+| a rate | 27 | `DOL`, `009`-`012`, `014`-`016`, `018`, `019`, `021`, `023`-`026`, `028`-`035`, `060`-`063` |
+| `602` — no publication | 19 | `002`, `040`-`047`, `049`, `051`-`057`, `059`, `064` |
+| `12000` — code refused | **2** | **`RUB`, `NZD`** |
+
+Note how large the middle group is: nineteen catalogued currencies have no published rate today, `002` (the
+blue) and `064` (Yuan) among them. **That is normal and they remain fully supported** — they report
+`NO_PUBLICATION`, and they answer on a day ARCA publishes them. Being unpriced is common; being refused is
+not, and only the second kind is dropped.
+
+**WSFEX is not a way around it.** `FEXGetPARAM_MON` is byte-identical to the WSFEv1 catalogue — the same
+forty-nine rows, both codes in force — while `FEXGetPARAM_MON_CON_COTIZACION` prices the *same twenty-seven
+codes*, at the same rates, on the same `Fecha_ctz`. The two services share one rate table, so an export
+voucher offers no currency a domestic one cannot price.
+
+**Why that makes them unusable rather than merely unpriced.** `049` has no rate today and reports
+`NO_PUBLICATION`; ask on a day ARCA publishes gold and it answers. `RUB` has no rate on any day, and an
+invoice naming it would have to declare a `MonCotiz` that validation 10119 bands against a published rate
+that does not exist. So the failure would land on a voucher you had already committed, rather than on the
+lookup that preceded it. Refusing the code up front is the whole reason this service keeps a membership
+check at all.
+
+**What you get for them now:** naming either in `currencyCodes` returns `unavailable` with
+`reason: "UNKNOWN_CODE"` and costs no round trip; the whole-table sync omits them entirely, the whole table
+being every currency *this service supports*; and `/invoices/authorize` refuses one with
+`400 ARCA_VALIDATION`, `details.code: "UNKNOWN_CODE"`, naming `currencyCode`.
+
+**This reverses the day ARCA reconciles its tables**, which is a one-line change here and a re-seed on your
+side. Nothing polls for it — a nightly probe would be asking the authority to repeat itself — so if a
+customer needs either currency, say so and we will re-measure.
 
 ### Address code schemes (a closed vocabulary this service returns)
 

@@ -34,6 +34,7 @@ import {
     type RateValidity,
     type UnscopedRate,
 } from '../mapping/cotizacion/cotizacion.js';
+import {ARCA_UNQUOTABLE_CODES} from '../mapping/currency-codes/currency-codes.js';
 import {mapWithConcurrency} from '../../concurrency/concurrency.js';
 import type {CommonInvoiceService} from '../sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
 import type {CurrencyRateUnavailableDto} from '../../../http/dto/currency-rates-result.dto.js';
@@ -91,7 +92,7 @@ import type {
 const ENTITY_CODE = 'ARCA';
 
 /**
- * How many `FEParamGetCotizacion` calls the whole-table fan-out keeps in flight. A currency table is ~49
+ * How many `FEParamGetCotizacion` calls the whole-table fan-out keeps in flight. A currency table is ~47
  * codes; eight keeps a full sync inside a few seconds without looking like a burst.
  *
  * Also bounds what a refused ticket costs: `mapWithConcurrency` starts no further item once one has thrown,
@@ -505,12 +506,30 @@ export class ArcaProvider extends TaxEntityProvider {
 
             // A catalogue entry we do not know is the only signal that `ARCA_CURRENCY_CODES` has fallen
             // behind, and it arrives on the daily sync — so it is logged rather than dropped in silence.
-            if (catalogued.unsupported.length > 0) {
+            //
+            // Split first, because the two halves want opposite actions and one of them fires on every
+            // single sync. `ARCA_UNQUOTABLE_CODES` are catalogue entries we left out on purpose, ARCA's own
+            // cotización service having rejected them with a `12000`; telling an operator to "add them to
+            // ARCA_CURRENCY_CODES" every night would be advice that undoes a deliberate measurement, and a
+            // warning nobody can act on is a warning everybody learns to skip. What is worth knowing is the
+            // day that stops being true, so the expected half is logged as the standing note it is.
+            const drifted = catalogued.unsupported.filter((code) => !ARCA_UNQUOTABLE_CODES.has(code));
+            const unquotable = catalogued.unsupported.filter((code) => ARCA_UNQUOTABLE_CODES.has(code));
+
+            if (drifted.length > 0) {
                 console.warn(
-                    `ARCA currency catalogue (${environment}) holds ${catalogued.unsupported.length} code(s) ` +
-                        `this service does not know: ${catalogued.unsupported.join(', ')}. Rates for them ` +
+                    `ARCA currency catalogue (${environment}) holds ${drifted.length} code(s) ` +
+                        `this service does not know: ${drifted.join(', ')}. Rates for them ` +
                         `are not served and invoices naming them are refused — add them to ` +
                         `ARCA_CURRENCY_CODES.`,
+                );
+            }
+            if (unquotable.length > 0) {
+                console.info(
+                    `ARCA currency catalogue (${environment}) still lists ${unquotable.join(', ')}, which ` +
+                        `FEParamGetCotizacion rejects with a 12000 — not served, by measurement. Re-check ` +
+                        `with \`PROBE_CURRENCY=${unquotable[0] ?? ''} pnpm probe:cotizacion-day\` and see ` +
+                        `ARCA_UNQUOTABLE_CODES.`,
                 );
             }
         } else {
@@ -573,7 +592,7 @@ export class ArcaProvider extends TaxEntityProvider {
      *
      * Asked of the fetched half alone, because the locally-answered rows are not things the batch learned.
      * Counting them would disable the check where it matters most: the whole-table sync always emits the
-     * reference row, so a total outage would return `200` with one peso row and forty-eight errors, which a
+     * reference row, so a total outage would return `200` with one peso row and forty-six errors, which a
      * caller then caches until tomorrow. The peso's independence is unaffected — a request naming only codes
      * we answer ourselves returns before a ticket is ever resolved.
      *

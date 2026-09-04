@@ -1900,8 +1900,9 @@ describe('NeutralInvoiceDto — exactly one currency field', () => {
 
     it('allows a zero-padded and a longer-than-three code', async () => {
         // `002` and `060` are zero-padded and the padding is part of the code, and ARCA types `MonId` as
-        // `String(8)` on the cotización response — so a fixed width of three would be wrong.
-        for (const currencyCode of ['002', '060', 'RUB', 'ABCDEFGH']) {
+        // `String(8)` on the cotización response — so a fixed width of three would be wrong. The DTO checks
+        // length alone; membership is `toMonId`'s job, which is why an unknown code passes here.
+        for (const currencyCode of ['002', '060', 'ABC', 'ABCDEFGH']) {
             const errors = await validate(plainToInstance(NeutralInvoiceDto, base({currencyCode})));
             expect(errors).toHaveLength(0);
         }

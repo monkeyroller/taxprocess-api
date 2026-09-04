@@ -6,6 +6,115 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-04 — `RUB` and `NZD` are dropped: ARCA catalogues them and will not quote them
+
+Branch `feature/foreign-currency-electronic-sales`. **Prompted by your observation**, and it was the right
+one to raise: you flagged `NZD` and `RUB` as active fiscal currencies with no band at all, `closing_date` and
+`synced_at` both null, never synced — and called it a binding question rather than a sync failure. It is, and
+the answer is that they cannot be bound. We measured it against production rather than reasoning about it.
+
+The supported catalogue goes from **forty-nine codes to forty-seven**. 🔴 This is a narrowing, but of a set
+that could never have produced a rate or an authorized voucher, so nothing that worked before stops working.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 17.1 | `RUB` and `NZD` are no longer supported currencies. The whole-table sync omits them; naming either explicitly returns `unavailable` with `reason: "UNKNOWN_CODE"` at no round trip; `/invoices/authorize` refuses one with `400 ARCA_VALIDATION`, `details.code: "UNKNOWN_CODE"` | **Deactivate the two rows.** Keep them seeded if you want the catalogue complete — just not selectable |
+| 17.2 | [CONTRACT.md](CONTRACT.md) §5's currency table marks both ⛔ and carries the measurement, and the counts in §3 move from forty-nine/forty-eight to forty-seven/forty-six | **None** |
+| 17.3 | Your `neverSynced` bucket is keyed on a null `synced_at`, which throws away the reason we already send | **Key it on the last `reason` instead** — see below. Worth doing regardless of these two codes |
+
+### What production actually says
+
+Four codes, one delegate ticket, the same minute — 2026-09-04 ~10:08 ART, `pnpm probe:cotizacion-day`:
+
+| code | `FEParamGetTiposMonedas` | `FEParamGetCotizacion` |
+| --- | --- | --- |
+| `DOL` | in force since 20090403 | `MonCotiz 1508`, `FchCotiz 20260903` — the control |
+| `049` Gramos de Oro Fino | in force since 20100125 | `602 Sin Resultados` on all six calls |
+| `RUB` | **`FchDesde 20250114`, no `FchHasta`** | **`12000` on all six calls** |
+| `NZD` | **`FchDesde 20250114`, no `FchHasta`** | **`12000` on all six calls** |
+
+The `12000` reads *"El código de moneda ingresado es invalido. Verificar los codigos mediante el metodo
+FEParamGetTiposMonedas"* — pointing the caller at the method that lists them. We also dumped production's
+catalogue: forty-nine rows, both codes present and in force, and nothing else in our set missing from it. Our
+spelling is byte-for-byte ARCA's own `Id`.
+
+**So ARCA's two tables contradict each other.** Not a publication gap, not a bad code on our side, and not
+something a walk-back or a retry can fix.
+
+### Two codes, and only two — and nineteen others that look similar and are fine
+
+Four codes would not have justified a narrowing, so we classified **all 48** non-reference codes on one
+ticket in the same run:
+
+| answer | count | codes |
+| --- | --- | --- |
+| a rate | 27 | `DOL`, `009`-`012`, `014`-`016`, `018`, `019`, `021`, `023`-`026`, `028`-`035`, `060`-`063` |
+| `602` — no publication | 19 | `002`, `040`-`047`, `049`, `051`-`057`, `059`, `064` |
+| `12000` — code refused | **2** | **`RUB`, `NZD`** |
+
+**Read the middle row before you touch your seed.** Nineteen supported currencies had no published rate that
+day — `002` (the blue) and `064` (Yuan) among them — and they are *not* affected by this entry. They stay
+supported, they report `NO_PUBLICATION`, and they answer on a day ARCA publishes them. If you deactivate rows
+on "no band today" you will turn off nineteen working currencies. Deactivate on the **reason**, and only for
+`UNKNOWN_CODE`.
+
+### WSFEX is not a way around it — the open question from our last message, closed
+
+We flagged that export invoicing might price what WSFEv1 will not, since WSFEX has its own tables and the
+issuer supplies `Moneda_ctz` directly. It does not:
+
+- `FEXGetPARAM_MON` is **byte-identical** to the WSFEv1 catalogue — the same forty-nine rows, the same
+  `FchDesde`, `RUB` and `NZD` in force in both.
+- `FEXGetPARAM_MON_CON_COTIZACION` prices the **same twenty-seven codes**, at the same rates, on the same
+  `Fecha_ctz` (`DOL 1508`, `060 1756.5184`, `063 887.3072`, … all `03/09/2026`).
+
+The two services share one rate table. There is no export path to a currency the authority will not quote,
+so nothing here is regime-dependent and your `fiscal_currency` flag does not need to split by voucher type.
+
+### `12000` and `602` are not the same absence, and this is the case that proves it
+
+`049` is the shape everyone expects from "catalogued but no band": a clean `602` on every day, which we report
+as `NO_PUBLICATION`. It is a fact about a *day* — ask on a day ARCA publishes gold and it answers. `049` stays
+in the set for exactly that reason.
+
+`RUB` is the authority refusing the *code*. There is no day on which it answers, so there is no rate for
+validation 10119 to band a declared `MonCotiz` against.
+
+That distinction is why keeping them cost more than the rate they could never carry. Our supported set gates
+both endpoints — `/currencies/rates` fetches from it and the invoice mapper admits from it — so until today a
+`RUB` sale was mapped to `MonId=RUB` and sent to ARCA, and the rejection landed on a voucher you had already
+committed. Out of the set, that same sale is refused up front, naming the field. Catching it at the lookup
+rather than at the authorization is the whole reason this service keeps a membership check instead of relaying
+ARCA's own rejection.
+
+### The part worth acting on beyond these two codes
+
+You inferred "never synced" from `synced_at IS NULL`. We were already telling you why, on every batch, in
+`unavailable[].reason` — and these two were arriving as `UNKNOWN_CODE`, not `NO_PUBLICATION`. Those want
+opposite responses:
+
+| `reason` | what it says | what to do |
+| --- | --- | --- |
+| `NO_PUBLICATION` | the authority holds no row for the day asked | keep syncing; it may answer tomorrow |
+| `UNKNOWN_CODE` | the authority will not answer for this code at all | stop offering it — a sale in it will be refused |
+| `UPSTREAM_ERROR` | we could not reach the authority for this code | transient; retry |
+
+A bucket keyed on a null timestamp collapses all three into one, which is why this took a human noticing two
+odd rows. Keyed on the reason, `UNKNOWN_CODE` would have surfaced itself the first night.
+
+### What did NOT change
+
+- **`049` stays**, and still reports `NO_PUBLICATION` — as do the other eighteen currencies that had no rate
+  that day. Deleting them alongside the two refused codes would be the wrong lesson from this entry; there is
+  a test guarding exactly that.
+- **No wire shape, no field, no reason value.** `CurrencyRateUnavailableReason` is the same three values.
+- **The `/invoices/authorize` refusal is the ordinary `UNKNOWN_CODE` path**, not a new error.
+- **Nothing polls for ARCA reconciling its tables.** A nightly probe would be asking the authority to repeat
+  itself. Re-adding a code is one line on our side plus a re-seed on yours — **if a customer needs either
+  currency, tell us and we will re-measure.**
+
+---
+
 ## 2026-09-02 — A rate now says which day it applies to, and every instant on this wire is UTC
 
 Branch `feature/foreign-currency-electronic-sales`. Answers both asks core raised on 2026-09-02. **Ask 15 is
