@@ -45,7 +45,7 @@ import {
     type RateValidity,
     type UnscopedRate,
 } from '../mapping/cotizacion/cotizacion.js';
-import {ARCA_UNQUOTABLE_CODES} from '../mapping/currency-codes/currency-codes.js';
+import {ARCA_UNQUOTABLE_CODES, normalizeCurrencyCode} from '../mapping/currency-codes/currency-codes.js';
 import {mapWithConcurrency} from '../../concurrency/concurrency.js';
 import type {CommonInvoiceService} from '../sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
 import type {CurrencyRateUnavailableDto} from '../../../http/dto/currency-rates-result.dto.js';
@@ -626,6 +626,7 @@ export class ArcaProvider extends TaxEntityProvider {
         environment: GenericEnvironment,
         currencyCodes?: ReadonlyArray<string>,
         date?: string,
+        webService?: WebService,
     ): Promise<CurrencyRatesResult> {
         const now = new Date();
         // Resolved before any I/O so it is present on every outcome, including the all-unavailable one.
@@ -651,6 +652,24 @@ export class ArcaProvider extends TaxEntityProvider {
         // carries the same window even where their `rateDate`s differ. `applicabilityRange` has why. Stamped
         // onto the rates in `assembleRates`, once, rather than carried down through the fan-out.
         const validity = applicabilityRange(answeredDay);
+
+        // The export series answers from a different operation, so it branches before any ticket. The rates
+        // it returns are the same numbers (measured identical on every priced currency), but the SET is the
+        // authority's own rule about which currencies an export voucher may name -- which is the reason the
+        // selector exists on this request rather than a difference in price.
+        const route = invoiceRoute({webService});
+        ArcaProvider.assertRouteImplemented(route);
+        if (route === 'WSFEXV1') {
+            return this.exportRates(
+                environment,
+                currencyCodes,
+                arcaDay,
+                answeredDay,
+                referenceDay,
+                validity,
+                refreshAfter,
+            );
+        }
 
         const localRates: Array<UnscopedRate> = [];
         const localUnavailable: Array<CurrencyRateUnavailableDto> = [];
@@ -789,6 +808,98 @@ export class ArcaProvider extends TaxEntityProvider {
     /** The reference currency's row: `1/1/1`, no authority call. */
     private referenceRate(rateDate: string): UnscopedRate {
         return toUnscopedRate(REFERENCE_MON_ID, referenceBand(), rateDate);
+    }
+
+    /**
+     * The export series' rates: `FEXGetPARAM_MON_CON_COTIZACION`, which prices the whole table for one day
+     * in a single call.
+     *
+     * Simpler than the WSFEv1 fan-out it replaces, and in three ways that are measurements rather than
+     * assumptions (production, 2026-09-04):
+     *
+     * - **No day walking.** Asked for a Saturday or a Sunday, ARCA answers with the previous business day's
+     *   close and says so in each row's `Fecha_ctz`. So `rateDayCandidates` is not needed here: the
+     *   authority resolves the day itself and reports which one it used, and the answer's own `rateDate` is
+     *   what the contract already tells callers to read.
+     * - **No straddling.** One call cannot land either side of a publication boundary, which is the risk the
+     *   domestic fan-out is batched to mitigate rather than remove.
+     * - **`unavailable` comes free.** The set returned is narrower than the catalogue — 27 of 49 on the day
+     *   measured — and that narrowing *is* the authority's own rule about which currencies an export voucher
+     *   may name. A requested code absent from the day's answer is unavailable for that day, with no
+     *   per-code call to discover it.
+     *
+     * The rates themselves are the same numbers WSFEv1 publishes: all 27 agreed exactly, and the batch
+     * agreed with WSFEX's own per-currency method. So this is not a different price list — it is the same
+     * one, delivered in one call and filtered to what an export may use.
+     */
+    private async exportRates(
+        environment: GenericEnvironment,
+        currencyCodes: ReadonlyArray<string> | undefined,
+        arcaDay: string | undefined,
+        answeredDay: string,
+        referenceDay: string,
+        validity: RateValidity,
+        refreshAfter: string,
+    ): Promise<CurrencyRatesResult> {
+        const requested = currencyCodes === undefined ? undefined : partitionCurrencyCodes(currencyCodes);
+
+        const rates: Array<UnscopedRate> = [];
+        const unavailable: Array<CurrencyRateUnavailableDto> = [];
+
+        // The peso is answered locally on both series, for the reason it always was: ARCA publishes no
+        // aduanera row for it, and a peso-only request must not be able to fail because ARCA was
+        // unreachable.
+        if (requested === undefined || requested.namesReference) {
+            rates.push(this.referenceRate(referenceDay));
+        }
+        for (const code of requested?.unsupported ?? []) {
+            unavailable.push({currencyCode: code, reason: 'UNKNOWN_CODE'});
+        }
+
+        // Every code answered without the authority, so resolve no ticket at all — the same guarantee the
+        // domestic path makes: a peso-only till must not be able to fail because ARCA was unreachable.
+        if (requested?.toFetch.length === 0) {
+            return this.assembleRates(environment, rates, validity, unavailable, refreshAfter, undefined);
+        }
+
+        const auth = await this.delegateAuth(environment, ServiceId.WSFEXV1);
+        const service = fexInvoiceService(toArcaEnvironment(environment));
+        const priced = await this.delegateCall(environment, ServiceId.WSFEXV1, () =>
+            service.getCurrencyRatesForDay(auth, arcaDay ?? answeredDay),
+        );
+
+        const byCode = new Map(priced.map((row) => [normalizeCurrencyCode(row.monId), row]));
+        const rateDays: Array<string> = [];
+        // Whatever the caller asked for, or everything the day priced intersected with what this service
+        // supports — the same intersection the domestic whole-table branch applies, so the two endpoints
+        // still agree about which currencies can be invoiced in.
+        const wanted =
+            requested?.toFetch ?? partitionCurrencyCodes([...byCode.keys()]).toFetch;
+
+        for (const code of wanted) {
+            const row = byCode.get(normalizeCurrencyCode(code));
+            // A rate of `0` or a missing one is unusable rather than a value: `Number('')` is a finite zero,
+            // Absent from the day's answer is exactly the existing `NO_PUBLICATION`: the authority has no
+            // rate for this code, which for the export series also means an export voucher may not name it.
+            // A rate of `0` is unusable rather than a value -- `Number('')` is a finite zero, and a zero
+            // rate would divide a total to nothing.
+            if (row?.rate === undefined || row.rate <= 0) {
+                unavailable.push({currencyCode: code, reason: 'NO_PUBLICATION'});
+                continue;
+            }
+            // A rate with no usable day has nothing to key it by, which is what `UPSTREAM_ERROR` already
+            // names — the same reading the domestic path gives an answer it cannot date.
+            const rateDay = row.rateDate;
+            if (rateDay === undefined || !isArcaDay(rateDay)) {
+                unavailable.push({currencyCode: code, reason: 'UPSTREAM_ERROR'});
+                continue;
+            }
+            rateDays.push(rateDay);
+            rates.push(toUnscopedRate(code, arcaBand(row.rate), arcaDayToIsoDate(rateDay)));
+        }
+
+        const vintage = vintageOf(rateDays);
+        return this.assembleRates(environment, rates, validity, unavailable, refreshAfter, vintage);
     }
 
     /**

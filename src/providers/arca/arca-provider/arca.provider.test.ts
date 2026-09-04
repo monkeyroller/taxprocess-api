@@ -29,6 +29,7 @@ import {CurrencyRatesRequestDto} from '../../../http/dto/currency.dto.js';
 import {RATE_DAY_RULE} from '../mapping/cotizacion/cotizacion.js';
 import {ARCA_CURRENCY_CODES} from '../mapping/currency-codes/currency-codes.js';
 import type {FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
+import type {FexDayRate} from '../sdk/invoicing/export/fex-invoice-service/fex-invoice.service.js';
 
 /**
  * The provider reaches ARCA through two module-level singletons, the ticket store and the per-environment
@@ -69,6 +70,7 @@ const fexQueryVoucher = jest.fn<(auth: unknown, sp: number, vt: number, n: numbe
 const fexGetLastAuthorizedNumber = jest.fn<() => Promise<number>>();
 const fexGetLastRequestId = jest.fn<() => Promise<number>>();
 const fexGetPointsOfSale = jest.fn<() => Promise<Array<PointOfSaleInfo>>>();
+const fexGetCurrencyRatesForDay = jest.fn<(auth: unknown, day: string) => Promise<Array<FexDayRate>>>();
 
 jest.unstable_mockModule('../clients.js', () => ({
     commonInvoiceService: () => ({
@@ -85,6 +87,7 @@ jest.unstable_mockModule('../clients.js', () => ({
         getLastAuthorizedNumber: fexGetLastAuthorizedNumber,
         getLastRequestId: fexGetLastRequestId,
         getPointsOfSale: fexGetPointsOfSale,
+        getCurrencyRatesForDay: fexGetCurrencyRatesForDay,
     }),
     // The padrón factories return concrete services carrying the WSAA service id the provider keys the
     // ticket on, so the fakes must expose `service` as well as the operations.
@@ -2194,5 +2197,88 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
 
         expect(await new ArcaProvider().lastRequestId(ENTITY)).toEqual({requestId: 41});
         expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
+    });
+});
+
+/**
+ * The export rate series.
+ *
+ * Worth its own block because the selector on `/currencies/rates` changes *which* currencies are answered,
+ * not what they cost: measured against production 2026-09-04, the two services publish identical rates for
+ * every currency priced that day. What differs is the set — the export service prices only the subset an
+ * export voucher may name — which is the reason the field exists at all.
+ */
+describe('ArcaProvider export currency rates', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+        fexGetCurrencyRatesForDay.mockResolvedValue([
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            {monId: '060', rate: 1756.5184, rateDate: '20260903'},
+        ]);
+    });
+
+    it('prices the requested codes in one call, on a wsfex ticket', async () => {
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-09-04', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay).toHaveBeenCalledTimes(1);
+        // The domestic fan-out is not used at all: one call instead of one per code.
+        expect(getCurrencyRate).not.toHaveBeenCalled();
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
+        expect(result.rates).toEqual([
+            expect.objectContaining({currencyCode: 'DOL', rate: 1508, rateDate: '2026-09-03'}),
+        ]);
+    });
+
+    it('reports a code the day did not price as unavailable rather than failing the batch', async () => {
+        // Which is also the authority's own rule about eligibility: a currency absent from the day's answer
+        // is one an export voucher may not name.
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL', '009'], undefined, 'WSFEXv1');
+
+        expect(result.rates.map((rate) => rate.currencyCode)).toEqual(['DOL']);
+        expect(result.unavailable).toEqual([{currencyCode: '009', reason: 'NO_PUBLICATION'}]);
+    });
+
+    it('answers the peso locally, with no ticket at all', async () => {
+        const result = await new ArcaProvider().currencyRates('testing', ['PES'], '2026-09-04', 'WSFEXv1');
+
+        expect(resolve).not.toHaveBeenCalled();
+        expect(fexGetCurrencyRatesForDay).not.toHaveBeenCalled();
+        expect(result.rates).toEqual([
+            expect.objectContaining({currencyCode: 'PES', rate: 1, lowerLimit: 1, upperLimit: 1}),
+        ]);
+    });
+
+    it('reports a rate it cannot date as an upstream error rather than keying it wrongly', async () => {
+        fexGetCurrencyRatesForDay.mockResolvedValue([{monId: 'DOL', rate: 1508, rateDate: undefined}]);
+
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], undefined, 'WSFEXv1');
+
+        expect(result.rates).toEqual([]);
+        expect(result.unavailable).toEqual([{currencyCode: 'DOL', reason: 'UPSTREAM_ERROR'}]);
+    });
+
+    it('answers the whole table intersected with what this service supports', async () => {
+        fexGetCurrencyRatesForDay.mockResolvedValue([
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            // ARCA catalogues these two and refuses to quote them, so they must not be offered here either
+            // -- the same intersection the domestic whole-table branch applies, so the two endpoints agree
+            // about which currencies can actually be invoiced in.
+            {monId: 'RUB', rate: 18, rateDate: '20260903'},
+        ]);
+
+        const result = await new ArcaProvider().currencyRates('testing', undefined, undefined, 'WSFEXv1');
+
+        expect(result.rates.map((rate) => rate.currencyCode).sort()).toEqual(['DOL', 'PES']);
+    });
+
+    it('leaves the domestic series on the fan-out', async () => {
+        getCurrencyRate.mockResolvedValue({monId: 'DOL', rate: 1508, rateDate: '20260903'});
+
+        await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-09-04');
+
+        expect(getCurrencyRate).toHaveBeenCalledTimes(1);
+        expect(fexGetCurrencyRatesForDay).not.toHaveBeenCalled();
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfe');
     });
 });

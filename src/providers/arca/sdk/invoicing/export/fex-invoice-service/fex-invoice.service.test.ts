@@ -337,7 +337,7 @@ describe('FexInvoiceService.checkShippingPermit (FEXCheck_Permiso)', () => {
 });
 
 describe('FexInvoiceService.getCurrencyRatesForDay (FEXGetPARAM_MON_CON_COTIZACION)', () => {
-    it('prices the whole table in one call, reading Fecha_ctz as the authority spells it', async () => {
+    it('prices the whole table in one call, normalizing the one date ARCA slashes', async () => {
         const {service, lastCall} = serviceReturning({
             FEXGetPARAM_MON_CON_COTIZACIONResult: {
                 FEXResultGet: {
@@ -355,10 +355,25 @@ describe('FexInvoiceService.getCurrencyRatesForDay (FEXGetPARAM_MON_CON_COTIZACI
             Auth: {Token: 'T', Sign: 'S', Cuit: 20111111112},
             Fecha_CTZ: '20260903',
         });
+        // `Fecha_ctz` arrives `DD/MM/YYYY` where every other date on either service is `yyyymmdd`. Converted
+        // here so nothing downstream has to know that one row of one table speaks a different dialect --
+        // which would be a silent mistake, `'03/09/2026'` being a plausible thing to store as a day.
         expect(rates).toEqual([
-            {monId: 'DOL', rate: 1508, rateDate: '03/09/2026'},
-            {monId: '060', rate: 1756.5184, rateDate: '03/09/2026'},
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            {monId: '060', rate: 1756.5184, rateDate: '20260903'},
         ]);
+    });
+
+    it('reports no day rather than guessing one when the rendering is unrecognized', async () => {
+        const {service} = serviceReturning({
+            FEXGetPARAM_MON_CON_COTIZACIONResult: {
+                FEXResultGet: {
+                    ClsFEXResponse_Mon_CON_Cotizacion: {Mon_Id: 'DOL', Mon_ctz: '1508', Fecha_ctz: '2026-09-03'},
+                },
+            },
+        });
+
+        expect((await service.getCurrencyRatesForDay(AUTH, '20260903'))[0]?.rateDate).toBeUndefined();
     });
 });
 

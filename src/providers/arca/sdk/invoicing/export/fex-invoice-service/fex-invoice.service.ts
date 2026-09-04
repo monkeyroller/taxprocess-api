@@ -341,9 +341,7 @@ export class FexInvoiceService extends InvoiceWebService<FexInvoiceRequest, FexI
         }).map((row) => ({
             monId: row.id,
             rate: decimal(row.raw.Mon_ctz),
-            // `Fecha_ctz`, not the `Mon_fecha` the manual's XML sample shows, and rendered `DD/MM/YYYY`
-            // rather than the `yyyymmdd` every other date on this service uses. Both measured 2026-09-04.
-            rateDate: text(row.raw.Fecha_ctz),
+            rateDate: arcaDayFromSlashed(text(row.raw.Fecha_ctz)),
         }));
     }
 }
@@ -352,8 +350,30 @@ export class FexInvoiceService extends InvoiceWebService<FexInvoiceRequest, FexI
 export interface FexDayRate {
     readonly monId: string;
     readonly rate?: number;
-    /** As the authority renders it: `DD/MM/YYYY`. */
+    /** The day this rate closed on, as an ARCA `yyyymmdd` day like every other date the SDK returns. */
     readonly rateDate?: string;
+}
+
+/**
+ * `Fecha_ctz` as an ARCA day.
+ *
+ * This one operation renders its date `DD/MM/YYYY`, where every other date on either service is `yyyymmdd`.
+ * Converted here rather than surfaced raw, so nothing downstream has to know that one row of one table
+ * speaks a different dialect — the mistake would be silent, `'03/09/2026'` being a perfectly plausible
+ * string to store as a day.
+ *
+ * The manual disagrees with itself about the element name too: its XML sample shows `Mon_fecha` and its
+ * field table `Fecha_ctz`. The table is right (measured against production, 2026-09-04).
+ *
+ * An unrecognized rendering yields `undefined` rather than a guess, which the caller reports as a rate with
+ * no usable day instead of keying one wrongly.
+ */
+function arcaDayFromSlashed(value: string | undefined): string | undefined {
+    const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value ?? '');
+    if (match === null) {
+        return undefined;
+    }
+    return `${match[3] ?? ''}${match[2] ?? ''}${match[1] ?? ''}`;
 }
 
 /**

@@ -115,8 +115,9 @@ export abstract class TaxEntityProvider {
         environment: GenericEnvironment,
         currencyCodes?: ReadonlyArray<string>,
         date?: string,
+        webService?: WebService,
     ): Promise<CurrencyRatesResult> {
-        return this.guarded(() => this.currencyRatesImpl(environment, currencyCodes, date));
+        return this.guarded(() => this.currencyRatesImpl(environment, currencyCodes, date, webService));
     }
 
     protected abstract validateCredentialsImpl(input: ValidateCredentialsInput): Promise<CredentialValidationResult>;
@@ -185,5 +186,6 @@ export abstract class TaxEntityProvider {
         environment: GenericEnvironment,
         currencyCodes?: ReadonlyArray<string>,
         date?: string,
+        webService?: WebService,
     ): Promise<CurrencyRatesResult>;
 }

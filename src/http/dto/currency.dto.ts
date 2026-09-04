@@ -1,6 +1,7 @@
 import {ArrayMinSize, IsArray, IsIn, IsOptional, IsString, Length, MinLength} from 'class-validator';
 import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider/environment.js';
 import {IsAuthorityDate} from './authority-date/authority-date.js';
+import {WEB_SERVICES, type WebService} from '../../providers/provider/web-service.js';
 
 /**
  * Body for `POST /currencies/rates`. No issuer or credentials block, for the same reason the taxpayer lookup
@@ -47,4 +48,22 @@ export class CurrencyRatesRequestDto {
     @IsOptional()
     @IsAuthorityDate()
     date?: string;
+
+    /**
+     * Which of the entity's web services to price for (its `configuration.webService`). Omitted is the
+     * ordinary invoicing service.
+     *
+     * A bare selector rather than the `configuration` object, so the absence of an issuer block above stays
+     * true: this still resolves under the service's own delegated identity, and no tenant credential is
+     * involved.
+     *
+     * It changes the *set*, not the numbers. Measured against production on 2026-09-04, AR's two services
+     * publish identical rates for every currency priced that day — but the export service prices only the
+     * subset an export voucher may name (27 of 49 catalogued codes on that day), which is a rule about
+     * eligibility rather than about price. A code the requested service has no rate for comes back under
+     * `unavailable`.
+     */
+    @IsOptional()
+    @IsIn(WEB_SERVICES)
+    webService?: WebService;
 }
