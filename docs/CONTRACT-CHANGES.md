@@ -35,7 +35,8 @@ blocking, and every existing call behaves exactly as before.
 | 18.9 | `POST /currencies/rates` gains an optional `webService` | Optional — see 18.13 |
 | 18.10 | **`destinationCode`** — a fifth canonical fiscal code (ARCA `Dst_cmp`), 310 values | **Seed it.** `250` is the Tierra del Fuego AAE |
 | 18.11 | **`unitOfMeasureCode`** — a sixth canonical fiscal code (ARCA `Pro_umed`), 49 values, three of which are **not units** | **Seed it**, and read the note on `0`/`97`/`99` |
-| 18.12 | `exportType`, `language`, `incoterm`, `receiverPersonType` — neutral, closed sets | **None** beyond using them |
+| 18.12 | `exportType`, `language`, `incoterm` — neutral, closed sets | **None** beyond using them |
+| 18.14 | **`clientCountryTaxId`** — a seventh canonical fiscal code (ARCA `Cuit_pais_cliente`), 917 values, each with a country and an entity type | **Seed it.** It is how a buyer with no Argentine id is named |
 | 18.13 | `WSMTXCA` answers `501 NOT_IMPLEMENTED` | Do not send it yet. It is in §7's enum, so you *can* — it will not silently fall back |
 
 ### 18.1 — the request id, and why it is the one blocking ask
@@ -78,10 +79,10 @@ A free zone is a destination *distinct from* the country containing it — `280 
 that unmappable set: an ISO-keyed field would have made Tierra del Fuego unreachable. This is the
 `currencyIso` lesson again, so we did not repeat it.
 
-> We publish **no ISO annotation**, even for the ~250 rows that would map. `254 ARGENTINA - ISLAS MALVINAS`
-> is why: ISO assigns that destination `FK`, and a bulk transcription would have this service state a
-> sovereignty position in a lookup table without anyone deciding to. Use the authority's own wording in a
-> picker.
+> We publish **no ISO annotation**, even for the ~250 rows that would map — the table is keyed by the
+> authority's own three-digit code and needs no second vocabulary. Use the authority's own wording in a
+> picker: ARCA's wording for `254` is `ARGENTINA - ISLAS MALVINAS`, and INDEC files the islands' localities
+> under province `94` (Tierra del Fuego, Antártida e Islas del Atlántico Sur).
 
 **`unitOfMeasureCode` has three values that are not units.** They are line *modes*, and they change which
 amount rules apply:
@@ -116,7 +117,7 @@ member. Sending both is a `400` rather than a resolution.
 For the AAE case, `export.clientTaxId` carries the buyer's real CUIT. There is no country tax id to use —
 see below.
 
-### `clientCountryTaxId` cannot be derived, so it is sent or omitted
+### 18.14 — `clientCountryTaxId` cannot be derived, so we publish the table you pick from
 
 ARCA publishes `Cuit_pais_cliente` as 917 generic per-country CUITs, and **no key joining them to
 `Dst_cmp`**. We checked three ways before concluding it:
@@ -132,6 +133,22 @@ And **92 país codes have no row at all** — every AAE, every zona franca, `254
 Tierra del Fuego there is no country CUIT even in principle. `clientTaxId` (ARCA `Id_impositivo`) is the
 ordinary path; `clientCountryTaxId` is a pass-through we validate against the published set when you send
 it. ARCA wants at least one of the two, and the DTO enforces that.
+
+So rather than resolve it, we **publish the catalogue you choose from** — §5, and committed as data for
+seeding. Each row carries ARCA's own two columns (`DST_CUIT`, `DST_Ds`) plus a `countryIso` and an
+`entityType` of ours, so a picker can offer *country → kind of entity → the code to send*.
+
+> ⚠️ Two limits on those two columns, both in §5 and both worth repeating because they decide how you
+> index the table. **`entityType` is exact** — it is the description's own suffix and every row parses.
+> **`countryIso` is a judgement of ours**, assigned by hand: it falls back to the containing territory
+> (`MADEIRA` → `PT`), is `null` on 84 rows, and **repeats across descriptions** (`CD` covers three
+> spellings of the DRC). Group a picker by it; never key by it, and never let it decide anything fiscal.
+
+`receiverPersonType` is **withdrawn** from the request. It was in an earlier draft of this entry as the
+second half of a resolution we then found ARCA's data cannot support, and it does nothing — an accepted
+field with no effect is worse than no field. Its meaning survives as the catalogue's `entityType` column,
+which is where the choice actually happens. If you already send it, stop: `forbidNonWhitelisted` will now
+reject the body.
 
 ### 18.9 — the rate selector changes the *set*, not the numbers
 

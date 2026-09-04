@@ -102,8 +102,3 @@ export function toIncoterms(incoterm: string): string {
     }
     return candidate;
 }
-
-/** How the receiver is constituted, which is what `Cuit_pais_cliente` is keyed by alongside the country. */
-export type ReceiverPersonType = 'INDIVIDUAL' | 'LEGAL_ENTITY' | 'OTHER';
-
-export const RECEIVER_PERSON_TYPES = ['INDIVIDUAL', 'LEGAL_ENTITY', 'OTHER'] as const;

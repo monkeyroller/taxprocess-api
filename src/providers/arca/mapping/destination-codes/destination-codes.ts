@@ -1,6 +1,6 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
 import {DESTINATION_NAMES} from './destination-codes.data.js';
-import {COUNTRY_TAX_IDS} from './country-tax-ids.data.js';
+import {COUNTRY_TAX_ID_ROWS} from './country-tax-id-rows.data.js';
 
 /**
  * ARCA's customs-destination catalogue (`Dst_cmp`, `Dst_merc`) — the fifth canonical fiscal code.
@@ -22,11 +22,10 @@ import {COUNTRY_TAX_IDS} from './country-tax-ids.data.js';
  * three entries against ARCA's forty-nine, and every value a caller could not name was a change to this
  * service.
  *
- * **No ISO annotation is published either**, even for the ~250 rows that would map. Two reasons: it is not
- * needed — a picker has the authority's own name, which is what the caller must reconcile against anyway —
- * and one row makes the cost concrete. `254 ARGENTINA - ISLAS MALVINAS` is a destination ISO assigns to
- * `FK`; annotating it would have this service state a sovereignty position in a lookup table, and a bulk
- * transcription would do exactly that without anyone deciding to.
+ * **No ISO annotation is published either**, even for the ~250 rows that would map, because it is not
+ * needed: a picker has the authority's own name, which is what the caller must reconcile against anyway.
+ * Where an ISO column *is* wanted, it lives in a table of ours rather than being written into the
+ * authority's transcription in place — see `country-tax-id-rows.data.ts`.
  *
  * WSFEv1 publishes the same domain as `FEParamGetTiposPaises`, so this one table serves both services.
  */
@@ -47,6 +46,25 @@ export const DESTINATION_AAE_TIERRA_DEL_FUEGO = '250';
 
 /** Argentina itself — not a valid export destination, and here so a caller's mistake reads clearly. */
 export const DESTINATION_ARGENTINA = '200';
+
+/**
+ * The Islas Malvinas — Argentine territory.
+ *
+ * Named here so the position is stated in the open rather than left to be inferred from a code table. It is
+ * also what this service's own sources say, in their own words: ARCA calls `254` **`ARGENTINA - ISLAS
+ * MALVINAS`**, and INDEC files the islands' localities (Puerto Argentino, Bahía Fox, Pradera del Ganso, …)
+ * under province `94`, *Tierra del Fuego, Antártida e Islas del Atlántico Sur* — see
+ * `indec/localities.generated.ts`. Both tables are transcribed as published, so both already carry it.
+ *
+ * A note for anyone later tempted to bulk-annotate this catalogue with ISO codes: ISO lists `FK` for these
+ * islands, which records the administration the United Kingdom exercises over them and is not this
+ * service's position, nor Argentina's. That is a reason to keep ISO out of *this* table, which is keyed by
+ * the authority's own three-digit code and needs no second vocabulary — not a position to transcribe.
+ *
+ * Nothing downstream branches on this constant; `254` is an ordinary destination for customs purposes and
+ * is validated like any other.
+ */
+export const DESTINATION_ISLAS_MALVINAS = '254';
 
 /** Trimmed, and zero-padded to the three digits the catalogue is keyed by, so `"25"` never matches `250`. */
 export function normalizeDestinationCode(destinationCode: string): string {
@@ -75,10 +93,16 @@ export function toDstCmp(destinationCode: string): number {
 }
 
 /**
- * Every generic per-country CUIT `FEXGetPARAM_DST_CUIT` publishes.
+ * ARCA's `Cuit_pais_cliente` catalogue — the seventh canonical fiscal code.
  *
- * A membership set and nothing more, because **`Cuit_pais_cliente` cannot be derived from a destination.**
- * ARCA publishes no key joining the two tables:
+ * A generic CUIT the authority publishes for each country and kind of entity, so a foreign buyer with no
+ * Argentine identification can still be named. It is **sent by the caller, never derived here**, and this
+ * module's job is to publish the table the caller picks from and to refuse a value the authority does not
+ * know. The rows themselves live in `country-tax-id-rows.data.ts`, which carries the authority's own two
+ * columns plus an ISO code and an entity type of ours for building a picker.
+ *
+ * **It cannot be derived from a destination**, which is why it is picked rather than resolved. ARCA
+ * publishes no key joining the two tables:
  *
  * - `DST_CUIT` rows carry only a CUIT and a description (`"BRASIL - Persona Jurídica"`). There is no país
  *   code on them.
@@ -89,11 +113,21 @@ export function toDstCmp(destinationCode: string): number {
  *   (`KENYA`/`Kenia`, `TUNEZ`/`Túnez`, `SUDAFRICA`/`Sudáfrica`).
  *
  * And 92 país codes have no `DST_CUIT` row at all — every AAE, every zona franca, `254`, and the catch-alls.
- * So for the Tierra del Fuego case there is no country CUIT to resolve even in principle, which is why
- * `clientTaxId` (`Id_impositivo`) is the primary identification and this stays a pass-through a caller
- * supplies when it has one. Rule 1580 wants at least one of the two.
+ * So for the Tierra del Fuego case there is no country CUIT even in principle, which is why `clientTaxId`
+ * (`Id_impositivo`) is the ordinary identification and this is the alternative. Rule 1580 wants at least one
+ * of the two.
  */
-const KNOWN_COUNTRY_TAX_IDS: ReadonlySet<string> = new Set(COUNTRY_TAX_IDS);
+const KNOWN_COUNTRY_TAX_IDS: ReadonlySet<string> = new Set(
+    COUNTRY_TAX_ID_ROWS.map((row) => row.DST_CUIT),
+);
+
+/**
+ * The catalogue itself, for a caller building a picker: country name, ISO code and entity type per CUIT.
+ *
+ * Re-exported here so the seventh canonical code has one entry point, the way the destination table does.
+ */
+export {COUNTRY_TAX_ID_ROWS} from './country-tax-id-rows.data.js';
+export type {CountryTaxIdRow, CountryTaxIdEntityType} from './country-tax-id-rows.data.js';
 
 /** Whether `countryTaxId` is one of the authority's published per-country CUITs. */
 export function isKnownCountryTaxId(countryTaxId: string): boolean {

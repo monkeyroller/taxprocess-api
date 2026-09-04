@@ -366,7 +366,7 @@ Request:
 ```
 
 Optional on `export`, for the cases that need them: `shippingPermitPresent` + `shippingPermits[]` (goods with
-a customs despacho), `incoterm` + `incotermDescription`, `clientCountryTaxId`, `receiverPersonType`,
+a customs despacho), `incoterm` + `incotermDescription`, `clientCountryTaxId`,
 `settledInInvoiceCurrency`, `commercialObservations`, `observations`. `associatedVouchers[]` and `optionals[]`
 sit on the invoice itself, alongside `items`.
 
@@ -1257,9 +1257,11 @@ The values a caller is most likely to need by name:
 | `251`–`275` | Argentine zonas francas (La Plata, Justo Daract, Río Gallegos, Tucumán, Córdoba, Mendoza, General Pico, Comodoro Rivadavia, Salta, Paso de los Libres, Puerto Iguazú, Coronel Rosales, Concepción del Uruguay, Villa Constitución, Puerto Galván, Perico, Zapala) |
 | `280`–`291` | foreign zonas francas (Uruguay, Panamá, Bolivia, Colombia, Costa Rica, Brasil) |
 
-> **No ISO annotation is published**, even for the ~250 rows that would map. `254 ARGENTINA - ISLAS MALVINAS`
-> is why: ISO assigns that destination `FK`, and a mechanical transcription would have this service state a
-> sovereignty position in a lookup table. Render the authority's own wording in a picker.
+> **No ISO annotation is published**, even for the ~250 rows that would map — the table is keyed by the
+> authority's own three-digit code and needs no second vocabulary. Render the authority's own wording in a
+> picker. Note that ARCA's wording for `254` is `ARGENTINA - ISLAS MALVINAS`, and that INDEC files the
+> islands' localities under province `94` (Tierra del Fuego, Antártida e Islas del Atlántico Sur); render
+> both as published.
 
 **Seeding.** The full table is committed at
 `src/providers/arca/mapping/destination-codes/destination-codes.data.ts` as `[code, name]` pairs, and it is
@@ -1269,13 +1271,6 @@ liability that drifts. Take it as JSON with:
 ```bash
 PROBE_ENVIRONMENT=production DUMP_JSON=destinations.json pnpm dump:wsfex-table pais
 ```
-
-`clientCountryTaxId` (ARCA `Cuit_pais_cliente`) is a related but **separate** catalogue of 917 generic
-per-country CUITs, committed at `destination-codes/country-tax-ids.data.ts`
-(`… pnpm dump:wsfex-table cuit`). It is a pass-through, never derived: the authority publishes no key joining
-it to `Dst_cmp` — the rows carry no destination code, the CUIT does not encode one, and joining on the
-description matches 157 of 310 — and 92 destinations, including every AAE and zona franca, have no row at
-all. `clientTaxId` is the ordinary way to identify the buyer; at least one of the two is required.
 
 ### Unit of measure: the sixth canonical code
 
@@ -1298,9 +1293,53 @@ name, with no special validation. The common units are `1` kilogramos, `2` metro
 A neutral `unitOfMeasure: "KG"` could not express "this line is a global discount", which is the whole
 reason this is a fiscal code and not a name.
 
-### Export type, language, incoterm, person type: neutral closed sets
+### The per-country tax id: the seventh canonical code
 
-The four export fields where a standard *does* cover the whole domain, so they travel neutral and this
+`invoice.export.clientCountryTaxId` → ARCA `Cuit_pais_cliente` (identity). **917 values**, committed at
+`src/providers/arca/mapping/destination-codes/country-tax-id-rows.data.ts`
+(`… pnpm dump:wsfex-table cuit`).
+
+The generic tax id the authority publishes for a country and a kind of entity, so a foreign buyer with no
+Argentine identification can still be named on the voucher. **Sent by the caller, never derived here** — and
+that is not a simplification, it is the only thing the authority's data supports:
+
+- the rows carry a CUIT and a description (`"BRASIL - Persona Jurídica"`) and **no destination code**;
+- the CUIT does not encode one. `ESTADOS UNIDOS` is `50000002124`, whose body *is* its destination code
+  `212` — but `URUGUAY` is `50000000016`, `BRASIL` `50000000059`, `CHILE` `50000000032`: a legacy sequence
+  unrelated to their destination codes 225, 203, 208;
+- joining on the description matches **157 of 310**, the two tables spelling countries differently
+  (`KENYA`/`Kenia`, `TUNEZ`/`Túnez`);
+- and **92 destinations have no row at all** — every AAE, every zona franca, `254`, and the catch-alls. For
+  Tierra del Fuego there is none even in principle.
+
+So it is published for a caller to *choose* from. `clientTaxId` (the buyer's own identifier in its own
+country) is the ordinary path, and **at least one of the two is required**.
+
+Each row carries the authority's two columns plus two of ours, which is what a picker selects on:
+
+| column | whose | meaning |
+| --- | --- | --- |
+| `DST_CUIT` | ARCA | the value to send |
+| `DST_Ds` | ARCA | `"<country> - <entity type>"`, verbatim |
+| `countryIso` | ours | ISO 3166-1 alpha-2, or `null` |
+| `entityType` | ours | `INDIVIDUAL` / `LEGAL_ENTITY` / `OTHER_ENTITY`, read off the suffix |
+
+> ⚠️ **`countryIso` is a judgement, not a transcription, and must not drive a fiscal decision.** ARCA
+> publishes no ISO column, so every value was assigned by hand against the description. Where a territory
+> has no code of its own it carries the smallest coded territory containing it — `MADEIRA` and
+> `ISLAS AZORES` → `PT`, `Islas Canarias` → `ES`, `LABUAN` → `MY`. That is lossy on purpose: Madeira is a
+> distinct tax jurisdiction from mainland Portugal, which is exactly why ARCA lists it separately. It is
+> `null` on **84 rows** (the possession buckets, the `INDETERMINADO` catch-alls, dissolved states), and it
+> **repeats** — `CD` covers three spellings of the DRC, `FM` three of Micronesia — so nothing may be keyed
+> by it. Use it to group a picker; send `DST_CUIT`.
+
+`entityType` is exact by contrast — every description carries its suffix and none fail to parse. Note ARCA
+mislabels two of its own catch-alls: `PARA PERSONAS FISICAS DE …` rows also exist under the
+`Persona Jurídica` suffix. The suffix is transcribed as published, because the name is not evidence.
+
+### Export type, language, incoterm: neutral closed sets
+
+The three export fields where a standard *does* cover the whole domain, so they travel neutral and this
 service maps them. All verified against production 2026-09-04.
 
 | field | values | ARCA target |
@@ -1308,7 +1347,6 @@ service maps them. All verified against production 2026-09-04.
 | `export.exportType` | `GOODS`, `SERVICES`, `OTHER` | `Tipo_expo` 1, 2, 4 — note ARCA skips 3 |
 | `export.language` | `es`, `en`, `pt` (ISO 639-1) | `Idioma_cbte` 1, 2, 3 |
 | `export.incoterm` | the 11 ICC Incoterms 2020 clauses | `Incoterms` (identity) |
-| `export.receiverPersonType` | `INDIVIDUAL`, `LEGAL_ENTITY`, `OTHER` | selects among the per-country CUITs |
 
 `exportType` is deliberately **not** `concept`. `concept` is 1 goods / 2 services / **3 both**;
 `exportType` has an **`OTHER`** and no "both". Each has a member the other lacks, so they are separate

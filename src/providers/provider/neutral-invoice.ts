@@ -99,8 +99,6 @@ export interface NeutralInvoiceExport {
      * and has no value at all for a special customs area or a free zone. `clientTaxId` is the ordinary path.
      */
     readonly clientCountryTaxId?: string;
-    /** How the buyer is constituted, which is what the per-country tax id is keyed by alongside the country. */
-    readonly receiverPersonType?: 'INDIVIDUAL' | 'LEGAL_ENTITY' | 'OTHER';
     /** The ICC Incoterms clause. An international standard, so it travels as itself. */
     readonly incoterm?: string;
     readonly incotermDescription?: string;

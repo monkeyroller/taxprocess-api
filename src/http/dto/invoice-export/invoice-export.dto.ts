@@ -163,18 +163,14 @@ export class InvoiceExportDto {
      * The authority's generic per-country tax id for the buyer (AR: `Cuit_pais_cliente`).
      *
      * Sent, never derived. The authority publishes no key joining these to its destination codes — AR's own
-     * two tables share no identifier, and the value is not computable from the destination — so a caller that
-     * wants this specific identifier supplies it and the provider validates it against the published set.
+     * two tables share no identifier, and the value is not computable from the destination — so the caller
+     * picks one from the published catalogue (§5) and the provider checks it against that set. The catalogue
+     * carries a country and an entity type per code, which is what a picker selects on.
      */
     @IsOptional()
     @IsString()
     @Length(1, 11)
     clientCountryTaxId?: string;
-
-    /** How the buyer is constituted, which is what the per-country tax id is keyed by alongside the country. */
-    @IsOptional()
-    @IsIn(['INDIVIDUAL', 'LEGAL_ENTITY', 'OTHER'])
-    receiverPersonType?: 'INDIVIDUAL' | 'LEGAL_ENTITY' | 'OTHER';
 
     /**
      * The ICC Incoterms clause (e.g. `"CIF"`, `"FOB"`, `"DAP"`).

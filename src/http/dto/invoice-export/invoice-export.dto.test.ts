@@ -83,10 +83,6 @@ describe('InvoiceExportDto', () => {
             expect(await messagesOf(block({exportType: 'BOTH'}))).toContain('exportType');
             expect(await messagesOf(block({language: 'fr'}))).toContain('language');
         });
-
-        it('refuses a receiverPersonType outside the set', async () => {
-            expect(await messagesOf(block({receiverPersonType: 'COMPANY'}))).toContain('receiverPersonType');
-        });
     });
 
     it('refuses a zoneless datetime for the payment date, as every other date on this wire does', async () => {

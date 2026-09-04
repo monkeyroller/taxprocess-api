@@ -1,7 +1,9 @@
 import {describe, expect, it} from '@jest/globals';
 import {
+    COUNTRY_TAX_ID_ROWS,
     DESTINATIONS,
     DESTINATION_AAE_TIERRA_DEL_FUEGO,
+    DESTINATION_ISLAS_MALVINAS,
     isKnownCountryTaxId,
     isKnownDestinationCode,
     normalizeDestinationCode,
@@ -30,9 +32,9 @@ describe('DESTINATIONS', () => {
     });
 
     it('publishes no ISO annotation on any row', () => {
-        // Deliberate, and 254 is why: ISO assigns that destination to FK, so annotating it would have this
-        // service state a sovereignty position in a lookup table. A bulk transcription would do it silently.
-        expect(DESTINATIONS.get('254')).toBe('ARGENTINA - ISLAS MALVINAS');
+        // The table is keyed by the authority's own three-digit code and needs no second vocabulary. Rows
+        // are transcribed as published, which is why 254 reads as ARCA wrote it.
+        expect(DESTINATIONS.get(DESTINATION_ISLAS_MALVINAS)).toBe('ARGENTINA - ISLAS MALVINAS');
         for (const value of DESTINATIONS.values()) {
             expect(typeof value).toBe('string');
         }
@@ -93,5 +95,55 @@ describe('country tax ids (Cuit_pais_cliente)', () => {
         expect(isKnownCountryTaxId('50000002124')).toBe(true);
         expect(isKnownCountryTaxId('50000002254')).toBe(false);
         expect(isKnownCountryTaxId('50000002034')).toBe(false);
+    });
+});
+
+describe('COUNTRY_TAX_ID_ROWS', () => {
+    it('carries the whole production table', () => {
+        expect(COUNTRY_TAX_ID_ROWS).toHaveLength(917);
+    });
+
+    it('is the single transcription the membership check reads', () => {
+        // One committed copy of one ARCA table. Two would drift, and only one of them would be checked.
+        const codes = new Set(COUNTRY_TAX_ID_ROWS.map((row) => row.DST_CUIT));
+        expect(codes.size).toBe(917);
+        for (const row of COUNTRY_TAX_ID_ROWS) {
+            expect(isKnownCountryTaxId(row.DST_CUIT)).toBe(true);
+        }
+    });
+
+    it('reads an entity type off every row, since every description carries the suffix', () => {
+        // What a picker selects on, alongside the country. No row fails to parse, so the column is exact
+        // rather than best-effort -- unlike countryIso below.
+        for (const row of COUNTRY_TAX_ID_ROWS) {
+            expect(row.entityType).not.toBeNull();
+        }
+        expect(COUNTRY_TAX_ID_ROWS.filter((row) => row.entityType === 'INDIVIDUAL')).toHaveLength(305);
+        expect(COUNTRY_TAX_ID_ROWS.filter((row) => row.entityType === 'LEGAL_ENTITY')).toHaveLength(309);
+        expect(COUNTRY_TAX_ID_ROWS.filter((row) => row.entityType === 'OTHER_ENTITY')).toHaveLength(303);
+    });
+
+    it('transcribes the suffix even where the authority mislabels its own row', () => {
+        // ARCA publishes a "PARA PERSONAS FISICAS DE ..." row under the Persona Juridica suffix. The suffix
+        // is the data; the name is not evidence, and correcting it here would be inventing a row.
+        const mislabelled = COUNTRY_TAX_ID_ROWS.find((row) => row.DST_CUIT === '55000009996');
+        expect(mislabelled?.DST_Ds).toBe('PARA PERSONAS FISICAS DE OTROS PAISES - Persona Jurídica');
+        expect(mislabelled?.entityType).toBe('LEGAL_ENTITY');
+    });
+
+    it('leaves countryIso null where the label names no single coded territory', () => {
+        // A judgement of ours, not a transcription -- so it may not drive a fiscal decision, and the rows it
+        // cannot answer for say so rather than guessing. 28 descriptions across the three entity types.
+        expect(COUNTRY_TAX_ID_ROWS.filter((row) => row.countryIso === null)).toHaveLength(84);
+        const possession = COUNTRY_TAX_ID_ROWS.find((row) => row.DST_CUIT === '50000001454');
+        expect(possession?.DST_Ds).toBe('POS.BRITANICA (AFRICA) - Persona Física');
+        expect(possession?.countryIso).toBeNull();
+    });
+
+    it('does not key by countryIso, which repeats across descriptions', () => {
+        // Three spellings of Micronesia, two of the DRC, and GAZA alongside the palestinian territories.
+        const congo = COUNTRY_TAX_ID_ROWS.filter((row) => row.countryIso === 'CD');
+        expect(congo.length).toBeGreaterThan(3);
+        expect(new Set(congo.map((row) => row.DST_Ds)).size).toBeGreaterThan(1);
     });
 });
