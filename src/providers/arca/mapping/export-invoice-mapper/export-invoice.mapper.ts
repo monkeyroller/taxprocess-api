@@ -293,7 +293,9 @@ export function buildFexInvoiceRequest(
             'UNMAPPED_CURRENCY',
         );
     }
-    const currencyId = toMonId(invoice.currencyCode);
+    // Named explicitly: the currencies an export voucher may carry are the export service's catalogue,
+    // which is the same set the export rate series is filtered against.
+    const currencyId = toMonId(invoice.currencyCode, 'WSFEXV1');
     assertLocalCurrencyRate(currencyId, invoice.currencyRate);
     assertRequiredForInvoice(block, voucherType);
 

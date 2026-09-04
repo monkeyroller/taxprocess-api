@@ -2,6 +2,7 @@ import {ArcaValidationError} from '../../sdk/core/errors.js';
 import {
     ARCA_CURRENCY_CODES,
     ARCA_UNQUOTABLE_CODES,
+    currencyCodesFor,
     isKnownCurrencyCode,
     normalizeCurrencyCode,
     toMonId,
@@ -108,5 +109,34 @@ describe('currency-codes (canonical currencyCode → ARCA MonId)', () => {
                 expect(known).toBe(accepted);
             }
         });
+    });
+});
+
+describe('currencyCodesFor', () => {
+    it('answers one set for every service, which is what production publishes', () => {
+        // Measured 2026-09-04: WSFEX's FEXGetPARAM_MON is byte-identical to WSFEv1's catalogue, and the two
+        // price the same 27 codes at the same rates. So this is a seam, not a divergence -- and the table
+        // exists because equal today is not the same, each service banding a submitted rate against its own
+        // reference.
+        expect(currencyCodesFor('WSFEXV1')).toBe(currencyCodesFor('WSFEV1'));
+        expect(currencyCodesFor('WSMTXCA')).toBe(currencyCodesFor('WSFEV1'));
+    });
+
+    it('reads WSFEv1 when no service is named, which is what an omitted selector has always meant', () => {
+        expect(currencyCodesFor()).toBe(currencyCodesFor('WSFEV1'));
+    });
+
+    it('holds the invoicing filter and the rates filter to the same set per service', () => {
+        // The invariant the intersection on /currencies/rates exists to guarantee. Splitting one side alone
+        // would let a caller cache a rate for a currency it cannot then invoice in.
+        for (const code of currencyCodesFor('WSFEXV1')) {
+            expect(isKnownCurrencyCode(code, 'WSFEXV1')).toBe(true);
+            expect(toMonId(code, 'WSFEXV1')).toBe(code);
+        }
+    });
+
+    it('refuses an unknown code per service, naming the field', () => {
+        expect(() => toMonId('RUB', 'WSFEXV1')).toThrow(ArcaValidationError);
+        expect(isKnownCurrencyCode('RUB', 'WSFEXV1')).toBe(false);
     });
 });

@@ -80,7 +80,7 @@ function resolveCurrencyId(iso: string): string {
  */
 function invoiceCurrencyId(invoice: NeutralInvoice): string {
     if (invoice.currencyCode != null) {
-        return toMonId(invoice.currencyCode);
+        return toMonId(invoice.currencyCode, 'WSFEV1');
     }
     if (invoice.currencyIso != null) {
         return resolveCurrencyId(invoice.currencyIso);

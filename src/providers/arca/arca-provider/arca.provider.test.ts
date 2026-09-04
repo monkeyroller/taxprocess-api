@@ -2272,6 +2272,16 @@ describe('ArcaProvider export currency rates', () => {
         expect(result.rates.map((rate) => rate.currencyCode).sort()).toEqual(['DOL', 'PES']);
     });
 
+    it('says which service priced the batch, on both series', async () => {
+        // A rate is only valid against the service that will band it. The two agree today, so this field is
+        // what makes a future divergence diagnosable instead of silent -- key a cache by it.
+        const exported = await new ArcaProvider().currencyRates('testing', ['DOL'], undefined, 'WSFEXv1');
+        expect(exported.webService).toBe('WSFEXv1');
+
+        const domestic = await new ArcaProvider().currencyRates('testing', ['PES']);
+        expect(domestic.webService).toBe('WSFEv1');
+    });
+
     it('leaves the domestic series on the fan-out', async () => {
         getCurrencyRate.mockResolvedValue({monId: 'DOL', rate: 1508, rateDate: '20260903'});
 

@@ -18,6 +18,19 @@ import type {WebService} from '../../../provider/web-service.js';
 /** ARCA's three invoicing services, in the SDK's own naming rather than the wire's. */
 export type InvoiceRoute = 'WSFEV1' | 'WSMTXCA' | 'WSFEXV1';
 
+/**
+ * The route back in the caller's spelling, for an answer that has to say which service produced it.
+ *
+ * Two spellings exist because the route is internal and `WebService` is the contract's — §7 publishes the
+ * mixed-case names and this module normalizes them. Kept next to the type so a new route cannot be added
+ * without deciding what to call it on the wire.
+ */
+export const WEB_SERVICE_BY_ROUTE: Readonly<Record<InvoiceRoute, WebService>> = {
+    WSFEV1: 'WSFEv1',
+    WSMTXCA: 'WSMTXCA',
+    WSFEXV1: 'WSFEXv1',
+};
+
 /** The `configuration.webService` value core sends → the route it names. */
 const ROUTE_BY_WEB_SERVICE: Readonly<Record<WebService, InvoiceRoute>> = {
     WSFEv1: 'WSFEV1',

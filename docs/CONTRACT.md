@@ -701,10 +701,18 @@ customers' data, and leave a tenant with no valid integration unable to read a p
 { "entityCode": "ARCA", "environment": "production", "webService": "WSFEXv1" }
 ```
 
-**`webService` changes the SET, not the numbers.** Measured against production 2026-09-04
-(`pnpm probe:wsfex-rates 20260903`): ARCA's two services publish **identical rates** for every currency
-priced that day, and the export service's whole-table method agrees with its own per-currency one. There is
-no per-service price, so a cached rate needs no service dimension.
+**`webService` changes the SET, not today's numbers — but it is still the cache key.** Measured against
+production 2026-09-04 (`pnpm probe:wsfex-rates 20260903`): ARCA's two services publish **identical rates**
+for every currency priced that day, and the export service's whole-table method agrees with its own
+per-currency one.
+
+> ⚠️ **Key a rate cache by `(currencyCode, day, webService)` regardless.** Each service bands a submitted
+> rate against its own reference, and nothing published guarantees the two references are one number — the
+> manuals describe them in identical words without saying so. A rate fetched from one series and spent on
+> the other is judged against a value this service never read, which shows up as a rejection months later
+> with nothing in the row to explain it. Every answer carries `webService` for exactly this reason,
+> including one that omitted it from the request. While the two agree, comparing them is a free drift
+> detector; merging them throws that away.
 
 What differs is breadth. The export service prices only the subset an export voucher may legally name — **27
 of the 47 supported codes** on the day measured — so `"webService": "WSFEXv1"` answers the eligibility
@@ -718,6 +726,8 @@ means what it means above.
 `200 →`
 ```jsonc
 { "entityCode": "ARCA", "environment": "production",
+  // which of the entity's services priced this batch -- always present, WSFEv1 when the request omitted it
+  "webService": "WSFEv1",
   // `date` was Friday the 28th, so `rateDate` is Thursday the 27th — the previous working day's close —
   // while `validFrom`/`validUntil` are Friday's own 24 hours, the day you asked about. The two answer
   // different questions and routinely disagree; both rows carry the same window for that reason.
@@ -1232,7 +1242,7 @@ Per-entity, for the same reason the other catalogues are: a future entity regist
 | buyer | `receiver` | `receiver` | **`export`** |
 | `destinationCode` | — | — | **required** |
 | `unitOfMeasureCode` | — | required | **required** |
-| currency catalogue | the 47 codes below | not determined | **the same 47** |
+| currency catalogue | the 47 codes below | not determined | **the same 47**, resolved per service |
 | rate source | one call per currency | not determined | **one call for the whole day** |
 | points of sale | CAE/CAEA register | not determined | **FEEWS — a separate register** |
 | `requestId` | not used | not determined | **required** |

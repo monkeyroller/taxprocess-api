@@ -24,7 +24,11 @@ import {delegateCredentialStore, type DelegateCredentialStore} from '../auth/del
 import {toArcaEnvironment} from '../auth/environment/environment.js';
 import {toCbteTipo} from '../mapping/code-maps/code-maps.js';
 import {toPadronService} from '../mapping/padron-routing/padron-routing.js';
-import {invoiceRoute, type InvoiceRoute} from '../mapping/invoice-routing/invoice-routing.js';
+import {
+    invoiceRoute,
+    WEB_SERVICE_BY_ROUTE,
+    type InvoiceRoute,
+} from '../mapping/invoice-routing/invoice-routing.js';
 import {
     buildFexInvoiceRequest,
     toNeutralExportResult,
@@ -112,6 +116,9 @@ const ENTITY_CODE = 'ARCA';
  * so an `ArcaAuthError` stops the batch after at most this many calls.
  */
 export const CURRENCY_FAN_OUT_LIMIT = 8;
+
+/** The route `exportRates` answers for. Named so the two catalogue filters and the echo cannot disagree. */
+const EXPORT_ROUTE: InvoiceRoute = 'WSFEXV1';
 
 /**
  * What one code's rate lookup produced. A discriminated union rather than two object shapes, since
@@ -695,7 +702,7 @@ export class ArcaProvider extends TaxEntityProvider {
             // disagreeing. Unfiltered, a sync would surface a rate for a code `/invoices/authorize` then
             // refuses with `400 UNKNOWN_CODE` — a currency a caller can offer in a picker but never invoice
             // in. `namesReference` is ignored here alone, since the reference row is pushed above.
-            const catalogued = partitionCurrencyCodes(catalogue.map((entry) => entry.id));
+            const catalogued = partitionCurrencyCodes(catalogue.map((entry) => entry.id), route);
             toFetch = catalogued.toFetch;
 
             // A catalogue entry we do not know is the only signal that `ARCA_CURRENCY_CODES` has fallen
@@ -729,7 +736,7 @@ export class ArcaProvider extends TaxEntityProvider {
         } else {
             // An explicit list, split by the same rule the catalogue is. Only the meaning of the two
             // non-fetchable buckets differs once a caller named them rather than the authority.
-            const requested = partitionCurrencyCodes(currencyCodes);
+            const requested = partitionCurrencyCodes(currencyCodes, route);
             toFetch = requested.toFetch;
 
             if (requested.namesReference) {
@@ -746,6 +753,7 @@ export class ArcaProvider extends TaxEntityProvider {
             if (toFetch.length === 0) {
                 return this.assembleRates(
                     environment,
+                    route,
                     localRates,
                     validity,
                     localUnavailable,
@@ -760,6 +768,7 @@ export class ArcaProvider extends TaxEntityProvider {
         this.rethrowIfSystemic(fetched);
         return this.assembleRates(
             environment,
+            route,
             [...localRates, ...fetched.rates],
             validity,
             [...localUnavailable, ...fetched.unavailable],
@@ -841,7 +850,8 @@ export class ArcaProvider extends TaxEntityProvider {
         validity: RateValidity,
         refreshAfter: string,
     ): Promise<CurrencyRatesResult> {
-        const requested = currencyCodes === undefined ? undefined : partitionCurrencyCodes(currencyCodes);
+        const requested =
+            currencyCodes === undefined ? undefined : partitionCurrencyCodes(currencyCodes, EXPORT_ROUTE);
 
         const rates: Array<UnscopedRate> = [];
         const unavailable: Array<CurrencyRateUnavailableDto> = [];
@@ -859,7 +869,15 @@ export class ArcaProvider extends TaxEntityProvider {
         // Every code answered without the authority, so resolve no ticket at all — the same guarantee the
         // domestic path makes: a peso-only till must not be able to fail because ARCA was unreachable.
         if (requested?.toFetch.length === 0) {
-            return this.assembleRates(environment, rates, validity, unavailable, refreshAfter, undefined);
+            return this.assembleRates(
+                environment,
+                EXPORT_ROUTE,
+                rates,
+                validity,
+                unavailable,
+                refreshAfter,
+                undefined,
+            );
         }
 
         const auth = await this.delegateAuth(environment, ServiceId.WSFEXV1);
@@ -874,7 +892,7 @@ export class ArcaProvider extends TaxEntityProvider {
         // supports — the same intersection the domestic whole-table branch applies, so the two endpoints
         // still agree about which currencies can be invoiced in.
         const wanted =
-            requested?.toFetch ?? partitionCurrencyCodes([...byCode.keys()]).toFetch;
+            requested?.toFetch ?? partitionCurrencyCodes([...byCode.keys()], EXPORT_ROUTE).toFetch;
 
         for (const code of wanted) {
             const row = byCode.get(normalizeCurrencyCode(code));
@@ -899,7 +917,15 @@ export class ArcaProvider extends TaxEntityProvider {
         }
 
         const vintage = vintageOf(rateDays);
-        return this.assembleRates(environment, rates, validity, unavailable, refreshAfter, vintage);
+        return this.assembleRates(
+            environment,
+            EXPORT_ROUTE,
+            rates,
+            validity,
+            unavailable,
+            refreshAfter,
+            vintage,
+        );
     }
 
     /**
@@ -1048,6 +1074,7 @@ export class ArcaProvider extends TaxEntityProvider {
      */
     private assembleRates(
         environment: GenericEnvironment,
+        route: InvoiceRoute,
         rates: Array<UnscopedRate>,
         validity: RateValidity,
         unavailable: Array<CurrencyRateUnavailableDto>,
@@ -1057,6 +1084,7 @@ export class ArcaProvider extends TaxEntityProvider {
         return {
             entityCode: ENTITY_CODE,
             environment,
+            webService: WEB_SERVICE_BY_ROUTE[route],
             rates: withValidity(rates, validity),
             // Optional keys are omitted rather than sent empty or `null`.
             ...(unavailable.length > 0 ? {unavailable} : {}),

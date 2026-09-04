@@ -32,7 +32,7 @@ blocking, and every existing call behaves exactly as before.
 | 18.6 | The result gains `reprocessed` | **Treat `true` as an error** unless you deliberately retried — see below |
 | 18.7 | `POST /invoices/last-request-id` — new. `501` on a WSFEv1-only entity | Use it to seed/recover 18.1 |
 | 18.8 | `POST /points-of-sale` gains an optional `webService`. The export register is a **different register** | **Send `"WSFEXv1"`** when checking whether the issuer can emit a Factura E |
-| 18.9 | `POST /currencies/rates` gains an optional `webService` | Optional — see 18.13 |
+| 18.9 | 🟡 `POST /currencies/rates` gains an optional `webService`, and the answer now always carries one | **Send it, and key your rate cache by it** — see below |
 | 18.10 | **`destinationCode`** — a fifth canonical fiscal code (ARCA `Dst_cmp`), 310 values | **Seed it.** `250` is the Tierra del Fuego AAE |
 | 18.11 | **`unitOfMeasureCode`** — a sixth canonical fiscal code (ARCA `Pro_umed`), 49 values, three of which are **not units** | **Seed it**, and read the note on `0`/`97`/`99` |
 | 18.12 | `exportType`, `language`, `incoterm` — neutral, closed sets | **None** beyond using them |
@@ -177,38 +177,64 @@ field with no effect is worse than no field. Its meaning survives as the catalog
 which is where the choice actually happens. If you already send it, stop: `forbidNonWhitelisted` will now
 reject the body.
 
-### 18.9 — the rate selector changes the *set*, not the numbers
+### 18.9 — 🟡 the rates the two services publish are equal today; key your cache by service anyway
 
-Worth stating plainly because an earlier draft of this work assumed otherwise, and the measurement retracted
-it. Production, 2026-09-04, `pnpm probe:wsfex-rates 20260903`:
+The measurement first, because it is the part that is certain. Production, 2026-09-04,
+`pnpm probe:wsfex-rates 20260903`:
 
 - **all 27 currencies priced that day agree exactly** between `FEParamGetCotizacion` (wsfe) and
   `FEXGetPARAM_Ctz` (wsfex);
 - WSFEX's whole-table method agrees with its own per-currency method on all 27;
 - `FEXGetPARAM_MON` is **the same 49-row catalogue** WSFEv1 publishes.
 
-So there is **no per-service rate**, and **no change to `fiscal_currency_rate`** — in particular its primary
-key does not need a service dimension. If you saw a draft of this asking for that, disregard it.
+**Equal today is not the same, and that distinction is the ask.** Each service bands a submitted rate
+against its own reference — 10119 for WSFEv1, 1667 for WSFEX — and the manuals describe those references in
+identical words without saying they are one number. Nothing published guarantees the agreement, and nothing
+would announce its ending. A rate fetched from one series and spent on the other would be judged against a
+number this service never read: the voucher is rejected, or worse accepted out of band, and the cached row
+carries nothing that explains it.
 
-What the export service *does* differ on is breadth: it prices only the subset an export voucher may name —
-**27 of 49** on the day measured, which is ARCA's rule 1600. So `webService: "WSFEXv1"` on
-`/currencies/rates` answers "which currencies may an export voucher name today, and at what rate", in one
-call instead of a fan-out. A requested code the day did not price comes back `unavailable` with
-`reason: "NO_PUBLICATION"`.
+So `fiscal_currency_rate` should be keyed **`(fiscalCurrencyId, fiscalRateServiceId)`**. Not because the
+values differ — they do not — but because the migration is free precisely while they agree, and expensive
+under pressure once they do not. While the two rows hold equal values you get a free drift detector: have
+the sync **assert the equality** and alarm rather than merge. That is a better outcome than either of the
+alternatives, which are to discover a divergence from a rejected voucher or never to discover it at all.
+
+*(An earlier version of this entry said the opposite — that the identical measurement meant the primary key
+should stay as it is. That read a measurement as a guarantee. The measurement stands; the conclusion drawn
+from it does not.)*
+
+Two things this service now does to make the ask actionable:
+
+- **`webService` is echoed on every rates answer**, including one that omitted it, so a stored row can
+  always say which series priced it. It is the cache-key dimension, handed to you rather than inferred.
+- **The supported-currency catalogue is resolved per service**, so `unavailable: UNKNOWN_CODE` is answered
+  against the catalogue of the service that would authorize. Both services publish the same 49 codes today,
+  and the invariant that holds is the one already documented: the rates you can cache and the currencies you
+  can invoice in are the same set — now per service.
+
+What the export service *does* differ on today is breadth: it prices only the subset an export voucher may
+name — **27 of 49** on the day measured, which is ARCA's rule 1600. So `webService: "WSFEXv1"` answers
+"which currencies may an export voucher name today, and at what rate" in one call instead of a fan-out. A
+requested code the day did not price comes back `unavailable` with `reason: "NO_PUBLICATION"`.
 
 One more measurement worth having: asked for a **Saturday or Sunday**, the batch does not return empty — it
 returns the previous business day's close and says so in each row's `Fecha_ctz`. So the authority resolves
 the day itself, and `rateDate` on our answer still means what §3 says it means.
 
-### If you want the rate-service split anyway
+### 🟡 `common.fiscal_rate_service`, which 18.9 now depends on
 
 You asked about a `common.fiscal_rate_service` table bound to a fiscal entity, with `is_for_retail` and
 `is_for_customs` as non-exclusive flags, and public rate lookups keyed on the service rather than the
-entity. That shape is sound and we would still recommend it — a service belongs to exactly one entity, so
-naming the service makes an inconsistent (entity, service) pair **unrepresentable** rather than merely
-checked, which is strictly better than the runtime check we ended up writing on our side.
+entity. That shape is sound, we recommend it, and 18.9 now needs it — the rate cache key it asks for is a
+foreign key to this table.
 
-Two notes if you build it:
+The part worth keeping from your own framing: a service belongs to exactly one entity, so **naming the
+service makes an inconsistent (entity, service) pair unrepresentable** rather than merely checked. That is
+strictly better than the runtime check we ended up writing on our side, and it is why the public rate
+lookup should take the service and imply the entity rather than take both.
+
+Notes for the migration:
 
 - The purpose flags should be **seeded from §5's services catalogue**, not inferred from the service name.
   Inferring is what breaks when a second entity arrives whose decomposition differs. For ARCA today:
@@ -216,16 +242,20 @@ Two notes if you build it:
 - Consider `CHECK (is_for_retail OR is_for_customs)`, and a partial unique index per purpose per entity. A
   row true for neither can never be selected; two rows true for the same purpose is an ambiguity with no
   defined answer.
-- It is **not** needed for rates, per 18.9. Its value is selecting which service issues a voucher.
+- **The sync runs once per rate service** per entity rather than once per entity, sending `webService` each
+  time. Our field is optional with a WSFEv1 default, which is exactly the hazard: a WSFEXv1 rate fetched
+  without it is silently a WSFEv1 rate, and now that the answer echoes the service, a row whose stored
+  service disagrees with the echo is a bug you can actually catch.
 
 ### What did NOT change
 
 - **Every existing call.** A domestic `/invoices/authorize` body validates and behaves exactly as before —
   the 728 tests that covered it pass unmodified, which is how we checked rather than by reading.
-- `fiscal_currency_rate`, its primary key, and the whole cotización cache. Rates are per (currency, day),
-  not per service.
 - The supported currency catalogue: still the 47 codes of entry 17, and the export service accepts the same
-  set.
+  set — now resolved per service, so a future divergence is a change to one table rather than to every
+  caller.
+- The rates *numbers*. Nothing about 18.9 says the two services publish different values; they do not. What
+  changes is only what the cache is keyed by, and that the answer says which series it came from.
 - `bandBasis` stays informational and untyped, and gains no new value here. You already store an
   unrecognised one and warn rather than failing, which is the right shape.
 - The `CREDENTIALS_REQUIRED` handshake (§4), the date/UTC rule (§2), delegated authorization (§10), and the
