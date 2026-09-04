@@ -1,7 +1,7 @@
 import {Type} from 'class-transformer';
 import {
+    ArrayMinSize,
     IsArray,
-    IsDefined,
     IsIn,
     IsInt,
     IsNumber,
@@ -18,7 +18,14 @@ import {
     type ValidatorConstraintInterface,
 } from 'class-validator';
 import {NEUTRAL_INVOICE_CONCEPTS, type NeutralInvoiceConcept} from '../../providers/provider/neutral-invoice.js';
+import {WEB_SERVICES, type WebService} from '../../providers/provider/web-service.js';
 import {IsAuthorityDate} from './authority-date/authority-date.js';
+import {
+    InvoiceAssociatedVoucherDto,
+    InvoiceExportDto,
+    InvoiceItemDto,
+    InvoiceOptionalDto,
+} from './invoice-export/invoice-export.dto.js';
 
 /**
  * The request carries provider-agnostic canonical codes. The provider maps these to the tax entity's real
@@ -90,26 +97,82 @@ export class InvoiceTotalsDto {
 @ValidatorConstraint({name: 'invoiceCarriesAmount'})
 class InvoiceCarriesAmount implements ValidatorConstraintInterface {
     validate(_value: unknown, args: ValidationArguments): boolean {
-        const {lines, totals} = args.object as {lines?: Array<InvoiceLineDto>; totals?: InvoiceTotalsDto};
+        const {lines, totals, items} = args.object as {
+            lines?: Array<InvoiceLineDto>;
+            totals?: InvoiceTotalsDto;
+            items?: Array<InvoiceItemDto>;
+        };
         const lineAmount = (lines ?? []).some((l) => l.netAmount !== 0 || l.taxAmount !== 0);
         const headerAmount = [totals?.untaxed, totals?.exempt, totals?.perceptions].some(
             (amount) => amount !== undefined && amount !== 0,
         );
-        return lineAmount || headerAmount;
+        // Item detail is the third channel, and the only one an export voucher uses: it is zero-rated, so it
+        // declares no tax bases and carries its money per line instead. Without this, every export would
+        // fail a check meant to catch an empty domestic one.
+        const itemAmount = (items ?? []).some((item) => item.totalAmount !== 0);
+        return lineAmount || headerAmount || itemAmount;
     }
 
     defaultMessage(): string {
-        return 'invoice carries no amount — send at least one line with an amount, or a non-zero totals entry';
+        return (
+            'invoice carries no amount — send at least one line with an amount, a non-zero totals entry, ' +
+            'or itemized detail'
+        );
     }
 }
 
 /**
- * Whether a currency field was actually sent. `null` counts as absent, matching `@IsOptional()`, which skips
- * a property's validators for `null` as well as `undefined`. Testing `=== undefined` alone let
+ * Exactly one of `receiver` and `export` — never both, never neither.
+ *
+ * The two describe mutually exclusive documents. A domestic voucher identifies its buyer by an
+ * identification type and number plus a fiscal condition; an export identifies it by free text plus a
+ * customs destination, and has no equivalent of any of the three. Carrying both would leave the provider
+ * choosing which document the caller meant.
+ *
+ * `concept` travels with `receiver` for the same reason: it is the domestic "what is being invoiced", whose
+ * export counterpart is `export.exportType` — a different vocabulary rather than a renaming, with a member
+ * (`OTHER`) `concept` lacks and lacking one (`both`) `concept` has. Sending it alongside `export` means the
+ * caller has confused the two.
+ */
+@ValidatorConstraint({name: 'invoiceNamesAReceiver'})
+class InvoiceNamesAReceiver implements ValidatorConstraintInterface {
+    validate(_value: unknown, args: ValidationArguments): boolean {
+        const {receiver, export: exportBlock, concept} = args.object as NeutralInvoiceDto;
+        const domestic = present(receiver);
+        const foreign = present(exportBlock);
+        if (domestic === foreign) {
+            return false;
+        }
+        return domestic ? present(concept) : !present(concept);
+    }
+
+    defaultMessage(args: ValidationArguments): string {
+        const {receiver, export: exportBlock} = args.object as NeutralInvoiceDto;
+        const domestic = present(receiver);
+        const foreign = present(exportBlock);
+        if (domestic && foreign) {
+            return 'send either receiver (a domestic voucher) or export (a foreign-trade voucher), not both';
+        }
+        if (!domestic && !foreign) {
+            return 'invoice names no buyer — send receiver for a domestic voucher or export for a foreign-trade one';
+        }
+        return domestic
+            ? 'a domestic voucher needs concept (1 goods, 2 services, 3 both)'
+            : 'an export voucher has no concept — its counterpart is export.exportType';
+    }
+}
+
+/**
+ * Whether a field was actually sent. `null` counts as absent, matching `@IsOptional()`, which skips a
+ * property's validators for `null` as well as `undefined`. Testing `=== undefined` alone let
  * `{"currencyIso": null}` pass the exactly-one check and reach the mapper as a `null` that died on
  * `.toUpperCase()`, turning a `400` into an opaque `500`.
+ *
+ * Takes `unknown` on purpose. The DTO types declare these properties non-nullable, so narrowing them would
+ * make the `null` half look unreachable and invite its removal — but the value being tested came off a JSON
+ * body, where it is only as typed as the caller made it.
  */
-function namesCurrency(value: unknown): boolean {
+function present(value: unknown): boolean {
     return value !== undefined && value !== null;
 }
 
@@ -130,7 +193,7 @@ class InvoiceNamesOneCurrency implements ValidatorConstraintInterface {
             currencyCode?: unknown;
             currencyIso?: unknown;
         };
-        return namesCurrency(currencyCode) !== namesCurrency(currencyIso);
+        return present(currencyCode) !== present(currencyIso);
     }
 
     defaultMessage(): string {
@@ -144,14 +207,28 @@ class InvoiceNamesOneCurrency implements ValidatorConstraintInterface {
 
 /** A neutral invoice carrying core's generic ids. */
 export class NeutralInvoiceDto {
-    /** Canonical code; the provider maps it to the entity's voucher-type code (AR: CbteTipo). */
+    /**
+     * Canonical code; the provider maps it to the entity's voucher-type code (AR: CbteTipo).
+     *
+     * Hosts `InvoiceNamesAReceiver` because the document type is what decides which buyer block applies,
+     * and because a class-level check has to hang off a *required* property — `@IsOptional()` disables every
+     * validator on its own property when the value is absent, so attaching it to `receiver` or `export`
+     * would switch it off in the case it exists to catch.
+     */
     @IsInt()
     @IsPositive()
+    @Validate(InvoiceNamesAReceiver)
     documentTypeCode!: number;
 
-    /** Concept: 1 = goods, 2 = services, 3 = both. */
+    /**
+     * Concept: 1 = goods, 2 = services, 3 = both.
+     *
+     * Required for a domestic voucher and forbidden on an export, whose counterpart is `export.exportType`.
+     * `InvoiceNamesAReceiver` enforces which.
+     */
+    @IsOptional()
     @IsIn(NEUTRAL_INVOICE_CONCEPTS)
-    concept!: NeutralInvoiceConcept;
+    concept?: NeutralInvoiceConcept;
 
     @IsInt()
     @IsPositive()
@@ -167,13 +244,57 @@ export class NeutralInvoiceDto {
     @IsPositive()
     voucherNumberTo!: number;
 
-    // `@IsDefined` alongside `@ValidateNested`: nested validation has nothing to validate on a missing
-    // object, so it passes, and the mapper then reads a field off `undefined` — a `500` for an incomplete
-    // body. `lines` needs no such guard, its `@IsArray()` already rejecting an absent one.
-    @IsDefined()
+    /**
+     * The buyer of a domestic voucher. Absent on an export, which carries `export` instead.
+     *
+     * No longer `@IsDefined`: the guard that used to catch a missing object now belongs to
+     * `InvoiceNamesAReceiver`, which knows that absent is legitimate here only when `export` is present. The
+     * original reason for the guard still holds — nested validation has nothing to validate on a missing
+     * object, so it passes and the mapper reads a field off `undefined` — which is why exactly one of the
+     * two is a hard requirement rather than a preference.
+     */
+    @IsOptional()
     @ValidateNested()
     @Type(() => InvoiceReceiverDto)
-    receiver!: InvoiceReceiverDto;
+    receiver?: InvoiceReceiverDto;
+
+    /**
+     * The foreign-trade block. Its presence is what makes this an export voucher, and selects the authority
+     * service that authorizes it.
+     */
+    @IsOptional()
+    @ValidateNested()
+    @Type(() => InvoiceExportDto)
+    export?: InvoiceExportDto;
+
+    /**
+     * The authority's idempotency key for this request, where the entity keeps one (AR: WSFEX `Cmp.Id`).
+     *
+     * **Core owns this sequence** — this service has no database to hold it. It must be unique per issuer
+     * and persisted before the call, because it is the only recovery path after a timeout: re-send the same
+     * key and the authority replays its stored answer with `reprocessed` set, rather than authorizing twice.
+     * Reusing a key for a genuinely new voucher silently returns the older one, and the result's
+     * `reprocessed` is how that shows up.
+     *
+     * `POST /invoices/last-request-id` reports the highest key the authority has seen, for seeding or
+     * recovering the sequence.
+     */
+    @IsOptional()
+    @IsInt()
+    @Min(0)
+    requestId?: number;
+
+    /**
+     * Which of the entity's web services should authorize this voucher (its `configuration.webService`).
+     *
+     * Omitted is the entity's ordinary service. Only the caller can settle what a document type cannot: an
+     * entity may have two services issuing the same types, distinguished only by whether the voucher carries
+     * item detail. Naming a service that contradicts `documentTypeCode` is a `400` rather than a silent
+     * choice.
+     */
+    @IsOptional()
+    @IsIn(WEB_SERVICES)
+    webService?: WebService;
 
     /**
      * The authority's own currency code (AR: `MonId` — `"PES"`, `"DOL"`, `"060"`). The fourth canonical
@@ -237,6 +358,36 @@ export class NeutralInvoiceDto {
     @Type(() => InvoiceLineDto)
     @Validate(InvoiceCarriesAmount)
     lines!: Array<InvoiceLineDto>;
+
+    /**
+     * Per-product detail, for the services that invoice with it — an export voucher, and factura electrónica
+     * con detalle when it lands.
+     *
+     * Not the same thing as `lines`, which is a *tax subtotal*. An export is zero-rated, so it declares no
+     * tax bases at all and sends `lines: []` with its money here instead.
+     */
+    @IsOptional()
+    @IsArray()
+    @ArrayMinSize(1)
+    @ValidateNested({each: true})
+    @Type(() => InvoiceItemDto)
+    items?: Array<InvoiceItemDto>;
+
+    /** Vouchers this one references — the invoice a credit or debit note adjusts. */
+    @IsOptional()
+    @IsArray()
+    @ArrayMinSize(1)
+    @ValidateNested({each: true})
+    @Type(() => InvoiceAssociatedVoucherDto)
+    associatedVouchers?: Array<InvoiceAssociatedVoucherDto>;
+
+    /** Optional data fields the authority defines by regulation. */
+    @IsOptional()
+    @IsArray()
+    @ArrayMinSize(1)
+    @ValidateNested({each: true})
+    @Type(() => InvoiceOptionalDto)
+    optionals?: Array<InvoiceOptionalDto>;
 
     @IsOptional()
     @ValidateNested()

@@ -80,24 +80,103 @@ describe('every nested request block is required, not merely validated', () => {
         expect(errors.map((e) => e.property)).toContain(missing);
     });
 
-    it('reports a missing receiver on the invoice body itself', async () => {
-        // Nested one level deeper than the envelopes above, and reached by the same dereference:
-        // `buildCommonInvoiceRequest` reads `invoice.receiver.identificationTypeCode` unconditionally.
+    /**
+     * An invoice body has to name a buyer, and there are now two ways to do it — `receiver` for a domestic
+     * voucher, `export` for a foreign-trade one. Neither can be `@IsDefined` on its own any more, so the
+     * requirement moved to a class-level check reported on `documentTypeCode`, the field that decides which
+     * of the two applies.
+     *
+     * The original hazard is unchanged and is why this is a hard requirement rather than a preference:
+     * nested validation has nothing to validate on a missing object, so it passes, and the mapper then
+     * dereferences `undefined`.
+     */
+    const invoiceBody = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+        documentTypeCode: 1,
+        concept: 1,
+        pointOfSaleNumber: 3,
+        voucherNumberFrom: 17,
+        voucherNumberTo: 17,
+        currencyCode: 'PES',
+        currencyRate: 1,
+        issueDate: '2026-08-05',
+        lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}],
+        ...overrides,
+    });
+
+    const exportBlock = {
+        exportType: 'SERVICES',
+        destinationCode: '203',
+        clientName: 'Joao Da Silva',
+        clientAddress: 'Rua 76 km 34.5 Alagoas',
+        clientTaxId: 'PJ54482221-l',
+        language: 'es',
+    };
+
+    it('reports a body naming neither receiver nor export', async () => {
+        const errors = await validate(plainToInstance(NeutralInvoiceDto, invoiceBody()));
+
+        expect(errors.map((e) => e.property)).toContain('documentTypeCode');
+        expect(JSON.stringify(errors)).toContain('names no buyer');
+    });
+
+    it('reports a body naming both, rather than choosing one', async () => {
         const errors = await validate(
-            plainToInstance(NeutralInvoiceDto, {
-                documentTypeCode: 1,
-                concept: 1,
-                pointOfSaleNumber: 3,
-                voucherNumberFrom: 17,
-                voucherNumberTo: 17,
-                currencyCode: 'PES',
-                currencyRate: 1,
-                issueDate: '2026-08-05',
-                lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}],
-            }),
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
+                    export: exportBlock,
+                }),
+            ),
         );
 
-        expect(errors.map((e) => e.property)).toContain('receiver');
+        expect(errors.map((e) => e.property)).toContain('documentTypeCode');
+    });
+
+    it('accepts a domestic body, and an export body with no concept', async () => {
+        const domestic = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
+                }),
+            ),
+        );
+        expect(domestic).toEqual([]);
+
+        const foreign = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    documentTypeCode: 19,
+                    concept: undefined,
+                    lines: [],
+                    requestId: 41,
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    export: exportBlock,
+                }),
+            ),
+        );
+        expect(foreign).toEqual([]);
+    });
+
+    it('refuses an export body that still carries a concept', async () => {
+        // The two vocabularies are not interchangeable: `concept` has a "both" `exportType` lacks, and
+        // `exportType` has an "OTHER" `concept` lacks. Carrying both means the caller confused them.
+        const errors = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    documentTypeCode: 19,
+                    lines: [],
+                    requestId: 41,
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    export: exportBlock,
+                }),
+            ),
+        );
+
+        expect(JSON.stringify(errors)).toContain('exportType');
     });
 
     it('needs no such guard on `lines`, whose @IsArray already rejects an absent one', async () => {
