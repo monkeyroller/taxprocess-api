@@ -1,22 +1,24 @@
 import {SoapClient} from '../core/soap-client/soap-client.js';
 import {ArcaServiceError, NotImplementedError, type ArcaErrorEntry} from '../core/errors.js';
 import type {ArcaEnvironment} from '../core/constants.js';
-import type {ArcaAuth, PointOfSaleInfo, ServerStatus} from '../core/types.js';
+import {codeMsgPairs} from './common/common-helpers.js';
+import type {
+    ArcaAuth,
+    CurrencyRateInfo,
+    CurrencyTypeInfo,
+    PointOfSaleInfo,
+    ServerStatus,
+} from '../core/types.js';
 
 /**
- * Shared base for every ARCA invoice-authorization web service (WSFEv1, WSFEXv1, …).
+ * Shared base for every ARCA invoice-authorization web service.
  *
- * The base owns the common orchestration — building the SOAP call, unwrapping `{op}Result`, and
- * translating an ARCA `Errors.Err` block into a thrown {@link ArcaServiceError}. Each concrete
- * service fills only the operation-specific hooks (build request / parse response) and declares its
- * `serviceId`, `namespace`, and `endpoint`. Every subclass therefore exposes the *same* public
- * methods with the same signatures — "executed differently" — which is the point of the module.
+ * The base owns the common orchestration: building the SOAP call, unwrapping `{op}Result`, and translating an
+ * ARCA `Errors.Err` block into a thrown error. Each concrete service fills only the operation-specific hooks
+ * and declares its identity, so every subclass exposes the same public methods with the same signatures.
  *
- * Hooks default to throwing {@link NotImplementedError}, so a seed service (export/credit) becomes a
- * real, type-checked class the moment it declares its identity, without stubbing every operation.
- *
- * @typeParam TRequest  the SDK-facing authorization request for this service
- * @typeParam TResponse the simplified authorization result for this service
+ * Hooks default to throwing, so a seed service becomes a real type-checked class the moment it declares its
+ * identity, without stubbing every operation.
  */
 export abstract class InvoiceWebService<TRequest, TResponse> {
     /** ARCA service id used to obtain the WSAA access ticket, e.g. `"wsfe"`. */
@@ -29,15 +31,13 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
         protected readonly environment: ArcaEnvironment,
     ) {}
 
-    /** Absolute service URL for the current environment (from `ENDPOINTS`). */
+    /** Absolute service URL for the current environment. */
     protected abstract endpoint(): string;
 
-    /** ARCA service id this instance authenticates against — used to request the WSAA ticket. */
+    /** ARCA service id this instance authenticates against, used to request the WSAA ticket. */
     get service(): string {
         return this.serviceId;
     }
-
-    // ---- Public contract: identical across every subclass ----
 
     /** Requests authorization (CAE) for a voucher. WSFEv1: `FECAESolicitar`. */
     async requestAuthorization(auth: ArcaAuth, request: TRequest): Promise<TResponse> {
@@ -55,8 +55,7 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
 
     /**
      * Queries a previously authorized voucher. WSFEv1: `FECompConsultar`. The only operation that returns a
-     * stored CAE, so it is also the idempotency backstop for `requestAuthorization`: on an already-authorized
-     * number it recovers the issued CAE. See `docs/CONTRACT.md` (`/invoices/authorize` idempotency).
+     * stored CAE, so it is also the idempotency backstop for `requestAuthorization`.
      */
     async queryVoucher(
         auth: ArcaAuth,
@@ -76,13 +75,35 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
         return this.parsePointsOfSale(result);
     }
 
+    /**
+     * The authority's published cotización for one currency. WSFEv1: `FEParamGetCotizacion`.
+     *
+     * `rateDate` names the day to quote for in ARCA `yyyymmdd`; omitted, the authority answers with its
+     * latest publication. The reply's own `FchCotiz` may be earlier than the day asked for, a cotización
+     * belonging to the last published business day, so callers read the day off the answer.
+     *
+     * One currency per call, which is why a caller wanting a whole table has to fan out — and why that
+     * fan-out belongs behind one batched endpoint, separate calls being able to straddle a publication
+     * boundary and mix vintages.
+     */
+    async getCurrencyRate(auth: ArcaAuth, currencyId: string, rateDate?: string): Promise<CurrencyRateInfo> {
+        const payload = this.buildCurrencyRateRequest(auth, currencyId, rateDate);
+        const result = await this.invoke(this.currencyRateOperation, payload);
+        return this.parseCurrencyRate(result);
+    }
+
+    /** The authority's whole currency catalogue. WSFEv1: `FEParamGetTiposMonedas`. */
+    async getCurrencyTypes(auth: ArcaAuth): Promise<Array<CurrencyTypeInfo>> {
+        const payload = this.buildCurrencyTypesRequest(auth);
+        const result = await this.invoke(this.currencyTypesOperation, payload);
+        return this.parseCurrencyTypes(result);
+    }
+
     /** Service health check. WSFEv1: `FEDummy` (unauthenticated). */
     async getServerStatus(): Promise<ServerStatus> {
         const result = await this.invoke(this.dummyOperation, {});
         return this.parseServerStatus(result);
     }
-
-    // ---- Shared plumbing ----
 
     /** Sends `operation`, unwraps `{operation}Result`, and throws on an ARCA `Errors` block. */
     protected async invoke(operation: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -92,27 +113,28 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
         return result;
     }
 
-    /** Raises {@link ArcaServiceError} if the result carries a non-empty `Errors.Err`. */
+    /**
+     * Raises if the result carries a non-empty `Errors.Err`. Shares `codeMsgPairs` with the observation
+     * reader, since `Obs` and `Err` are the same wire structure — reading them two ways is how this one came
+     * to render a missing `Code` as the literal `"undefined"` while the other had been fixed not to.
+     */
     protected assertNoErrors(result: Record<string, unknown>): void {
-        const errors = (result as {Errors?: {Err?: unknown}}).Errors;
-        const err = errors?.Err;
-        if (!err) {
+        const entries: Array<ArcaErrorEntry> = codeMsgPairs(
+            (result as {Errors?: unknown}).Errors,
+            'Err',
+        );
+        if (entries.length === 0) {
             return;
         }
-        const list = Array.isArray(err) ? err : [err];
-        const entries: Array<ArcaErrorEntry> = list.map((e: {Code?: unknown; Msg?: unknown}) => ({
-            code: String(e.Code),
-            message: String(e.Msg),
-        }));
         throw new ArcaServiceError(entries.map((e) => `[${e.code}] ${e.message}`).join('; '), entries);
     }
-
-    // ---- Operation-specific hooks (default: not implemented) ----
 
     protected readonly authorizeOperation: string = '';
     protected readonly lastAuthorizedOperation: string = '';
     protected readonly queryOperation: string = '';
     protected readonly pointsOfSaleOperation: string = '';
+    protected readonly currencyRateOperation: string = '';
+    protected readonly currencyTypesOperation: string = '';
     protected readonly dummyOperation: string = '';
 
     protected buildAuthorizationRequest(_auth: ArcaAuth, _request: TRequest): Record<string, unknown> {
@@ -158,5 +180,25 @@ export abstract class InvoiceWebService<TRequest, TResponse> {
 
     protected parseServerStatus(_result: Record<string, unknown>): ServerStatus {
         throw new NotImplementedError(`${this.constructor.name}.getServerStatus`);
+    }
+
+    protected buildCurrencyRateRequest(
+        _auth: ArcaAuth,
+        _currencyId: string,
+        _rateDate?: string,
+    ): Record<string, unknown> {
+        throw new NotImplementedError(`${this.constructor.name}.getCurrencyRate`);
+    }
+
+    protected parseCurrencyRate(_result: Record<string, unknown>): CurrencyRateInfo {
+        throw new NotImplementedError(`${this.constructor.name}.getCurrencyRate`);
+    }
+
+    protected buildCurrencyTypesRequest(_auth: ArcaAuth): Record<string, unknown> {
+        throw new NotImplementedError(`${this.constructor.name}.getCurrencyTypes`);
+    }
+
+    protected parseCurrencyTypes(_result: Record<string, unknown>): Array<CurrencyTypeInfo> {
+        throw new NotImplementedError(`${this.constructor.name}.getCurrencyTypes`);
     }
 }

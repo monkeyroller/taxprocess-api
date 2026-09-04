@@ -2,12 +2,15 @@ import crypto from 'node:crypto';
 import forge from 'node-forge';
 
 /**
- * PEM normalization + validation for ARCA credentials.
+ * PEM normalization and validation for certificate-based credentials. Entity-agnostic: every function here
+ * is X.509, PKCS#1, PKCS#8 or CSR handling, with no authority's vocabulary in it. The one place an
+ * authority-specific reading would creep in is pushed out to the caller —
+ * `certificateSubjectSerialNumber` returns the raw RDN and leaves interpreting it as a tax id to whoever
+ * knows one.
  *
- * Validation goes through Node's built-in `crypto`, which parses both PKCS#1 (`RSA PRIVATE KEY`) and
- * PKCS#8 (`PRIVATE KEY`) — unlike node-forge, whose `privateKeyFromPem` only reads PKCS#1. Keys are
- * canonicalized to PKCS#1 so the forge-based WSAA signer can consume them directly. `node-forge` is
- * used only to recognize a CSR (Node has no CSR parser).
+ * Validation goes through Node's `crypto`, which parses both PKCS#1 and PKCS#8, unlike node-forge. Keys are
+ * canonicalized to PKCS#1 so a forge-based CMS signer can consume them directly, and node-forge is used only
+ * to recognize a CSR, Node having no CSR parser.
  */
 
 /** Converts escaped/CRLF newlines to real `\n`, trims, and guarantees a trailing newline. */
@@ -39,8 +42,8 @@ export function ensureCertificatePem(pem: string): string {
 }
 
 /**
- * Ensures a private key carries PEM armor. A bare base64 body is tried as PKCS#8 (`PRIVATE KEY`)
- * then PKCS#1 (`RSA PRIVATE KEY`); the first that parses (via Node `crypto`) wins.
+ * Ensures a private key carries PEM armor. A bare base64 body is tried as PKCS#8 then PKCS#1; the first that
+ * parses wins.
  */
 export function ensurePrivateKeyPem(pem: string): string {
     const normalized = normalizePem(pem);
@@ -60,9 +63,8 @@ export function ensurePrivateKeyPem(pem: string): string {
 }
 
 /**
- * Parses `pem` as an X.509 certificate and returns its **canonical** PEM (armor + wrapping fixed),
- * or `null` if it is not a certificate. Use this at the storage boundary so only clean, valid
- * certificates are ever persisted.
+ * Parses `pem` as an X.509 certificate and returns its canonical PEM, or `null` if it is not a certificate.
+ * Use this at the storage boundary so only valid certificates are persisted.
  */
 export function canonicalizeCertificatePem(pem: string): string | null {
     try {
@@ -73,8 +75,8 @@ export function canonicalizeCertificatePem(pem: string): string | null {
 }
 
 /**
- * Parses `pem` as an unencrypted RSA private key (PKCS#1 or PKCS#8) and returns its **canonical**
- * PKCS#1 PEM (the form the forge-based WSAA signer consumes), or `null` if it is not usable.
+ * Parses `pem` as an unencrypted RSA private key and returns its canonical PKCS#1 PEM, the form a
+ * forge-based CMS signer consumes, or `null` if it is not usable.
  */
 export function canonicalizePrivateKeyPem(pem: string): string | null {
     try {
@@ -103,7 +105,7 @@ export function keyMatchesCertificatePem(certPem: string, keyPem: string): boole
     try {
         const certPublicKey = new crypto.X509Certificate(ensureCertificatePem(certPem)).publicKey;
         const keyPublicKey = crypto.createPublicKey(ensurePrivateKeyPem(keyPem));
-        const asDer = (k: crypto.KeyObject): Buffer => k.export({type: 'spki', format: 'der'}) as Buffer;
+        const asDer = (k: crypto.KeyObject): Buffer => k.export({type: 'spki', format: 'der'});
         return asDer(certPublicKey).equals(asDer(keyPublicKey));
     } catch {
         return false;
@@ -111,12 +113,14 @@ export function keyMatchesCertificatePem(certPem: string, keyPem: string): boole
 }
 
 /**
- * Returns the raw value of the certificate subject's `serialNumber` RDN (OID 2.5.4.5), or `null` if the
- * material is not a parseable X.509 certificate or has no such RDN. ARCA embeds the taxpayer CUIT here,
- * rendered by OpenSSL/Node as e.g. `serialNumber=CUIT 20111111112`. Only that RDN is consulted — a digit
- * run elsewhere in the subject (a CN, an OU) is never mistaken for the taxpayer id. Interpreting the raw
- * value as a CUIT (stripping the `CUIT ` prefix / separators, length check) is the caller's job; see
- * `canonicalCuit`.
+ * The raw value of the certificate subject's `serialNumber` RDN, or `null` if the material is not a
+ * parseable certificate or has no such RDN. Authorities commonly embed the taxpayer's national id there —
+ * ARCA renders it as `serialNumber=CUIT 20111111112`. Only that RDN is consulted, so a digit run elsewhere
+ * in the subject is never mistaken for the id.
+ *
+ * Reading the value as a tax id is the caller's job, which is what keeps this module entity-agnostic:
+ * stripping a prefix, dropping separators and checking a length are decisions only a provider that knows its
+ * authority can make.
  */
 export function certificateSubjectSerialNumber(certPem: string): string | null {
     try {
@@ -132,16 +136,18 @@ export function certificateSubjectSerialNumber(certPem: string): string | null {
 }
 
 /**
- * True if the material is a CSR (certificate *request*) rather than an issued certificate — the most
- * common mistaken upload. Tolerates a missing/`CERTIFICATE`-mislabeled armor around the base64 body.
+ * True if the material is a CSR rather than an issued certificate — the most common mistaken upload.
+ * Tolerates missing or mislabeled armor around the base64 body.
  */
 export function isCertificateSigningRequest(pem: string): boolean {
     const normalized = normalizePem(pem);
-    const candidate = /CERTIFICATE REQUEST/.test(normalized)
+    const candidate = normalized.includes('CERTIFICATE REQUEST')
         ? normalized
         : wrapWithArmor(normalized, 'CERTIFICATE REQUEST');
     try {
-        return forge.pki.certificationRequestFromPem(candidate) != null;
+        // Throws when `candidate` is not a parseable CSR; it never returns a nullish value.
+        forge.pki.certificationRequestFromPem(candidate);
+        return true;
     } catch {
         return false;
     }

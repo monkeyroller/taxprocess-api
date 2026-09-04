@@ -1,15 +1,14 @@
 import type {Response} from 'express';
 import {Body, JsonController, Post, Res} from 'routing-controllers';
 import {getProvider} from '../../providers/registry/registry.js';
-import type {TaxpayerResultDto} from '../dto/neutral-result.dto.js';
+import type {TaxpayerResultDto} from '../dto/taxpayer-result.dto.js';
 import {TaxpayerLookupRequestDto} from '../dto/taxpayer.dto.js';
 import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
- * Neutral taxpayer-registry lookup. Dispatches on `entityCode`; the provider routes on the
- * identification type, signs with this service's own delegated credentials, and reports which registry
- * answered via the result's `detail`. No taxpayer registered under the identifier is a
- * `404 TAXPAYER_NOT_FOUND`, never an empty list.
+ * Neutral taxpayer-registry lookup. The provider routes on the identification type, signs with this
+ * service's own delegated credentials, and reports which registry answered via the result's `detail`. No
+ * taxpayer registered under the identifier is a `404`, never an empty list.
  */
 @JsonController('/taxpayers')
 export class TaxpayersController {

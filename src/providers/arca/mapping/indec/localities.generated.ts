@@ -1,38 +1,34 @@
 // GENERATED FILE — do not edit by hand. Regenerate with `node scripts/build-indec-index.mjs`.
 //
-// INDEC localidad codes, vendored from georef-ar (Ministerio del Interior, datos.gob.ar) so a lookup
-// needs no network call and no database. One row per unique province / name / code triple, sorted,
-// tab-separated, newline-delimited:
+// INDEC localidad codes, vendored from georef-ar (Ministerio del Interior, datos.gob.ar) so a lookup needs
+// no network call and no database. One row per unique province / name / code triple, sorted, tab-separated,
+// newline-delimited:
 //
-//   - `provincia` — INDEC 2-digit province code (NOT ARCA's `idProvincia`; see `geography.ts`).
-//   - `nombre` — the place name verbatim from the catalog, accents and all. Normalization happens at
-//     lookup time (`normalize-locality.ts`), so this file stays a faithful copy of the source.
-//   - `codigo` — the 8-digit INDEC localidad censal code (provincia 2 + departamento 3 + localidad 3).
+//   - `provincia` — INDEC 2-digit province code, not ARCA's `idProvincia`.
+//   - `nombre` — the place name verbatim from the catalog. Normalization happens at lookup time, so this
+//     file stays a faithful copy of the source.
+//   - `codigo` — the 8-digit INDEC localidad censal code.
 //
-// Both localidades censales and BAHRA asentamientos are indexed, the latter projected up to the
-// localidad censal containing them — so a rural entidad or paraje resolves to its localidad's code.
-// A name that maps to more than one code within its province is ambiguous and is dropped when the
-// lookup index is built; it is kept here because the ambiguity is a property of the catalog, not of us.
+// Both localidades censales and BAHRA asentamientos are indexed, the latter projected up to the localidad
+// censal containing them, so a rural entidad or paraje resolves to its localidad's code. A name mapping to
+// more than one code within its province is dropped when the lookup index is built, but kept here: the
+// ambiguity is a property of the catalog.
 //
-// **Known coverage gap: urban barrios.** BAHRA models settlements, not neighbourhoods, so a barrio of an
-// interior city (ARCA regularly reports one — `BARRIO YAPEYU` for a Córdoba address) is simply not in
-// here and its address resolves to no code. The one exception is CABA, whose 48 barrios georef does carry,
-// every one of them pointing at the single localidad censal `02000010`. Closing the gap for the rest
-// would need a postal-code index, which has no openly-licensed source — see docs/CONTRACT-CHANGES.md.
+// Known coverage gap: urban barrios. BAHRA models settlements rather than neighbourhoods, so a barrio of an
+// interior city is not in here and its address resolves to no code. The exception is CABA, whose 48 barrios
+// georef does carry, every one pointing at the single localidad censal `02000010`. Closing the gap
+// elsewhere would need a postal-code index, which has no openly-licensed source, so it is contract rather
+// than a TODO.
 
 /**
- * What this snapshot is: when georef-ar was read, and how much of it. Stated in code rather than in a
- * header comment because it is published — `geography.ts` reads {@link INDEC_SNAPSHOT.date} straight
- * into the wire's `cityCodeSchemeVersion` (CONTRACT §5), so a caller holding its own snapshot of the same
- * live dataset can date a mismatch instead of confusing drift with the barrio gap.
+ * When georef-ar was read, and how much of it. In code rather than a header comment because it is
+ * published: `geography.ts` reads the date straight into the wire's `cityCodeSchemeVersion`, so a caller
+ * holding its own snapshot of the same live dataset can date a mismatch instead of confusing drift with the
+ * barrio gap. Regenerating rewrites this and the rows together, so neither can go stale alone.
  *
- * Regenerating rewrites this and the rows together, which is the point: neither can go stale alone.
- *
- * The block below is the **one** thing in this file written by hand rather than by the generator, and only
- * once: the rows were fetched on 2026-08-25 and core diffed its own catalog against them that day, finding
- * the two code sets identical. Re-running the generator to mint the stamp would have fetched a genuinely
- * newer snapshot and dated it today, throwing away the baseline that makes a version worth publishing.
- * Every regeneration from here writes it.
+ * The stamp below is the one thing here written by hand, and only once: the rows were fetched on 2026-08-25
+ * and core diffed its own catalog against them that day, finding the code sets identical. Re-running the
+ * generator to mint it would have fetched a newer snapshot and dated it today, throwing away that baseline.
  */
 export const INDEC_SNAPSHOT = {
     /** ISO date georef-ar was read. */
@@ -45,9 +41,8 @@ export const INDEC_SNAPSHOT = {
     nameRows: 4930,
 } as const;
 
-// Annotated `: string` on purpose, which is why the inferrable-types rule is off for this one line:
-// without the annotation TypeScript infers the literal type and copies all 4930 rows into
-// the emitted `.d.ts`, tripling what ships for no benefit.
+// Annotated `: string` on purpose, which is why the inferrable-types rule is off here: without it
+// TypeScript infers the literal type and copies all 4930 rows into the emitted `.d.ts`.
 // eslint-disable-next-line @typescript-eslint/no-inferrable-types
 export const INDEC_LOCALITY_ROWS: string = `02	Agronomía	02000010
 02	Almagro	02000010

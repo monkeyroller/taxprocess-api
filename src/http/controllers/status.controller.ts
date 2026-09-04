@@ -2,24 +2,19 @@ import type {Response} from 'express';
 import {Body, Get, JsonController, Post, Res} from 'routing-controllers';
 import {getProvider} from '../../providers/registry/registry.js';
 import {AuthorityStatusDto} from '../dto/entity-auth.dto.js';
+import type {AuthorityStatusResultDto} from '../dto/authority-status-result.dto.js';
+import type {HealthResultDto} from '../dto/health-result.dto.js';
 import {sendError} from '../error-mapper/error-mapper.js';
 
-interface HealthResponse {
-    readonly status: 'ok';
-    readonly service: string;
-    readonly uptimeSeconds: number;
-}
-
 /**
- * Liveness + authority health. `GET /health` is a pure liveness probe (no provider). `POST
- * /authority/status` dispatches on `entityCode` and runs the entity's health check — no ticket, no
- * credentials — proving the service reaches the authority for the requested environment.
+ * Liveness and authority health. `POST /authority/status` runs the entity's own health check without a
+ * ticket or credentials, proving the service reaches the authority for the requested environment.
  */
 @JsonController()
 export class StatusController {
-    /** `GET /health` is a pure liveness probe (no provider). */
+    /** A pure liveness probe; no provider is consulted. */
     @Get('/health')
-    health(): HealthResponse {
+    health(): HealthResultDto {
         return {
             status: 'ok',
             service: 'taxprocess-api',
@@ -27,11 +22,13 @@ export class StatusController {
         };
     }
 
-    /** `POST /authority/status` dispatches on `entityCode` and runs the entity's health check. */
+    /** Dispatches on `entityCode` and runs the entity's health check. */
     @Post('/authority/status')
     async authorityStatus(@Body() body: AuthorityStatusDto, @Res() res: Response): Promise<Response> {
         try {
-            const status = await getProvider(body.entityCode).authorityStatus(body.environment);
+            const status: AuthorityStatusResultDto = await getProvider(body.entityCode).authorityStatus(
+                body.environment,
+            );
             return res.json(status);
         } catch (err) {
             return sendError(res, err);

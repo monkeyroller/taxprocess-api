@@ -1,50 +1,38 @@
-import {
-    ArcaValidationError,
-    WsaaClient,
-    certificateSubjectSerialNumber,
-    type ArcaAuth,
-    type ArcaConfig,
-    type ServiceIdValue,
-} from '../../sdk/index.js';
+import type {ArcaConfig} from '../../sdk/core/arca-config.js';
+import type {ServiceIdValue} from '../../sdk/core/constants.js';
+import {ArcaValidationError} from '../../sdk/core/errors.js';
+import {certificateSubjectSerialNumber} from '../../../pem/pem.js';
+import type {ArcaAuth} from '../../sdk/core/types.js';
+import {WsaaClient} from '../../sdk/core/wsaa-client/wsaa-client.js';
 import {soap} from '../../clients.js';
 import {toArcaEnvironment} from '../environment/environment.js';
 import {canonicalCuit, parseArcaId} from '../../mapping/identifiers.js';
 import {delegateCredentialStore, type DelegateCredentials, type DelegateCredentialStore} from '../delegate-credentials/delegate-credentials.js';
 import {env} from '../../../../config/env.js';
-import {
-    CredentialsRequiredError,
-    DelegationNotConfiguredError,
-    type GenericEnvironment,
-    type IssuerCredentials,
-} from '../../../provider/provider.js';
+import {CredentialsRequiredError, DelegationNotConfiguredError} from '../../../provider/faults.js';
+import type {GenericEnvironment} from '../../../provider/environment.js';
+import type {IssuerCredentials} from '../../../provider/entity-auth.js';
 
 /**
- * Owns WSAA authentication for the whole process. This service — never core — talks to real ARCA: it
- * signs the login ticket request with a certificate, exchanges it for a ~12h ticket, and caches it
- * (shared across every core instance), so credentials cross the wire only on a refresh (~once per 12h),
- * never per request.
+ * Owns WSAA authentication for the whole process: signs the login ticket request with a certificate,
+ * exchanges it for a ~12h ticket, and caches it, so credentials cross the wire only on a refresh.
  *
- * The cache is keyed by the **signer** (certificate) identity, because ARCA binds a ticket to the
- * certificate that minted it (a second login for the same cert+service is refused with
- * `alreadyAuthenticated`). The two signer roles live in **separate partitions**:
+ * The cache is keyed by the signer's certificate identity, because ARCA binds a ticket to the certificate
+ * that minted it and refuses a second login for the same cert and service with `alreadyAuthenticated`. The
+ * two signer roles live in separate partitions:
  *
  * - tenant: `(entityCode, environment, issuerCuit, service)` — the issuer's own certificate;
- * - delegate: `(entityCode, environment, 'delegate', delegateCuit, service)` — our platform certificate,
- *   so one delegate ticket is reused across every represented CUIT.
+ * - delegate: `(entityCode, environment, 'delegate', delegateCuit, service)` — our platform certificate, so
+ *   one delegate ticket is reused across every represented CUIT.
  *
- * They are deliberately NOT merged on a shared CUIT: a taxpayer may hold several ARCA certificates, and a
- * *representación* is granted to one specific computador, so serving a delegated call from a ticket minted
- * by a different certificate of the same CUIT yields a permanent `601` that looks like a missing
- * delegation. The one provably-safe overlap is handled explicitly: when a tenant request's certificate IS
- * our delegate certificate, it mints/reuses inside the delegate partition — same physical certificate, so
- * ARCA has exactly one ticket for it and the two roles cannot collide.
+ * They are not merged on a shared CUIT: a taxpayer may hold several ARCA certificates and a representación
+ * is granted to one specific computador, so serving a delegated call from a ticket minted by a different
+ * certificate of the same CUIT yields a permanent `601` that looks like a missing delegation. The one safe
+ * overlap is explicit — when a tenant request's certificate is our delegate certificate, it mints inside
+ * the delegate partition, so ARCA still holds exactly one ticket for it.
  *
- * A tenant request that carries no credentials is served from cache; on a miss/expiry it raises
- * {@link CredentialsRequiredError}. A delegated request signs with the service's own delegate certificate
- * (never the request), so it never raises {@link CredentialsRequiredError}. The underlying
- * {@link WsaaClient} provides single-flight login de-duplication (so a refresh stampede collapses to one
- * `loginCms`), `alreadyAuthenticated` handling, and optional cross-restart persistence via
- * `ARCA_TICKET_CACHE_PATH`.
+ * A tenant request with no credentials is served from cache and raises `CredentialsRequiredError` on a miss.
+ * A delegated request signs with the service's own delegate certificate, so it never raises that.
  */
 export class TicketStore {
     constructor(
@@ -52,25 +40,33 @@ export class TicketStore {
         private readonly delegate: DelegateCredentialStore = delegateCredentialStore,
     ) {}
 
-    /** Tenant cache partition: the issuer signs with its own certificate (service appended by WsaaClient). */
+    /**
+     * Tenant cache partition: the issuer signs with its own certificate.
+     *
+     * Neither this shape nor the delegate one may be a prefix of the other, an invariant `ExpiringCache`
+     * relies on but cannot enforce: `clearCache(owner)` sweeps every key beginning `${owner}:`, so a
+     * delegate ticket dropped because a tenant's was is a ~12h outage for every represented CUIT.
+     *
+     * Both shapes end in an eleven-digit CUIT, so neither can end where the other continues — the only
+     * candidate would be a tenant key whose signer CUIT was the literal `delegate`.
+     */
     private ownerKey(entityCode: string, environment: GenericEnvironment, signerCuit: string): string {
         return `${entityCode}:${environment}:${signerCuit}`;
     }
 
     /**
-     * Delegate cache partition — disjoint from every tenant partition by the `delegate` segment, so a
-     * ticket minted by a tenant certificate can never serve a delegated call (nor the reverse) even when
-     * both identities are the same CUIT.
+     * Delegate cache partition, disjoint from every tenant partition by the `delegate` segment — so a ticket
+     * minted by a tenant certificate can never serve a delegated call, or the reverse, even when both
+     * identities are the same CUIT.
      */
     private delegateOwnerKey(entityCode: string, environment: GenericEnvironment, delegateCuit: string): string {
         return `${entityCode}:${environment}:delegate:${delegateCuit}`;
     }
 
     /**
-     * Resolves an {@link ArcaAuth} for a call. `Auth.Cuit` is always `issuerTaxId` (the represented
-     * taxpayer). When `delegated`, signs with the service's own delegate certificate for `environment`;
-     * otherwise serves a cached tenant ticket, mints one from `credentials`, or — with neither — throws
-     * {@link CredentialsRequiredError} so core re-sends with credentials.
+     * Resolves the auth for a call. `Auth.Cuit` is always `issuerTaxId`, the represented taxpayer. When
+     * `delegated`, signs with the service's own delegate certificate; otherwise serves a cached tenant
+     * ticket, mints one from `credentials`, or with neither throws so core re-sends with credentials.
      */
     async resolve(
         entityCode: string,
@@ -80,41 +76,37 @@ export class TicketStore {
         credentials?: IssuerCredentials,
         delegated = false,
     ): Promise<ArcaAuth> {
-        // Parse first (both paths): `Auth.Cuit` must be the represented taxpayer's CUIT and can never be NaN.
+        // Parsed first on both paths: `Auth.Cuit` must be the represented taxpayer's CUIT, never NaN.
         const cuit = parseArcaId(issuerTaxId, 'issuerTaxId');
 
         if (delegated) {
             return this.resolveDelegated(entityCode, cuit, service, environment);
         }
 
-        // ---- Tenant-certificate path (certificate owner == issuer); signer == issuer. ----
-        // `issuerTaxId` is already the canonical spelling here — `parseArcaId` above rejects anything that
-        // isn't bare digits — so no normalization is applied (and none is needed): the key is exactly the
-        // one earlier releases wrote, and a shared `ARCA_TICKET_CACHE_PATH` keeps working across the deploy.
+        // Tenant-certificate path: the certificate's owner is the issuer, so it is also the signer.
+        // `issuerTaxId` is already canonical here, `parseArcaId` having rejected anything but bare digits, so
+        // the key matches what earlier releases wrote and a shared ticket cache survives the deploy.
         const ownerKey = this.ownerKey(entityCode, environment, issuerTaxId);
 
-        // Only this issuer's own partition may serve a credential-less request: borrowing the delegate
-        // ticket would hand out a ticket for our own CUIT to a caller that never presented a certificate
-        // for it.
-        const cached = this.wsaa.peekAccessTicket(ownerKey, service);
-        if (cached) {
-            return {token: cached.token, sign: cached.sign, cuit};
+        // Only this issuer's own partition may serve a credential-less request: borrowing the delegate ticket
+        // would hand out a ticket for our own CUIT to a caller that never presented a certificate for it.
+        const cached = this.peekAuth(ownerKey, service, cuit);
+        if (cached !== undefined) {
+            return cached;
         }
 
         if (!credentials) {
             throw new CredentialsRequiredError(entityCode, issuerTaxId, service, environment);
         }
 
-        // Fail fast when `issuerTaxId` doesn't match the certificate being sent. WSAA login authenticates the
-        // certificate and carries no CUIT, so a mismatch would otherwise mint a valid ticket under the wrong
-        // identity and only surface far downstream as an opaque WSFEv1 `600 ValidacionDeToken` rejection. The
-        // cert's subject serialNumber RDN and `issuerTaxId` go through the same canonicalizer, so formatting
-        // (dashes, a `CUIT ` prefix) never trips this — mirroring the registration-time check in `credentials.ts`.
+        // Fails fast when `issuerTaxId` does not match the certificate being sent. WSAA login authenticates
+        // the certificate and carries no CUIT, so a mismatch would otherwise mint a valid ticket under the
+        // wrong identity and surface far downstream as an opaque `600 ValidacionDeToken`. Both sides go
+        // through the same canonicalizer, so formatting never trips this.
         const serial = certificateSubjectSerialNumber(credentials.certPem);
         const certCuit = serial === null ? null : canonicalCuit(serial);
-        // Gate on a canonical `issuerTaxId` first: comparing raw `!==` would let a both-`null` case
-        // (cert carries no CUIT *and* `issuerTaxId` doesn't reduce to a CUIT) slip through and mint under an
-        // unverified identity. Mirrors the `expected !== null` guard in `credentials.ts`.
+        // Gated on a canonical `issuerTaxId` first: a raw `!==` would let a both-`null` case through and mint
+        // under an unverified identity.
         const expected = canonicalCuit(issuerTaxId);
         if (expected === null || certCuit !== expected) {
             throw new ArcaValidationError(
@@ -125,39 +117,57 @@ export class TicketStore {
             );
         }
 
-        // The one safe overlap between the roles: if the request's certificate IS our delegate certificate,
-        // mint inside the DELEGATE partition. ARCA holds a single ticket per (certificate, service), so
-        // minting a second one here would be refused with `alreadyAuthenticated` for as long as the delegate
-        // ticket lives. `expected` equals the delegate CUIT whenever the certificates match — both are that
-        // same certificate's subject CUIT, and the guard above proved cert CUIT == `expected`.
+        // The one safe overlap between the roles: a request carrying our delegate certificate mints inside
+        // the delegate partition. ARCA holds a single ticket per certificate and service, so a second one
+        // here would be refused with `alreadyAuthenticated` for as long as the delegate ticket lives.
         const sharesDelegateCertificate = this.delegate.matchesDelegateCertificate(environment, credentials.certPem);
         const signerKey = sharesDelegateCertificate
             ? this.delegateOwnerKey(entityCode, environment, expected)
             : ownerKey;
         if (sharesDelegateCertificate) {
-            const shared = this.wsaa.peekAccessTicket(signerKey, service);
-            if (shared) {
-                return {token: shared.token, sign: shared.sign, cuit};
+            const shared = this.peekAuth(signerKey, service, cuit);
+            if (shared !== undefined) {
+                return shared;
             }
         }
 
+        return this.mintAuth(signerKey, service, environment, cuit, credentials);
+    }
+
+    /**
+     * A cached ticket for `ownerKey` projected onto `cuit`, or `undefined` on a miss. `cuit` is not the
+     * ticket's owner: on the delegated path the ticket is minted by this service's certificate while
+     * `Auth.Cuit` carries the represented taxpayer, and keeping the projection here stops the two from being
+     * transposed at a call site.
+     */
+    private peekAuth(ownerKey: string, service: ServiceIdValue, cuit: number): ArcaAuth | undefined {
+        const cached = this.wsaa.peekAccessTicket(ownerKey, service);
+        return cached === undefined ? undefined : {token: cached.token, sign: cached.sign, cuit};
+    }
+
+    /** Mints or reuses a ticket for `ownerKey` with `pems`, projected onto `cuit`. */
+    private async mintAuth(
+        ownerKey: string,
+        service: ServiceIdValue,
+        environment: GenericEnvironment,
+        cuit: number,
+        pems: {readonly certPem: string; readonly keyPem: string},
+    ): Promise<ArcaAuth> {
         const config: ArcaConfig = {
             cuit,
-            certPem: credentials.certPem,
-            keyPem: credentials.keyPem,
+            certPem: pems.certPem,
+            keyPem: pems.keyPem,
             environment: toArcaEnvironment(environment),
-            ticketOwnerKey: signerKey,
+            ticketOwnerKey: ownerKey,
         };
         const ticket = await this.wsaa.getAccessTicket(config, service);
         return {token: ticket.token, sign: ticket.sign, cuit};
     }
 
     /**
-     * Delegated path: sign with the service's own delegate certificate for `environment` and keep
-     * `Auth.Cuit` = the represented taxpayer (`cuit`). The ticket is cached in the delegate partition, so a
-     * single delegate ticket is shared across every represented CUIT — and never mixed with a ticket minted
-     * by some other certificate. Throws {@link DelegationNotConfiguredError} when no delegate cert is
-     * configured.
+     * Signs with the service's own delegate certificate while `Auth.Cuit` stays the represented taxpayer.
+     * Cached in the delegate partition, so one delegate ticket is shared across every represented CUIT and
+     * never mixed with a ticket minted by another certificate.
      */
     private async resolveDelegated(
         entityCode: string,
@@ -172,39 +182,28 @@ export class TicketStore {
 
         const ownerKey = this.delegateOwnerKey(entityCode, environment, delegate.delegateCuit);
 
-        const cached = this.wsaa.peekAccessTicket(ownerKey, service);
-        if (cached) {
-            return {token: cached.token, sign: cached.sign, cuit};
+        const cached = this.peekAuth(ownerKey, service, cuit);
+        if (cached !== undefined) {
+            return cached;
         }
 
-        const config: ArcaConfig = {
-            cuit,
-            certPem: delegate.certPem,
-            keyPem: delegate.keyPem,
-            environment: toArcaEnvironment(environment),
-            ticketOwnerKey: ownerKey,
-        };
-        const ticket = await this.wsaa.getAccessTicket(config, service);
-        return {token: ticket.token, sign: ticket.sign, cuit};
+        return this.mintAuth(ownerKey, service, environment, cuit, delegate);
     }
 
     /**
-     * Evicts the cached delegate ticket for `(environment, service)` so the next delegated request re-mints
-     * a fresh one. Called when ARCA rejects the delegate ticket with a genuine token fault (bad
-     * signature/hash, clock skew, an expired ticket the local clock still trusts): because one delegate
-     * ticket is shared across every represented CUIT, leaving a bad one cached would fail every representado
-     * until local expiry.
+     * Evicts the cached delegate ticket for `(environment, service)` so the next delegated request re-mints.
+     * Called when ARCA rejects it with a genuine token fault: one delegate ticket is shared across every
+     * represented CUIT, so leaving a bad one cached would fail every representado until local expiry.
      *
-     * Scoped to the rejected `service` on purpose — the delegate identity also holds padrón tickets, and
-     * ARCA would refuse to re-mint those (`alreadyAuthenticated`) for up to ~12h if we dropped tickets it
-     * never rejected. A no-op when delegation isn't configured for `environment`.
+     * Scoped to the rejected `service`, because the delegate identity also holds padrón tickets and ARCA
+     * would refuse to re-mint those for up to ~12h. A no-op when delegation is not configured.
      */
     invalidateDelegated(entityCode: string, environment: GenericEnvironment, service: ServiceIdValue): void {
         let delegate: DelegateCredentials | undefined;
         try {
             delegate = this.delegate.get(environment);
         } catch {
-            return; // this runs inside an error handler: never mask the error being reported
+            return; // runs inside an error handler: never mask the error being reported
         }
         if (delegate === undefined) {
             return;

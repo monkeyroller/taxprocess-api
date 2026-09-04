@@ -1,11 +1,9 @@
 import {Type} from 'class-transformer';
 import {
-    ArrayMinSize,
     IsArray,
     IsDefined,
     IsIn,
     IsInt,
-    IsISO8601,
     IsNumber,
     IsOptional,
     IsPositive,
@@ -19,13 +17,12 @@ import {
     type ValidationArguments,
     type ValidatorConstraintInterface,
 } from 'class-validator';
-import type {NeutralInvoiceConcept} from '../../providers/provider/provider.js';
-import {EntityAuthDto} from './entity-auth.dto.js';
+import {NEUTRAL_INVOICE_CONCEPTS, type NeutralInvoiceConcept} from '../../providers/provider/neutral-invoice.js';
+import {IsAuthorityDate} from './authority-date/authority-date.js';
 
 /**
- * NEUTRAL contract: the request carries provider-agnostic canonical codes (`documentTypeCode`,
- * `receiver.identificationTypeCode`, `receiver.fiscalConditionCode`). The provider maps these to the tax
- * entity's real codes and owns the mechanical translation (currency, tax rates, totals, dates, QR).
+ * The request carries provider-agnostic canonical codes. The provider maps these to the tax entity's real
+ * codes and owns the mechanical translation of currency, tax rates, totals, dates and QR.
  */
 
 /** One taxed line: net (base) + tax amount at a given rate. */
@@ -45,7 +42,7 @@ export class InvoiceLineDto {
 
 /** The invoice receiver, identified by a per-entity identification type + number. */
 export class InvoiceReceiverDto {
-    /** canonical `identificationTypeCode` → provider maps to the entity's document-type code (AR: DocTipo). */
+    /** Canonical code; the provider maps it to the entity's document-type code (AR: DocTipo). */
     @IsInt()
     @Min(0)
     identificationTypeCode!: number;
@@ -55,7 +52,7 @@ export class InvoiceReceiverDto {
     @MinLength(1)
     identificationNumber!: string;
 
-    /** canonical `fiscalConditionCode` → provider maps to the entity's fiscal-condition code (AR: CondicionIVAReceptorId). */
+    /** Canonical code; the provider maps it to the entity's own (AR: CondicionIVAReceptorId). */
     @IsInt()
     @IsPositive()
     fiscalConditionCode!: number;
@@ -83,14 +80,12 @@ export class InvoiceTotalsDto {
 }
 
 /**
- * A voucher has to bill *something*. `@ArrayMinSize(1)` on `lines` used to guarantee that as a side effect;
- * once an empty `lines` became a legitimate shape (a zero-rated issuer carries its money in `totals`),
- * nothing did — `{lines: [], totals: undefined}` validated cleanly into an `ImpTotal` of `0`, costing a WSAA
- * login and a round-trip to be told by the authority what we could have said here.
+ * A voucher has to bill something. Once an empty `lines` became a legitimate shape — a zero-rated issuer
+ * carries its money in `totals` — nothing guaranteed that any more, and `{lines: [], totals: undefined}`
+ * validated cleanly into an `ImpTotal` of `0`, costing a WSAA login and a round trip.
  *
- * Both channels count, because either alone is a valid invoice: taxed lines, header totals, or both. It is
- * deliberately a presence check and not an arithmetic audit — reconciling the amounts is the authority's job,
- * and it does it far better than we could.
+ * Either channel alone is a valid invoice. Deliberately a presence check rather than an arithmetic audit:
+ * reconciling the amounts is the authority's job.
  */
 @ValidatorConstraint({name: 'invoiceCarriesAmount'})
 class InvoiceCarriesAmount implements ValidatorConstraintInterface {
@@ -108,15 +103,54 @@ class InvoiceCarriesAmount implements ValidatorConstraintInterface {
     }
 }
 
+/**
+ * Whether a currency field was actually sent. `null` counts as absent, matching `@IsOptional()`, which skips
+ * a property's validators for `null` as well as `undefined`. Testing `=== undefined` alone let
+ * `{"currencyIso": null}` pass the exactly-one check and reach the mapper as a `null` that died on
+ * `.toUpperCase()`, turning a `400` into an opaque `500`.
+ */
+function namesCurrency(value: unknown): boolean {
+    return value !== undefined && value !== null;
+}
+
+/**
+ * Exactly one of `currencyCode` and `currencyIso` — never both, never neither.
+ *
+ * Exactly-one-of rather than prefer-`currencyCode`, because silently preferring one would let a caller bug
+ * send `{currencyIso: "USD", currencyCode: "PES"}` and produce a peso voucher for a dollar sale. Neither is
+ * a `400` too: `currencyIso` used to be required, and relaxing it without this check would let a caller that
+ * forgot the field declare nothing, leaving the mapper to invent a currency.
+ *
+ * The additive half of a two-step migration; this class goes with `currencyIso`.
+ */
+@ValidatorConstraint({name: 'invoiceNamesOneCurrency'})
+class InvoiceNamesOneCurrency implements ValidatorConstraintInterface {
+    validate(_value: unknown, args: ValidationArguments): boolean {
+        const {currencyCode, currencyIso} = args.object as {
+            currencyCode?: unknown;
+            currencyIso?: unknown;
+        };
+        return namesCurrency(currencyCode) !== namesCurrency(currencyIso);
+    }
+
+    defaultMessage(): string {
+        return (
+            'send exactly one of currencyCode (the authority\'s own code, e.g. "DOL") or the deprecated ' +
+            'currencyIso (e.g. "USD") — sending both is ambiguous and sending neither leaves the ' +
+            'voucher without a currency'
+        );
+    }
+}
+
 /** A neutral invoice carrying core's generic ids. */
 export class NeutralInvoiceDto {
-    /** canonical `documentTypeCode` → provider maps to the entity's voucher-type code (AR: CbteTipo). */
+    /** Canonical code; the provider maps it to the entity's voucher-type code (AR: CbteTipo). */
     @IsInt()
     @IsPositive()
     documentTypeCode!: number;
 
     /** Concept: 1 = goods, 2 = services, 3 = both. */
-    @IsIn([1, 2, 3])
+    @IsIn(NEUTRAL_INVOICE_CONCEPTS)
     concept!: NeutralInvoiceConcept;
 
     @IsInt()
@@ -133,37 +167,70 @@ export class NeutralInvoiceDto {
     @IsPositive()
     voucherNumberTo!: number;
 
+    // `@IsDefined` alongside `@ValidateNested`: nested validation has nothing to validate on a missing
+    // object, so it passes, and the mapper then reads a field off `undefined` — a `500` for an incomplete
+    // body. `lines` needs no such guard, its `@IsArray()` already rejecting an absent one.
+    @IsDefined()
     @ValidateNested()
     @Type(() => InvoiceReceiverDto)
     receiver!: InvoiceReceiverDto;
 
-    /** ISO-4217 currency (e.g. `ARS`, `USD`); mapped to the entity's currency code by the provider. */
+    /**
+     * The authority's own currency code (AR: `MonId` — `"PES"`, `"DOL"`, `"060"`). The fourth canonical
+     * fiscal code, identity-mapped like the other three.
+     *
+     * `@Length(1, 8)` rather than a fixed three: `002` and `060` are zero-padded and the padding is part of
+     * the code, and ARCA itself types `MonId` as `String(8)` on the cotización response against `String(3)`
+     * in the catalogue — so no future entity is assumed to code currencies in three characters.
+     *
+     * Optional only during the migration window.
+     */
+    @IsOptional()
+    @IsString()
+    @Length(1, 8)
+    currencyCode?: string;
+
+    /**
+     * ISO-4217 currency (e.g. `ARS`, `USD`); mapped to the entity's currency code by the provider.
+     *
+     * @deprecated Superseded by `currencyCode`. ISO cannot express an authority's catalogue: ARCA's `DOL` and
+     * `002` (the blue) are both `USD` at different published rates, so a caller pricing at the blue silently
+     * declared the official code, and `049` (Gramos de Oro Fino) has no ISO code at all.
+     */
+    @IsOptional()
     @IsString()
     @Length(3, 3)
-    currencyIso!: string;
+    currencyIso?: string;
 
-    /** Exchange rate to the local currency (1 for the local currency itself). */
+    /**
+     * Exchange rate to the local currency (1 for the local currency itself).
+     *
+     * Hosts `InvoiceNamesOneCurrency` because a class-level check has to hang off a required property:
+     * `@IsOptional()` skips every validator on its own property when the value is absent, so attaching it to
+     * either currency field would disable it in the cases it exists to catch. This field is also its natural
+     * partner, a rate with no currency naming nothing.
+     */
     @IsNumber()
     @IsPositive()
+    @Validate(InvoiceNamesOneCurrency)
     currencyRate!: number;
 
-    /** ISO-8601 issue date. */
-    @IsISO8601()
+    /**
+     * The day the voucher is issued on — a calendar day in the authority's own calendar, or an instant
+     * carrying a UTC offset. This becomes AR's `CbteFch`, the voucher's legal date, which is why a zoneless
+     * datetime is refused rather than resolved against whatever `TZ` this service runs under.
+     */
+    @IsAuthorityDate()
     issueDate!: string;
 
     /**
-     * The lines that sit INSIDE the VAT system — each one a base plus the tax charged on it. A rate of `0`
-     * belongs here and is not the same thing as `totals.untaxed`: it is a base the entity taxes at zero and
-     * wants declared as such (AR: its own alícuota id, distinct from `ImpTotConc`/`ImpOpEx`). Money that is
-     * outside the VAT system altogether travels in {@link InvoiceTotalsDto}.
+     * The lines inside the VAT system — each a base plus the tax charged on it. A rate of `0` belongs here
+     * and is not `totals.untaxed`: it is a base the entity taxes at zero and wants declared as such (AR: its
+     * own alícuota id). Money outside the VAT system travels in `totals`.
      *
-     * May be empty, and an empty array is meaningful rather than a mistake: an issuer who levies no VAT at
-     * all (Monotributo / Exento) has no bases to declare, and its vouchers — letter C, in AR — must report no
-     * `Iva` element whatsoever. What is NOT allowed is an invoice with no money in either channel; see
-     * {@link InvoiceCarriesAmount}, which replaces the `@ArrayMinSize(1)` this field used to carry.
-     *
-     * That minimum was only ever safe while callers also sent their zero-rated money here, which
-     * double-counted it against `totals.untaxed` and overstated the voucher total by exactly that amount.
+     * An empty array is meaningful rather than a mistake: an issuer who levies no VAT at all has no bases to
+     * declare, and its vouchers must report no `Iva` element. What is not allowed is an invoice with no money
+     * in either channel, which `InvoiceCarriesAmount` catches.
      */
     @IsArray()
     @ValidateNested({each: true})
@@ -176,94 +243,18 @@ export class NeutralInvoiceDto {
     @Type(() => InvoiceTotalsDto)
     totals?: InvoiceTotalsDto;
 
-    /** ISO date — required by the entity when concept is 2 or 3 (AR: `FchServDesde`). */
+    /** Authority calendar day — required by the entity when concept is 2 or 3 (AR: `FchServDesde`). */
     @IsOptional()
-    @IsISO8601()
+    @IsAuthorityDate()
     serviceDateFrom?: string;
 
-    /** ISO date — required by the entity when concept is 2 or 3 (AR: `FchServHasta`). */
+    /** Authority calendar day — required by the entity when concept is 2 or 3 (AR: `FchServHasta`). */
     @IsOptional()
-    @IsISO8601()
+    @IsAuthorityDate()
     serviceDateTo?: string;
 
-    /** ISO date — required by the entity when concept is 2 or 3 (AR: `FchVtoPago`). */
+    /** Authority calendar day — required by the entity when concept is 2 or 3 (AR: `FchVtoPago`). */
     @IsOptional()
-    @IsISO8601()
+    @IsAuthorityDate()
     paymentDueDate?: string;
-}
-
-/** Body for `POST /invoices/authorize`. */
-export class AuthorizeInvoiceRequestDto {
-    @ValidateNested()
-    @Type(() => EntityAuthDto)
-    entity!: EntityAuthDto;
-
-    @ValidateNested()
-    @Type(() => NeutralInvoiceDto)
-    invoice!: NeutralInvoiceDto;
-}
-
-/** Body for `POST /invoices/last-authorized`. */
-export class LastAuthorizedRequestDto {
-    @ValidateNested()
-    @Type(() => EntityAuthDto)
-    entity!: EntityAuthDto;
-
-    @IsInt()
-    @IsPositive()
-    pointOfSaleNumber!: number;
-
-    @IsInt()
-    @IsPositive()
-    documentTypeCode!: number;
-}
-
-/** Body for `POST /invoices/next-numbers` — batch next-expected-number lookup for one point of sale. */
-export class NextNumbersRequestDto {
-    // `@IsDefined` alongside `@ValidateNested`: nested validation alone passes a *missing* `entity` (nothing to
-    // validate), which would then NPE in the controller → 500. This makes a missing entity a clean 400.
-    @IsDefined()
-    @ValidateNested()
-    @Type(() => EntityAuthDto)
-    entity!: EntityAuthDto;
-
-    @IsInt()
-    @IsPositive()
-    pointOfSaleNumber!: number;
-
-    /** Canonical document-type codes (AR: each a CbteTipo). Non-empty; core may de-duplicate before sending. */
-    @IsArray()
-    @ArrayMinSize(1)
-    @IsInt({each: true})
-    @IsPositive({each: true})
-    documentTypeCodes!: Array<number>;
-}
-
-/** Body for `POST /points-of-sale` — identity only; the point-of-sale list is scoped to the entity/issuer. */
-export class PointsOfSaleRequestDto {
-    // `@IsDefined` is required alongside `@ValidateNested`: nested validation alone passes a *missing* `entity`
-    // (there is nothing to validate), which would then NPE in the controller → 500. This makes it a clean 400.
-    @IsDefined()
-    @ValidateNested()
-    @Type(() => EntityAuthDto)
-    entity!: EntityAuthDto;
-}
-
-/** Body for `POST /invoices/query`. */
-export class QueryVoucherRequestDto {
-    @ValidateNested()
-    @Type(() => EntityAuthDto)
-    entity!: EntityAuthDto;
-
-    @IsInt()
-    @IsPositive()
-    pointOfSaleNumber!: number;
-
-    @IsInt()
-    @IsPositive()
-    documentTypeCode!: number;
-
-    @IsInt()
-    @IsPositive()
-    voucherNumber!: number;
 }

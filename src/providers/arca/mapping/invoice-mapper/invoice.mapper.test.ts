@@ -1,5 +1,6 @@
-import {ArcaValidationError, type CommonInvoiceResult} from '../../sdk/index.js';
-import type {NeutralInvoice} from '../../../provider/provider.js';
+import {ArcaValidationError} from '../../sdk/core/errors.js';
+import type {CommonInvoiceResult} from '../../sdk/invoicing/common/common-invoice.types.js';
+import type {NeutralInvoice} from '../../../provider/neutral-invoice.js';
 import {
     buildCommonInvoiceRequest,
     buildQrUrl,
@@ -62,6 +63,20 @@ describe('buildCommonInvoiceRequest', () => {
         expect(() => buildCommonInvoiceRequest(invoice({currencyIso: 'xyz'}), 1)).toThrow(ArcaValidationError);
     });
 
+    it('reads an explicit null currency as no currency, not as one to dereference', () => {
+        // `@IsOptional()` skips a property's validators for `null` as well as `undefined`, so an explicit
+        // `null` reaches a provider unvalidated. Read as present it threw a `TypeError` off `.trim()`, an
+        // opaque `500` for the same "names no currency" case as omitting the field. The casts are the
+        // point: `null` is what the types rule out and the wire can still deliver.
+        for (const nulled of [{currencyIso: null}, {currencyCode: null}]) {
+            const withNull = {currencyIso: undefined, ...nulled} as unknown as Partial<NeutralInvoice>;
+            expect(() => buildCommonInvoiceRequest(invoice(withNull), 1)).toThrow(ArcaValidationError);
+        }
+        // A null alongside a real code is still that code — absence is absence, whichever way it is spelled.
+        const nullIso = {currencyIso: null, currencyCode: 'DOL'} as unknown as Partial<NeutralInvoice>;
+        expect(buildCommonInvoiceRequest(invoice(nullIso), 1).currencyId).toBe('DOL');
+    });
+
     it('rejects a non-numeric receiver identification number instead of sending NaN', () => {
         expect(() =>
             buildCommonInvoiceRequest(invoice({receiver: {identificationTypeCode: 80, identificationNumber: '20-1111111-2', fiscalConditionCode: 1}}), 1),
@@ -77,10 +92,36 @@ describe('buildCommonInvoiceRequest', () => {
     it('rejects an ISO-8601 form the Date parser cannot read instead of crashing in formatArcaDate', () => {
         // `@IsISO8601` is non-strict, so week/ordinal/basic forms reach the mapper. Left unchecked they
         // yield an Invalid Date that survives every comparison and throws RangeError → an opaque 500.
-        for (const issueDate of ['2026-W01-1', '2026-366', '20260231', '2026-08-05 12:00:00']) {
+        for (const issueDate of ['2026-W01-1', '2026-366', '20260231']) {
             expect(() => buildCommonInvoiceRequest(invoice({issueDate}), 1)).toThrow(ArcaValidationError);
             expect(() => buildCommonInvoiceRequest(invoice({issueDate}), 1)).toThrow(/not a usable ISO-8601 date/);
         }
+    });
+
+    it('rejects a datetime with no timezone, which would resolve per deployment', () => {
+        // The space form was grouped with the unreadable ones above on the assumption `Date` refused it. It
+        // does not: V8 accepts it and reads it host-local, so the same request produced a different
+        // `CbteFch` per container — the voucher's legal date decided by deployment.
+        for (const issueDate of ['2026-08-05 12:00:00', '2026-08-26T01:00:00']) {
+            expect(() => buildCommonInvoiceRequest(invoice({issueDate}), 1)).toThrow(ArcaValidationError);
+            expect(() => buildCommonInvoiceRequest(invoice({issueDate}), 1)).toThrow(/no timezone/);
+        }
+    });
+
+    it('rejects a date-only value that is not a real calendar day', () => {
+        // `new Date('2026-02-31')` rolls forward to March 3rd. Filing a voucher under a day the caller
+        // never named is worse than refusing the request.
+        expect(() => buildCommonInvoiceRequest(invoice({issueDate: '2026-02-31'}), 1)).toThrow(
+            /not a real calendar day/,
+        );
+    });
+
+    it('places a zone-qualified instant on the authority calendar day, not the UTC one', () => {
+        // 01:00Z on the 12th is 22:00 on the 11th in Buenos Aires. Slicing the string verbatim — which is
+        // what the padrón `isoDate` does for ARCA-origin data — would wrongly yield the 12th here.
+        expect(buildCommonInvoiceRequest(invoice({issueDate: '2026-07-12T01:00:00Z'}), 1).voucherDate).toBe(
+            '20260711',
+        );
     });
 });
 
@@ -114,6 +155,24 @@ describe('concept1DateWindowError', () => {
         });
         expect(concept1DateWindowError(services, NOW)).toBeUndefined();
         expect(buildCommonInvoiceRequest(services, 1).voucherDate).toBe('20200101');
+    });
+
+    it('omits a service date sent as an explicit null rather than parsing one', () => {
+        // The same hole as the currency fields: an explicit `null` reaches the mapper unvalidated and threw
+        // a `TypeError` off `.trim()`, an opaque `500` in place of ARCA's own `400` for a service voucher
+        // missing the date.
+        const services = invoice({
+            concept: 2,
+            serviceDateFrom: '2026-08-01',
+            serviceDateTo: null,
+            paymentDueDate: null,
+        } as unknown as Partial<NeutralInvoice>);
+
+        const req = buildCommonInvoiceRequest(services, 1);
+
+        expect(req.serviceDateFrom).toBe('20260801');
+        expect(req.serviceDateTo).toBeUndefined();
+        expect(req.paymentDueDate).toBeUndefined();
     });
 });
 
@@ -152,10 +211,23 @@ describe('toNeutralResult', () => {
         expect(r.providerMetadata).toEqual({});
     });
 
+    it('never throws on an expiry it cannot read — the CAE must survive', () => {
+        // An unreadable `CAEFchVto` used to throw, which is a `500` on an authorization ARCA already
+        // granted — core losing a CAE for a fiscal document that exists, far worse than an odd
+        // `expiration`. The value is surfaced verbatim rather than a date being invented.
+        for (const caeExpiration of ['NULL', 'abc', '2026-08-15', '202608']) {
+            const r = toNeutralResult({...approved, caeExpiration}, 'qr-url');
+            expect(r.authorizationCode).toBe('75123456789012');
+            expect(r.expiration).toBe(caeExpiration);
+        }
+        // Absent stays the documented empty string rather than becoming a fabricated day.
+        expect(toNeutralResult({...approved, caeExpiration: undefined}, 'qr-url').expiration).toBe('');
+    });
+
     /**
-     * ARCA authorizes with observations more often than it rejects with them. The mapper must forward them on
-     * the AUTHORIZED path unchanged — a status-conditional `observations` here would strip the authority's
-     * only notice about an accepted voucher before core ever sees it (`docs/CONTRACT.md`, `/invoices/authorize`).
+     * ARCA authorizes with observations more often than it rejects with them, so the mapper forwards them on
+     * the authorized path unchanged: a status-conditional `observations` would strip the authority's only
+     * notice about an accepted voucher before core ever sees it.
      */
     it('keeps observations on an approved result, alongside the CAE and QR', () => {
         const r = toNeutralResult(

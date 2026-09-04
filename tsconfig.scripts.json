@@ -1,0 +1,12 @@
+{
+  // `scripts/` is outside `tsconfig.json`'s `include` (which is `src/**/*`) and outside ESLint's scope, so
+  // nothing checked it: a change to an SDK signature could break `pnpm probe:band` with no gate noticing,
+  // and — because ts-node type-checks by default — the break surfaces only when someone runs it, which for
+  // the band probe is the moment they need it. `pnpm typecheck` runs this config too.
+  //
+  // Separate from the main config rather than folded into its `include`, so the scripts stay out of
+  // `tsconfig.build.json`'s program and out of ESLint's `projectService`. tsc still pulls the `src` modules
+  // they import into this program, which is the point — the two are checked against each other.
+  "extends": "./tsconfig.json",
+  "include": ["scripts/**/*"]
+}

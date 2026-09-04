@@ -1,15 +1,19 @@
+import type {ArcaCodeMessage} from '../../core/errors.js';
 import type {VatSubtotal} from '../invoice-totals/invoice-totals.js';
+import type {NeutralInvoiceConcept} from '../../../../provider/neutral-invoice.js';
 
 /**
- * SDK-facing request/response types for WSFEv1 (facturación electrónica común).
- *
- * The request is the SDK's own shape (English names); it is translated into the WSFEv1 SOAP schema
- * — whose field names (`PtoVta`, `CbteTipo`, `ImpTotal`, …) appear only inside the service that
- * builds the wire payload. Amounts are numbers; the service formats them for the wire.
+ * SDK-facing request/response types for WSFEv1. The request is the SDK's own shape, translated into the
+ * WSFEv1 SOAP schema inside the service that builds the wire payload — so ARCA's field names appear only
+ * there. Amounts are numbers; the service formats them.
  */
 
-/** ARCA `Concepto`: 1 = productos, 2 = servicios, 3 = productos y servicios. */
-export type InvoiceConcept = 1 | 2 | 3;
+/**
+ * ARCA `Concepto`: 1 = productos, 2 = servicios, 3 = productos y servicios. The neutral union under ARCA's
+ * name rather than a copy, since the mapper assigns straight into this field and two declarations would be
+ * assignable right up until one gained a member.
+ */
+export type InvoiceConcept = NeutralInvoiceConcept;
 
 /** An associated voucher (`CbtesAsoc`), e.g. the invoice a credit note references. */
 export interface AssociatedVoucher {
@@ -68,9 +72,8 @@ export interface CommonInvoiceRequest {
     /** `MonCotiz` — exchange rate to ARS (1 for PES). */
     currencyRate: number;
     /**
-     * `CondicionIVAReceptorId` — the receiver's IVA condition (RG 5616, mandatory). Uses the AFIP
-     * `FEParamGetCondicionIvaReceptor` codes (1 = Responsable Inscripto, 5 = Consumidor Final,
-     * 6 = Monotributo, …).
+     * `CondicionIVAReceptorId` — the receiver's IVA condition (RG 5616, mandatory), in AFIP's
+     * `FEParamGetCondicionIvaReceptor` codes (1 Responsable Inscripto, 5 Consumidor Final, 6 Monotributo).
      */
     receiverIvaConditionId?: number;
     /** `Iva[]` subtotals grouped by alícuota. */
@@ -88,14 +91,14 @@ export interface CommonInvoiceRequest {
 }
 
 /**
- * An ARCA observation (`Observaciones.Obs`). Attached to ANY result, not only a partial/rejected one: ARCA
- * routinely approves a voucher (`Resultado: "A"`, real CAE) while still reporting observations about it. The
- * parse is deliberately independent of `Resultado` so an approved-with-observations voucher keeps them.
+ * An ARCA observation (`Observaciones.Obs`), attached to any result rather than only a rejected one: ARCA
+ * routinely approves a voucher with a real CAE while still reporting observations about it. The parse is
+ * independent of `Resultado`, so an approved-with-observations voucher keeps them.
+ *
+ * An alias rather than a copy, for the reason `InvoiceConcept` is one: `Obs` and `Err` are the same wire
+ * structure and one reader parses both.
  */
-export interface ArcaObservation {
-    code: string;
-    message: string;
-}
+export type ArcaObservation = ArcaCodeMessage;
 
 export interface CommonInvoiceResult {
     /** `A` = aprobado, `R` = rechazado, `P` = parcial. */

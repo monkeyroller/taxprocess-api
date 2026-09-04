@@ -1,35 +1,31 @@
 import 'dotenv/config';
 
 /**
- * Typed, frozen application configuration. `process.env` is read exactly once, here; the rest of the
- * service depends on {@link env} and never touches `process.env` directly. Invalid values fail fast at
- * import time (i.e. at boot).
+ * Typed, frozen application configuration. `process.env` is read exactly once here, and invalid values fail
+ * fast at import time.
  *
- * This service stores NO **tenant** secrets at rest: there is deliberately no `ARCA_MASTER_KEY` and no
- * credential store — the encrypted per-tenant credentials live in `webprocess-api`. Core sends the
- * decrypted key on the `CREDENTIALS_REQUIRED` handshake; this service uses it only in memory to mint a
- * ticket, then keeps only the ticket. Core always initiates (no outbound core URL here).
+ * This service stores no tenant secrets at rest: the encrypted per-tenant credentials live in core, which
+ * sends the decrypted key on the `CREDENTIALS_REQUIRED` handshake. This service uses it only in memory to
+ * mint a ticket, then keeps only the ticket.
  *
- * The single, bounded exception is the **delegate certificate** ({@link ArcaDelegateConfig}): one
- * platform credential (our own organization's ARCA cert) supplied at deploy time via a secret-managed
- * file path or inline PEM. It is NOT tenant data and NOT in the credential store — it lets this service
- * act as an ARCA *delegate* (computador) and issue on behalf of taxpayers that delegated the web service
- * to us. Mount it from a secret manager; it is loaded once and held in memory only.
+ * The one exception is the delegate certificate — a single platform credential supplied at deploy time via a
+ * secret-managed file path or inline PEM, which lets this service act as an ARCA delegate and issue on
+ * behalf of taxpayers that delegated the web service to us. Loaded once and held in memory only.
  */
 export interface AppConfig {
     readonly port: number;
     readonly nodeEnv: string;
     readonly corsOrigin: string;
-    /** WSAA ticket cache file path (dev). Unset ⇒ in-memory cache only. */
+    /** WSAA ticket cache file path. Unset leaves the cache in-memory only. */
     readonly ticketCachePath: string | undefined;
-    /** Delegate (representación) certificate sources per environment. See {@link ArcaDelegateConfig}. */
+    /** Delegate certificate sources per environment. */
     readonly arcaDelegate: ArcaDelegateConfig;
 }
 
 /**
- * Raw delegate-certificate sources for one ARCA environment. Inline PEM wins over a file path when both
- * are set. All optional — an environment with neither cert nor key configured simply has delegation
- * disabled. The PEMs are read/validated lazily by the delegate credential store, not here.
+ * Raw delegate-certificate sources for one ARCA environment. Inline PEM wins over a file path when both are
+ * set, and an environment with neither has delegation disabled. The PEMs are read and validated lazily by
+ * the delegate credential store rather than here.
  */
 export interface DelegateCertConfig {
     readonly certPem: string | undefined;
@@ -39,9 +35,9 @@ export interface DelegateCertConfig {
 }
 
 /**
- * The delegate certificate configuration, one entry per generic environment (ARCA production and testing
- * require different certificates). `expectedTaxId`, when set, is a boot-time cross-check: the loaded
- * certificate's CUIT must equal it, or boot fails — a guard against deploying the wrong cert.
+ * The delegate certificate configuration, one entry per environment, ARCA production and testing requiring
+ * different certificates. `expectedTaxId`, when set, is a boot-time cross-check against deploying the wrong
+ * cert: the loaded certificate's CUIT must equal it or boot fails.
  */
 export interface ArcaDelegateConfig {
     readonly production: DelegateCertConfig;

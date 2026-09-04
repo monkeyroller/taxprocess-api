@@ -6,14 +6,13 @@ import {
     LastAuthorizedRequestDto,
     NextNumbersRequestDto,
     QueryVoucherRequestDto,
-} from '../dto/invoice.dto.js';
-import type {LastAuthorizedResultDto} from '../dto/neutral-result.dto.js';
+} from '../dto/invoice-request.dto.js';
+import type {LastAuthorizedResultDto} from '../dto/authorization-result.dto.js';
 import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
- * Invoicing endpoints. Each dispatches on the request's `entityCode` to a provider, which resolves a
- * ticket via its ticket store — a cache miss with no credentials throws `CredentialsRequiredError` →
- * `409 CREDENTIALS_REQUIRED`, prompting core to re-send the same request with the issuer's credentials.
+ * Invoicing endpoints. Each dispatches on `entityCode` to a provider, which resolves a ticket — a cache miss
+ * with no credentials is a `409`, prompting core to re-send with the issuer's credentials.
  */
 @JsonController('/invoices')
 export class InvoicesController {
@@ -22,7 +21,7 @@ export class InvoicesController {
         try {
             const {entity, invoice} = body;
             const result = await getProvider(entity.entityCode).authorizeInvoice(entity, invoice);
-            // 200 when authorized (authorization code + expiration present); otherwise 422 (rejected/partial).
+            // 200 when authorized; 422 for a rejection or a partial.
             const approved =
                 result.status === 'AUTHORIZED' && result.authorizationCode !== '' && result.expiration !== '';
             return res.status(approved ? 200 : 422).json(result);

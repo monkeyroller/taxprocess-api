@@ -1,22 +1,21 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import forge from 'node-forge';
 import {SoapClient} from '../soap-client/soap-client.js';
 import {ArcaAuthError} from '../errors.js';
 import {ENDPOINTS, Namespaces} from '../constants.js';
 import type {AccessTicket} from '../types.js';
 import type {ArcaConfig} from '../arca-config.js';
+import {ExpiringCache} from '../../../../expiring-cache/expiring-cache.js';
 
 /**
  * WSAA (Web Service de Autenticación y Autorización) client.
  *
- * Signs a Login Ticket Request (TRA) as a CMS/PKCS#7 SignedData with the issuer's certificate,
- * exchanges it via `loginCms` for a Token + Sign, and caches the resulting access ticket
- * per `(ticketOwnerKey, serviceId)` — ARCA issues a distinct ticket per web service, and the cache
- * key includes the owner so tickets never cross tenants/companies. Concurrent logins for the same
- * key are de-duplicated into a single in-flight request.
+ * Signs a Login Ticket Request as CMS/PKCS#7 SignedData with the issuer's certificate, exchanges it via
+ * `loginCms` for a token and sign, and caches the resulting ticket per owner and service — ARCA issues a
+ * distinct ticket per web service, and the owner in the key is what keeps tickets from crossing tenants.
+ * Concurrent logins for one key are de-duplicated into a single request.
  *
- * This client is meant to be a long-lived singleton so the ~12h ticket cache actually pays off.
+ * Meant to be a long-lived singleton so the ~12h ticket cache pays off.
  */
 
 const TICKET_TTL_MINUTES = 720; // ARCA tickets are valid ~12h
@@ -31,171 +30,63 @@ interface StoredTicket {
 }
 
 export class WsaaClient {
-    private readonly cache = new Map<string, AccessTicket>();
-    private readonly pending = new Map<string, Promise<AccessTicket>>();
+    private readonly tickets: ExpiringCache<AccessTicket, StoredTicket>;
 
     /**
-     * Optional file path for cross-restart ticket persistence. WSAA refuses to issue a new ticket
-     * while a prior one is still valid (`coe.alreadyAuthenticated`), so an in-memory-only cache breaks
-     * on every process restart. When a path is supplied (the app passes `env.ticketCachePath`, sourced
-     * from `ARCA_TICKET_CACHE_PATH`), tickets survive restarts; when omitted, the cache is in-memory only.
+     * `cachePath` gives cross-restart ticket persistence. WSAA refuses to issue a new ticket while a prior
+     * one is still valid, so an in-memory-only cache breaks on every process restart.
      */
     constructor(
         private readonly soap: SoapClient,
-        private readonly cachePath?: string,
-    ) {}
-
-    /** Returns a valid access ticket for `serviceId`, logging in via WSAA only when needed. */
-    async getAccessTicket(config: ArcaConfig, serviceId: string): Promise<AccessTicket> {
-        const cacheKey = `${config.ticketOwnerKey}:${serviceId}`;
-
-        const cached = this.cache.get(cacheKey) ?? this.loadFromFile(cacheKey);
-        if (cached && cached.expirationTime.getTime() - Date.now() > EXPIRY_MARGIN_MS) {
-            this.cache.set(cacheKey, cached);
-            return cached;
-        }
-
-        const inFlight = this.pending.get(cacheKey);
-        if (inFlight) {
-            return inFlight;
-        }
-
-        const login = this.login(config, serviceId)
-            .then((ticket) => {
-                this.cache.set(cacheKey, ticket);
-                this.saveToFile(cacheKey, ticket);
-                return ticket;
-            })
-            .finally(() => {
-                this.pending.delete(cacheKey);
-            });
-
-        this.pending.set(cacheKey, login);
-        return login;
-    }
-
-    /**
-     * Returns a cached, still-valid ticket for `(ticketOwnerKey, serviceId)` WITHOUT logging in — used
-     * to serve a request that carries no credentials. Returns undefined on a miss so the caller can ask
-     * the credential holder to re-send credentials.
-     */
-    peekAccessTicket(ticketOwnerKey: string, serviceId: string): AccessTicket | undefined {
-        const cacheKey = `${ticketOwnerKey}:${serviceId}`;
-        const cached = this.cache.get(cacheKey) ?? this.loadFromFile(cacheKey);
-        if (cached && cached.expirationTime.getTime() - Date.now() > EXPIRY_MARGIN_MS) {
-            this.cache.set(cacheKey, cached);
-            return cached;
-        }
-        return undefined;
-    }
-
-    /** Reads a persisted ticket for `cacheKey`, or undefined if none/unreadable. */
-    private loadFromFile(cacheKey: string): AccessTicket | undefined {
-        if (!this.cachePath) {
-            return undefined;
-        }
-        try {
-            const all = JSON.parse(fs.readFileSync(this.cachePath, 'utf8')) as Record<string, StoredTicket>;
-            const stored = all[cacheKey];
-            if (!stored) {
-                return undefined;
-            }
-            return {token: stored.token, sign: stored.sign, expirationTime: new Date(stored.expirationTime)};
-        } catch {
-            return undefined;
-        }
-    }
-
-    /**
-     * Best-effort persist of a ticket for `cacheKey` (re-read → merge → write). The whole read-modify-write
-     * is synchronous, so within this process it is a serial critical section — no two concurrent logins can
-     * interleave and drop each other's entry. The write itself is serialized atomically: we write a
-     * per-pid temp file and `rename` it over the target (an atomic swap on the same filesystem), so a crash
-     * mid-write — or a second process sharing this cache file — can never observe or leave a torn file.
-     */
-    private saveToFile(cacheKey: string, ticket: AccessTicket): void {
-        if (!this.cachePath) {
-            return;
-        }
-        try {
-            let all: Record<string, StoredTicket> = {};
-            try {
-                all = JSON.parse(fs.readFileSync(this.cachePath, 'utf8')) as Record<string, StoredTicket>;
-            } catch {
-                // no existing file — start fresh
-            }
-            all[cacheKey] = {
+        cachePath?: string,
+    ) {
+        // The caching itself is authority-agnostic and lives in `ExpiringCache`. What stays here is what
+        // makes a ticket a ticket: the TRA, the CMS signature, WSAA's endpoint and its refusal to re-mint.
+        //
+        // `serialize`/`deserialize` pin a live on-disk format: changing it invalidates every persisted
+        // ticket, and since WSAA will not re-mint while the old one is valid, a deploy that broke it would
+        // take the till down for up to ~12h per certificate and service.
+        this.tickets = new ExpiringCache<AccessTicket, StoredTicket>({
+            cachePath,
+            expiryMarginMs: EXPIRY_MARGIN_MS,
+            expiresAt: (ticket) => ticket.expirationTime,
+            serialize: (ticket) => ({
                 token: ticket.token,
                 sign: ticket.sign,
                 expirationTime: ticket.expirationTime.toISOString(),
-            };
-            const tmpPath = `${this.cachePath}.${process.pid}.tmp`;
-            fs.writeFileSync(tmpPath, JSON.stringify(all, null, 2));
-            fs.renameSync(tmpPath, this.cachePath);
-        } catch {
-            // persistence is best-effort; fall back to in-memory only
-        }
+            }),
+            deserialize: (stored) => ({
+                token: stored.token,
+                sign: stored.sign,
+                expirationTime: new Date(stored.expirationTime),
+            }),
+        });
+    }
+
+    /** Returns a valid access ticket for `serviceId`, logging in via WSAA only when needed. */
+    async getAccessTicket(config: ArcaConfig, serviceId: string): Promise<AccessTicket> {
+        return this.tickets.getOrCreate(config.ticketOwnerKey, serviceId, () => this.login(config, serviceId));
     }
 
     /**
-     * Clears cached tickets from memory AND the persisted file, so a ticket evicted after ARCA rejected it
-     * cannot resurrect from disk on the next {@link peekAccessTicket}. Scope widens as arguments are
-     * omitted: `(owner, serviceId)` clears exactly that ticket, `(owner)` every service under that owner,
-     * `()` the whole cache.
+     * A cached, still-valid ticket without logging in, for a request that carries no credentials.
+     * `undefined` on a miss, so the caller can ask the credential holder to re-send.
+     */
+    peekAccessTicket(ticketOwnerKey: string, serviceId: string): AccessTicket | undefined {
+        return this.tickets.peek(ticketOwnerKey, serviceId);
+    }
+
+    /**
+     * Clears cached tickets from memory and the persisted file, so one evicted after ARCA rejected it cannot
+     * resurrect from disk. Widens as arguments are omitted: both name exactly that ticket, an owner alone
+     * every service under it, neither the whole cache.
      *
-     * Prefer the two-argument form for a rejection: ARCA binds a ticket to `(certificate, service)` and
-     * refuses to re-issue one while a prior ticket is still valid (`coe.alreadyAuthenticated`), so dropping
-     * the *other* services' still-good tickets would leave them unmintable — and unrecoverable, the file
-     * copy being purged too — until they expire (~12h).
+     * Prefer the two-argument form for a rejection. ARCA binds a ticket to a certificate and service and
+     * refuses to re-issue one while a prior ticket is valid, so dropping the other services' still-good
+     * tickets leaves them unmintable — and unrecoverable, the file copy being purged too — for ~12h.
      */
     clearCache(ticketOwnerKey?: string, serviceId?: string): void {
-        if (ticketOwnerKey === undefined) {
-            this.cache.clear();
-        } else if (serviceId !== undefined) {
-            this.cache.delete(`${ticketOwnerKey}:${serviceId}`);
-        } else {
-            for (const key of this.cache.keys()) {
-                if (key.startsWith(`${ticketOwnerKey}:`)) {
-                    this.cache.delete(key);
-                }
-            }
-        }
-        this.removeFromFile(ticketOwnerKey, serviceId);
-    }
-
-    /**
-     * Best-effort removal of persisted tickets, matching {@link clearCache}'s scope. Mirrors
-     * {@link saveToFile}'s atomic temp-file + rename so a concurrent reader or a shared cache file never
-     * observes a torn write. A missing/unreadable file is a no-op.
-     */
-    private removeFromFile(ticketOwnerKey?: string, serviceId?: string): void {
-        if (!this.cachePath) {
-            return;
-        }
-        const matches = (key: string): boolean => {
-            if (ticketOwnerKey === undefined) {
-                return true;
-            }
-            return serviceId === undefined ? key.startsWith(`${ticketOwnerKey}:`) : key === `${ticketOwnerKey}:${serviceId}`;
-        };
-        try {
-            const all = JSON.parse(fs.readFileSync(this.cachePath, 'utf8')) as Record<string, StoredTicket>;
-            let changed = false;
-            for (const key of Object.keys(all)) {
-                if (matches(key)) {
-                    delete all[key];
-                    changed = true;
-                }
-            }
-            if (!changed) {
-                return;
-            }
-            const tmpPath = `${this.cachePath}.${process.pid}.tmp`;
-            fs.writeFileSync(tmpPath, JSON.stringify(all, null, 2));
-            fs.renameSync(tmpPath, this.cachePath);
-        } catch {
-            // best-effort: no file yet, or unreadable — nothing to purge
-        }
+        this.tickets.clear(ticketOwnerKey, serviceId);
     }
 
     private async login(config: ArcaConfig, serviceId: string): Promise<AccessTicket> {
@@ -231,7 +122,7 @@ export class WsaaClient {
         return this.parseAccessTicket(loginCmsReturn);
     }
 
-    /** Builds the TRA XML. `generationTime` is backdated to tolerate clock skew against ARCA. */
+    /** The TRA XML. `generationTime` is backdated to tolerate clock skew against ARCA. */
     private buildLoginTicketRequest(serviceId: string): string {
         const now = Date.now();
         const generationTime = new Date(now - GENERATION_BACKDATE_MS).toISOString();
@@ -254,8 +145,7 @@ export class WsaaClient {
     private signLoginTicketRequest(tra: string, certPem: string, keyPem: string): string {
         try {
             const certificate = forge.pki.certificateFromPem(certPem);
-            // node-forge's privateKeyFromPem only reads PKCS#1; normalize any key (incl. PKCS#8)
-            // to PKCS#1 via Node crypto first so PKCS#8 keys sign correctly too.
+            // node-forge reads only PKCS#1, so any key is normalized to it via Node crypto first.
             const pkcs1KeyPem = crypto.createPrivateKey(keyPem).export({type: 'pkcs1', format: 'pem'}).toString();
             const privateKey = forge.pki.privateKeyFromPem(pkcs1KeyPem);
 
@@ -281,7 +171,7 @@ export class WsaaClient {
         }
     }
 
-    /** Re-parses the (unescaped) ticket XML nested inside the WSAA response into an {@link AccessTicket}. */
+    /** Re-parses the unescaped ticket XML nested inside the WSAA response. */
     private parseAccessTicket(loginTicketResponseXml: string): AccessTicket {
         const parsed = this.soap.parseXmlString(loginTicketResponseXml) as Record<string, any>;
         const response = parsed.loginTicketResponse;

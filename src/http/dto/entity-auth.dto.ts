@@ -1,11 +1,10 @@
 import {Type} from 'class-transformer';
 import {IsBoolean, IsIn, IsOptional, IsString, MinLength, ValidateNested} from 'class-validator';
-import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider/provider.js';
+import {GENERIC_ENVIRONMENTS, type GenericEnvironment} from '../../providers/provider/environment.js';
 
 /**
- * Issuer credentials, attached ONLY when core re-sends after a `CREDENTIALS_REQUIRED` (never on a first
- * request). The certificate + already-decrypted private key with which this service logs in to the tax
- * authority; held only transiently in memory to mint a ticket, never persisted.
+ * Issuer credentials, attached only when core re-sends after a `CREDENTIALS_REQUIRED`. The certificate and
+ * already-decrypted private key this service logs in with; held in memory to mint a ticket, never persisted.
  */
 export class IssuerCredentialsDto {
     @IsString()
@@ -18,9 +17,8 @@ export class IssuerCredentialsDto {
 }
 
 /**
- * The entity/issuer block on every issuing call. `entityCode` selects the provider; `issuerTaxId` is the
- * issuing party's canonical tax identifier (its type is implied by `entityCode`). First requests carry
- * identity only; `credentials` appears only when core re-sends after a `CREDENTIALS_REQUIRED`.
+ * The entity/issuer block on every issuing call. `entityCode` selects the provider and `issuerTaxId` is the
+ * issuing party's canonical tax identifier, its type implied by `entityCode`.
  */
 export class EntityAuthDto {
     @IsString()
@@ -28,7 +26,7 @@ export class EntityAuthDto {
     /** Selects the provider that handles the request. E.g. `"ARCA"` (Argentina/AFIP). */
     entityCode!: string;
 
-    /** Issuing taxpayer's canonical tax id, as a string. **AR: the CUIT** (11 digits), e.g. `"20123456789"`. */
+    /** Issuing taxpayer's canonical tax id, as a string. AR: the 11-digit CUIT. */
     @IsString()
     @MinLength(1)
     issuerTaxId!: string;
@@ -43,16 +41,16 @@ export class EntityAuthDto {
     credentials?: IssuerCredentialsDto;
 
     /**
-     * Delegated authorization. When `true`, `issuerTaxId` is the represented taxpayer and this service
-     * signs with its own platform certificate — `credentials` is ignored and no `CREDENTIALS_REQUIRED`
-     * handshake occurs. Omit (or `false`) for the tenant-certificate flow.
+     * Delegated authorization. When `true`, `issuerTaxId` is the represented taxpayer and this service signs
+     * with its own platform certificate, so `credentials` is ignored and no handshake occurs. Omit for the
+     * tenant-certificate flow.
      */
     @IsOptional()
     @IsBoolean()
     delegated?: boolean;
 }
 
-/** Body for `POST /authority/status` — dispatches by `entityCode`; needs only the environment (no ticket). */
+/** Body for `POST /authority/status`. Dispatches by `entityCode` and needs no ticket. */
 export class AuthorityStatusDto {
     @IsString()
     @MinLength(1)

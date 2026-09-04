@@ -1,16 +1,13 @@
 import type {PadronService} from './padron.types.js';
 
 /**
- * The CUITs ARCA's **homologación** padrón services will actually answer for.
+ * The CUITs ARCA's homologación padrón services will answer for. The testing padrón is not a copy of the
+ * real one, so a production CUIT generally comes back as not found. These are ARCA's published cast rather
+ * than the padrón's whole population — the testing A13 index answers for many claves outside the list, but
+ * only these are documented. Meaningless in `produccion`.
  *
- * The testing padrón is not a copy of the real one, so a real production CUIT generally comes back as not
- * found and these are the ids to reach for. They are ARCA's *published* cast, not the padrón's whole
- * population: the testing A13 index answers for many claves outside this list (see
- * {@link PADRON_HOMOLOGACION_DOCUMENTS}), but only these are documented, so only these are worth relying
- * on. They are meaningless in `produccion`.
- *
- * Digit-only strings (no dashes — the form the SOAP `idPersona` parameter takes). The first eight are
- * legal entities (`30`/`33` prefixes), the rest individuals (`20`/`23`/`24`/`27`).
+ * Digit-only strings, the form the SOAP `idPersona` parameter takes. The first eight are legal entities, the
+ * rest individuals.
  */
 export const PADRON_HOMOLOGACION_CUITS: ReadonlyArray<string> = [
     '33963854329',
@@ -37,21 +34,16 @@ export const PADRON_HOMOLOGACION_CUITS: ReadonlyArray<string> = [
 
 /**
  * Identity-document numbers the homologación A13 index answers for, with how many claves each carries.
+ * These exist because every CUIT above resolves to exactly one clave, so a document probe built from them
+ * would never return a list. The five below cover one match, the smallest multi-match, and fan-outs wide
+ * enough to matter, the lookup reading every returned clave concurrently.
  *
- * These exist because {@link PADRON_HOMOLOGACION_CUITS} cannot exercise the multi-match path at all: every
- * one of those twenty documents resolves to exactly one clave, so a `getIdPersonaListByDocumento` probe
- * built from them would never return a list. The five below cover the shapes a caller has to handle — one
- * match, the smallest multi-match, and fan-outs wide enough to be worth thinking about, since the lookup
- * reads every returned clave concurrently (one `getPersonaV2` each).
+ * The counts are what ARCA returned on 2026-08-26, verified end to end — the index count and the claves the
+ * per-clave read resolved were equal for all five. Testing-padrón data rather than a promise, so treat a
+ * drifted count as something to re-record. The claves come back in a different order between calls; never
+ * assert on position.
  *
- * The counts are what ARCA returned on **2026-08-26**, verified end to end: the index count and the number
- * of claves the per-clave read could resolve were equal for all five, so nothing was dropped. They are the
- * testing padrón's data rather than a promise — ARCA can change it without notice, so treat a drifted count
- * as something to re-record, not a regression. The claves come back in a **different order between calls**;
- * never assert on position.
- *
- * A13 only: the constancia service has no document search, which is why there is no per-service record here
- * like {@link PADRON_HOMOLOGACION_TAX_IDS}.
+ * A13 only: the constancia service has no document search.
  */
 export const PADRON_HOMOLOGACION_DOCUMENTS: ReadonlyArray<string> = [
     // 1 clave — 20888888889 (CUIT). The single-match case.
@@ -62,15 +54,14 @@ export const PADRON_HOMOLOGACION_DOCUMENTS: ReadonlyArray<string> = [
     '99999999',
     // 10 claves, mixed kinds — 6 CUIT, 2 CUIL, 2 CDI.
     '12345678',
-    // 37 claves, mixed kinds — 20 CUIT, 14 CUIL, 3 CDI. The widest fan-out found; one lookup for this
-    // document issues 37 concurrent person reads.
+    // 37 claves — 20 CUIT, 14 CUIL, 3 CDI. The widest fan-out found: 37 concurrent person reads.
     '11111111',
 ];
 
 /**
- * Per-service view of the same cast, so a caller keyed by {@link PadronService} needs no branch. ARCA
- * publishes identical lists for both live services (constancia de inscripción and A13), hence the one
- * shared array; if ARCA ever diverges them, split the arrays here rather than adding a second constant.
+ * Per-service view of the same cast, so a caller keyed by service needs no branch. ARCA publishes identical
+ * lists for both live services; if it ever diverges them, split the arrays here rather than adding a second
+ * constant.
  */
 export const PADRON_HOMOLOGACION_TAX_IDS: Record<PadronService, ReadonlyArray<string>> = {
     CONSTANCIA: PADRON_HOMOLOGACION_CUITS,

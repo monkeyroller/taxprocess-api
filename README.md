@@ -57,10 +57,16 @@ curl -X POST http://localhost:4101/api/authority/status \
 | `pnpm start` | run once via ts-node/esm (no watch) |
 | `pnpm build` | emit production JS to `dist/` (`tsc -p tsconfig.build.json`) |
 | `pnpm serve` | run the built `dist/index.js` |
-| `pnpm typecheck` | strict type gate (`tsc --noEmit`) |
+| `pnpm typecheck` | strict type gate — `src` **and** `scripts/` (`tsconfig.json` + `tsconfig.scripts.json`, both `--noEmit`) |
 | `pnpm test` | unit tests (provider logic + the copied SDK's extraction regression oracle) |
 | `pnpm lint` | ESLint strict-type-checked (new code only; the copied SDK is ignored) |
 | `pnpm format` | Prettier |
+| `pnpm probe:band` | measure the exchange-rate band ARCA enforces. **Homologación only**; `PROBE_MODE=full` authorizes real vouchers and burns voucher numbers — read-only by default |
+| `pnpm probe:cotizacion-day` | measure which DAY a cotización is for. Read-only in every mode; `PROBE_ENVIRONMENT=production` is required for a meaningful answer (homologación's series is generated) |
+
+The two probes exist because their answers are measurements with a shelf life, not readings of ARCA's
+manual — re-run the probe rather than re-reading the PDF. Both are configured through `PROBE_*` env vars;
+see [.env.example](.env.example) and the header comment in each script.
 
 ## HTTP contract (routePrefix `/api`)
 
@@ -76,8 +82,11 @@ see the **Neutral field glossary** in [docs/CONTRACT.md](docs/CONTRACT.md) for w
 | `POST /entities/:entityCode/credentials/validate` | ✅ wired | validate `configuration` + `credentials` at registration |
 | `POST /invoices/authorize` | ✅ wired | neutral invoice (core ids) → authorization code (+ RG-4892 QR) |
 | `POST /invoices/last-authorized` | ✅ wired | last authorized voucher number |
+| `POST /invoices/next-numbers` | ✅ wired | batch next-expected number for several document types of one point of sale; de-duplicated, echoed by `documentTypeCode` |
 | `POST /invoices/query` | ✅ wired | idempotency backstop |
+| `POST /points-of-sale` | ✅ wired | the issuer's registered points of sale; identity-only body |
 | `POST /taxpayers/lookup` | ✅ wired | registry lookup by identification type; uses this service's own delegated identity (no `entity` block) |
+| `POST /currencies/rates` | ✅ wired | published exchange rates + the band the authority accepts; delegated identity, no `entity` block |
 
 Authenticated endpoints reply `409 CREDENTIALS_REQUIRED` on a ticket-cache miss; core re-sends with
 `entity.credentials` attached (see the contract doc). `POST /taxpayers/lookup` is the exception: it signs with
@@ -97,8 +106,23 @@ src/
 ├── index.ts               # bootstrap (Express 5 + routing-controllers)
 ├── config/env.ts          # typed, frozen env (no secrets, no master key)
 ├── providers/
-│   ├── provider/          # abstract TaxEntityProvider + neutral request/result types
+│   ├── provider/          # the neutral contract, one file per concern
+│   │   ├── provider.ts                 # abstract TaxEntityProvider + the outbound fault guard
+│   │   ├── environment.ts              # production/testing, the generic environment selector
+│   │   ├── entity-auth.ts              # the entity/issuer block + issuer credentials
+│   │   ├── neutral-invoice.ts          # the neutral invoice core sends
+│   │   ├── neutral-results.ts          # the result aliases (naming the http/dto shapes)
+│   │   ├── credential-validation.ts    # validateCredentials input/output
+│   │   ├── faults.ts                   # the neutral error contract (ProviderFault + friends)
+│   │   ├── address-code-scheme/        # the shared (code, codeScheme) address vocabulary
+│   │   ├── taxpayer-vocabulary/        # detail / person type / registration status, shared with http/dto
+│   │   └── rate-band/                  # the FORM of an exchange-rate band + the arithmetic (no entity's numbers)
 │   ├── registry/          # entityCode → provider dispatch
+│   ├── concurrency/       # bounded, order-preserving fan-out (mapWithConcurrency)
+│   ├── expiring-cache/    # expiring (owner, scope) cache: single-flight + atomic on-disk persistence
+│   ├── rounding/          # roundTo vs roundHalfUpTo — the money one is named, not assumed
+│   ├── xml-node/          # reading values off a parsed SOAP node (parser facts, no authority's)
+│   ├── pem/               # X.509 / PKCS#1 / PKCS#8 / CSR handling (entity-agnostic)
 │   └── arca/              # the ARCA provider (sole owner of AR specifics)
 │       ├── arca-provider/          # orchestration: resolve a ticket, call the SDK, map the answer
 │       ├── clients.ts              # shared SDK clients
@@ -110,13 +134,35 @@ src/
 │       │   ├── delegate-credentials/   # this service's own delegate cert (padrón lookups)
 │       │   └── environment/            # production/testing ↔ produccion/homologacion
 │       ├── mapping/                # canonical/neutral ↔ ARCA translation
+│       │   ├── canonical-codes.ts      # the canonical code vocabulary (belongs to no provider)
 │       │   ├── code-maps/              # canonical code → ARCA code (documentTypeCode→CbteTipo, …)
+│       │   ├── currency-codes/         # the ARCA MonId catalogue + currencyCode → MonId
+│       │   ├── padron-routing/         # identification type → which padrón service answers
 │       │   ├── identifiers.ts          # CUIT/id parsing + canonicalization
 │       │   ├── invoice-mapper/         # neutral invoice ↔ WSFEv1 request/result
 │       │   ├── taxpayer-mapper/        # SDK padrón data → neutral taxpayer DTOs
 │       │   ├── fiscal-condition/       # ARCA impuestos → canonical fiscalConditionCode
+│       │   ├── authority-day/          # an accepted date → the ARCA day it lands on (+ day arithmetic)
+│       │   ├── cotizacion/             # AR rate policy: the band, the reference currency, which day prices a voucher
 │       │   ├── geography/              # idProvincia → ISO 3166-2, localidad → INDEC code
 │       │   └── indec/                  # the vendored INDEC catalog + the folding applied to it
 │       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
+    ├── dto/               # one module per request body and per result family
+    │   └── authority-date/     # which date FORMS the contract accepts (shape only — no zone, no entity)
+    └── error-mapper/      # neutral fault category → HTTP status + envelope
 ```
+
+The modules sitting directly under `providers/` — `concurrency/`, `expiring-cache/`, `rounding/`,
+`xml-node/`, `pem/` — plus `provider/rate-band/` are **entity-agnostic leaves**: each solves a problem that
+is a fact about a parser, a file, a certificate or arithmetic, never about an authority. They live outside
+`arca/` so a second entity reuses them rather than growing a second copy, and each one is there because a
+second copy had already appeared or was about to. The rule that keeps them honest: an authority's own
+numbers and vocabulary stay in that authority's provider. `rate-band/` holds the *form* of a band and the
+arithmetic; ARCA's measured `[0.02R, 5R]` lives in `arca/mapping/cotizacion/`.
+
+The `sdk/` tree is framework-agnostic and has no barrel: import from the defining module. Consumers
+construct the service classes directly — each bound to a shared, stateless `SoapClient` plus an
+environment — and pass an `ArcaAuth`, obtained from `WsaaClient`, into every call. There is no per-issuer
+orchestrator inside the SDK; auth policy (ticket caching, credential handshakes) is the consumer's
+concern, which is what `auth/ticket-store/` owns.

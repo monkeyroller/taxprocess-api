@@ -1,9 +1,14 @@
 import forge from 'node-forge';
-import {ArcaValidationError, ServiceId, type AccessTicket, type ArcaConfig, type ServiceIdValue, type WsaaClient} from '../../sdk/index.js';
+import type {ArcaConfig} from '../../sdk/core/arca-config.js';
+import {ServiceId, type ServiceIdValue} from '../../sdk/core/constants.js';
+import {ArcaValidationError} from '../../sdk/core/errors.js';
+import type {AccessTicket} from '../../sdk/core/types.js';
+import type {WsaaClient} from '../../sdk/core/wsaa-client/wsaa-client.js';
 import {TicketStore} from './ticket-store.js';
-import {CredentialsRequiredError} from '../../../provider/provider.js';
+import {CredentialsRequiredError} from '../../../provider/faults.js';
 import type {DelegateCredentials, DelegateCredentialStore} from '../delegate-credentials/delegate-credentials.js';
-import {DelegationNotConfiguredError, type GenericEnvironment} from '../../../provider/provider.js';
+import {DelegationNotConfiguredError} from '../../../provider/faults.js';
+import type {GenericEnvironment} from '../../../provider/environment.js';
 
 const ENTITY = 'ARCA';
 const ISSUER = '20123456789';
@@ -12,8 +17,8 @@ const SVC: ServiceIdValue = ServiceId.WSFEV1;
 const ENV: GenericEnvironment = 'testing';
 const OWNER_KEY = `${ENTITY}:${ENV}:${ISSUER}`;
 
-// The service's own delegate identity (our organization's CUIT), used for the delegated-path tests. Its
-// partition carries the `delegate` segment, so it can never collide with a tenant partition.
+// The service's own delegate identity, used for the delegated-path tests. Its partition carries the
+// `delegate` segment, so it can never collide with a tenant partition.
 const DELEGATE_CUIT = '30711111118';
 const DELEGATE_OWNER_KEY = `${ENTITY}:${ENV}:delegate:${DELEGATE_CUIT}`;
 
@@ -35,7 +40,7 @@ function makeCert(cuit?: string): {certPem: string; keyPem: string} {
     return {certPem: forge.pki.certificateToPem(cert), keyPem: forge.pki.privateKeyToPem(keys.privateKey)};
 }
 
-// The certificate the caller sends must belong to ISSUER — the mint path now enforces this.
+// The certificate the caller sends must belong to the issuer, which the mint path enforces.
 const CREDS = makeCert(ISSUER);
 
 function ticket(mins: number): AccessTicket {
@@ -43,9 +48,9 @@ function ticket(mins: number): AccessTicket {
 }
 
 /**
- * Fake WsaaClient recording calls. `peekReturn`, when set, forces a cache hit (existing tests). Otherwise
- * peek consults an internal store that `getAccessTicket` populates keyed by `(ticketOwnerKey, serviceId)`,
- * so the real "one minted ticket, reused across peeks for the same owner key" behavior is observable.
+ * Fake WSAA client recording calls. `peekReturn`, when set, forces a cache hit; otherwise peek consults an
+ * internal store `getAccessTicket` populates, so "one minted ticket, reused across peeks for the same owner
+ * key" is observable.
  */
 class FakeWsaa {
     peekReturn: AccessTicket | undefined = undefined;
@@ -89,8 +94,8 @@ class FakeWsaa {
 }
 
 /**
- * Fake DelegateCredentialStore: returns configured delegate creds per environment (undefined ⇒ not set) and
- * recognizes its own certificate by exact PEM equality (the real store compares canonical PEMs).
+ * Fake delegate store: returns configured credentials per environment and recognizes its own certificate by
+ * exact PEM equality, where the real store compares canonical PEMs.
  */
 class FakeDelegate {
     creds: Partial<Record<GenericEnvironment, DelegateCredentials>> = {};
@@ -217,8 +222,8 @@ describe('TicketStore (mint-on-credentials)', () => {
 
         await store.resolve(ENTITY, ISSUER, SVC, ENV, CREDS);
 
-        // A formatted issuerTaxId can never reach the key (parseArcaId rejects it first), so the partition is
-        // byte-for-byte the pre-delegation one — a shared ARCA_TICKET_CACHE_PATH survives the deploy.
+        // A formatted `issuerTaxId` can never reach the key, `parseArcaId` rejecting it first, so the
+        // partition is byte-for-byte the pre-delegation one and a shared cache file survives the deploy.
         expect(fake.getCalls[0][0].ticketOwnerKey).toBe(OWNER_KEY);
         await expect(store.resolve(ENTITY, '20-12345678-9', SVC, ENV, CREDS)).rejects.toBeInstanceOf(
             ArcaValidationError,
@@ -281,8 +286,8 @@ describe('TicketStore (mint-on-credentials)', () => {
 
             // Our organization issues for itself (non-delegated) with the very cert we delegate with...
             await store.resolve(ENTITY, DELEGATE_CUIT, SVC, ENV, ourCert);
-            // ...then acts as delegate for another taxpayer. One physical cert ⇒ ARCA holds ONE ticket, so
-            // both roles must land in the same partition or the second login would be alreadyAuthenticated.
+            // ...then acts as delegate for another taxpayer. One physical cert means ARCA holds one ticket,
+            // so both roles must land in the same partition or the second login is refused.
             await store.resolve(ENTITY, ISSUER, SVC, ENV, undefined, true);
 
             expect(fake.getCalls).toHaveLength(1);
@@ -295,9 +300,9 @@ describe('TicketStore (mint-on-credentials)', () => {
             delegate.creds[ENV] = {...makeCert(DELEGATE_CUIT), delegateCuit: DELEGATE_CUIT};
             const store = makeStore(fake, delegate);
 
-            // A second certificate of the same CUIT (ARCA allows several; a representación is granted to one
-            // specific computador). Its ticket must NOT be reused for delegated calls — that would yield a
-            // permanent 601 misread as a missing delegation.
+            // A second certificate of the same CUIT, which ARCA allows while granting a representación to
+            // one specific computador. Its ticket must not be reused for delegated calls: that yields a
+            // permanent `601` misread as a missing delegation.
             await store.resolve(ENTITY, DELEGATE_CUIT, SVC, ENV, makeCert(DELEGATE_CUIT));
             await store.resolve(ENTITY, ISSUER, SVC, ENV, undefined, true);
 
@@ -315,7 +320,7 @@ describe('TicketStore (mint-on-credentials)', () => {
             // A delegate ticket exists for our own CUIT (minted at deploy-time config, not by any caller)...
             await store.resolve(ENTITY, ISSUER, SVC, ENV, undefined, true);
 
-            // ...so a caller naming our own CUIT with no credentials must still be asked for them: it never
+            // ...so a caller naming our own CUIT with no credentials is still asked for them: it never
             // proved possession of a certificate for that CUIT.
             await expect(store.resolve(ENTITY, DELEGATE_CUIT, SVC, ENV)).rejects.toBeInstanceOf(
                 CredentialsRequiredError,
@@ -337,7 +342,7 @@ describe('TicketStore (mint-on-credentials)', () => {
             delegate.creds[ENV] = delegateCreds();
             const store = makeStore(fake, delegate);
 
-            // ISSUER (representado) ≠ DELEGATE_CUIT (signer); the ISSUER_TAXID_CERT_MISMATCH guard must NOT fire.
+            // The representado is not the signer, so the certificate-mismatch guard must not fire.
             await expect(store.resolve(ENTITY, ISSUER, SVC, ENV, undefined, true)).resolves.toMatchObject({
                 cuit: CUIT,
             });
@@ -373,8 +378,7 @@ describe('TicketStore (mint-on-credentials)', () => {
 
             store.invalidateDelegated(ENTITY, ENV, SVC);
 
-            // The padrón ticket was never rejected; dropping it would leave it unmintable
-            // (`alreadyAuthenticated`) until it expires ~12h later.
+            // The padrón ticket was never rejected, so dropping it would leave it unmintable for ~12h.
             expect(fake.cachedKeys()).toEqual([`${DELEGATE_OWNER_KEY}:${padron}`]);
         });
 

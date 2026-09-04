@@ -5,9 +5,8 @@ import {ValidateCredentialsRequestDto} from '../dto/credentials.dto.js';
 import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
- * Entity credential validation (H3). Core calls this synchronously during `POST /integrations` so bad
- * credentials are rejected at registration time. Dispatches on the `:entityCode` path param; the
- * provider validates the `configuration` + `credentials` shape and correctness.
+ * Entity credential validation. Core calls this synchronously while registering an integration, so bad
+ * credentials are rejected up front. The provider validates the shape and correctness of both blocks.
  */
 @JsonController('/entities')
 export class EntitiesController {

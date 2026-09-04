@@ -8,40 +8,32 @@ import {
     resolveIndecLocality,
 } from '../geography/geography.js';
 import {deriveFiscalConditionCode} from '../fiscal-condition/fiscal-condition.js';
-import {identificationTypeForClaveKind} from '../code-maps/code-maps.js';
-import type {PadronAddress, TaxpayerData} from '../../sdk/index.js';
+import {identificationTypeForClaveKind} from '../padron-routing/padron-routing.js';
+import type {PadronAddress, TaxpayerData} from '../../sdk/taxpayer-registry/padron.types.js';
 import type {
     TaxpayerActivityDto,
     TaxpayerAddressDto,
     TaxpayerDto,
     TaxpayerResultDto,
     TaxpayerTaxDto,
-} from '../../../../http/dto/neutral-result.dto.js';
+} from '../../../../http/dto/taxpayer-result.dto.js';
 
 /**
- * SDK padrón data → the neutral taxpayer DTOs.
- *
- * The SDK already speaks English and normalizes the two padrón response shapes into one, so this is a
- * thin, deliberate copy rather than a translation: keeping it explicit is what guarantees the wire only
- * ever carries fields the contract documents, instead of whatever a future SDK field happens to be named.
- *
- * Absence follows the contract's rule (see `TaxpayerDto`): optional scalars stay `undefined` — `res.json`
- * drops them, so the key is omitted rather than sent as `null` — while `addresses`/`activities` are always
- * arrays, and `taxes` is present exactly when the answering registry can report taxes at all.
+ * SDK padrón data → the neutral taxpayer DTOs. Optional scalars stay `undefined`, which `res.json` drops, so
+ * a key is omitted rather than sent as `null`; `addresses` and `activities` are always arrays, and `taxes` is
+ * present exactly when the answering registry can report taxes.
  */
 
 /**
  * ARCA's address, with each geographic level carrying a code and the standard that code belongs to.
  *
- * **`regionCode` means two different things either side of this function**, which is the one line here
- * worth reading twice: on the SDK's `PadronAddress` it is ARCA's own `idProvincia` (`"3"` = Córdoba), and
- * on the wire it is the ISO 3166-2 subdivision (`"AR-X"`). This is a translation, not a passthrough —
- * ARCA's catalog id deliberately never reaches a caller (CONTRACT §9), so `province.iso` is what goes out.
+ * `regionCode` means two different things either side of this function: on the SDK's address it is ARCA's own
+ * `idProvincia`, and on the wire it is the ISO 3166-2 subdivision. A translation rather than a passthrough,
+ * since ARCA's catalog id never reaches a caller.
  *
- * ARCA's `region`/`city` names DO travel, as the fallback for a level that did not resolve. Each scheme is
- * set only alongside its own resolved code, never on its own: a scheme naming a code that is not there is
- * noise a caller would have to defend against. `cityCodeSchemeVersion` is guarded on the same condition for
- * the same reason — it dates the code, so an address that resolved to none has nothing to date.
+ * ARCA's own names do travel, as the fallback for a level that did not resolve. Each scheme is set only
+ * alongside its resolved code: a scheme naming a code that is not there is noise a caller would have to
+ * defend against, and the version dates the code, so an address that resolved to none has nothing to date.
  */
 function toNeutralAddress(address: PadronAddress): TaxpayerAddressDto {
     const province = provinceByArcaId(address.regionCode);
@@ -82,8 +74,8 @@ export function toNeutralTaxpayer(data: TaxpayerData): TaxpayerDto {
     return {
         taxId: data.taxId,
         taxIdType: data.taxIdType,
-        // The row's own identification pair. The number always mirrors `taxId`; the type is omitted when
-        // ARCA reported no `tipoClave`, so the pair never names a kind the registry did not state.
+        // The row's own identification pair. The type is omitted when ARCA reported no `tipoClave`, so the
+        // pair never names a kind the registry did not state.
         identificationTypeCode: identificationTypeForClaveKind(data.taxIdType),
         identificationNumber: data.taxId,
         personType: data.personType,
@@ -109,20 +101,18 @@ export function toNeutralTaxpayer(data: TaxpayerData): TaxpayerDto {
 }
 
 /**
- * The lookup envelope. `detail` is read off the entries rather than passed in, because it is a property
- * of the registry that answered — every entry of one lookup comes from the same service, so they agree by
- * construction. Never called with an empty list: no match is a `TaxpayerNotFoundError`.
+ * The lookup envelope. `detail` is read off the entries rather than passed in, being a property of the
+ * registry that answered — every entry of one lookup comes from the same service. Never called with an empty
+ * list: no match is a not-found.
  */
 export function toNeutralTaxpayerResult(
     entityCode: string,
     taxpayers: ReadonlyArray<TaxpayerData>,
 ): TaxpayerResultDto {
     if (taxpayers.length === 0) {
-        // Not a caller error, so not an `ArcaValidationError`: the provider turns "no match" into a
-        // `TaxpayerNotFoundError` before reaching here, and an empty list means that guard broke. Saying so
-        // beats reading `detail` off `undefined` and failing with a message that names neither the function
-        // nor the invariant it kept. Checked on `length` rather than on the element, because
-        // `noUncheckedIndexedAccess` is off — the compiler believes `taxpayers[0]` is always there.
+        // Not a caller error: the provider turns "no match" into a not-found before reaching here, so an
+        // empty list means that guard broke. Checked on `length` rather than the element, since
+        // `noUncheckedIndexedAccess` is off and the compiler believes `taxpayers[0]` is always there.
         throw new Error('toNeutralTaxpayerResult needs at least one taxpayer — no match is a TaxpayerNotFoundError');
     }
     return {

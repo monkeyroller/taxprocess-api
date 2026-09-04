@@ -1,21 +1,18 @@
 import {describe, expect, it} from '@jest/globals';
-import {ArcaServiceError, ArcaValidationError} from '../providers/arca/sdk/index.js';
+import {ArcaServiceError, ArcaValidationError} from '../providers/arca/sdk/core/errors.js';
 import {toProviderFault} from '../providers/arca/faults/faults.js';
 import {toHttpError, type HttpErrorResult} from './error-mapper/error-mapper.js';
 
 /**
  * The composed error contract: an ARCA SDK failure, through the provider's translation and this layer's
- * status table, must produce exactly the envelope CONTRACT §8 documents and core branches on.
+ * status table, must produce exactly the envelope core branches on.
  *
- * This is the one file that deliberately imports BOTH layers, and it is a test rather than production code
- * for that exact reason. `faults.test.ts` pins the ARCA→category/code half and `error-mapper.test.ts` pins
- * the category→status half; each is correct in isolation while the *composition* silently changes, which is
- * the failure this catches. The assertions below are the ones that used to live in `error-mapper.test.ts`
- * back when it matched ARCA classes directly — kept verbatim, so a regression shows up as a diff against
- * the wire behaviour that shipped, not against a re-derived expectation.
+ * The one file that deliberately imports both layers, and a test rather than production code for that
+ * reason. `faults.test.ts` pins the first half and `error-mapper.test.ts` the second; each can be correct
+ * in isolation while the composition silently changes, which is what this catches.
  *
- * A provider's own errors reaching HTTP untranslated is what the refactor removed; here we call the
- * translation explicitly, standing in for the `TaxEntityProvider` guard that applies it in production.
+ * The translation is called explicitly here, standing in for the base-class guard that applies it in
+ * production.
  */
 function envelope(err: unknown): HttpErrorResult {
     return toHttpError(toProviderFault(err));

@@ -5,15 +5,13 @@ import {
     TaxpayerNotFoundError,
     VoucherNotFoundError,
     type ProviderFaultCategory,
-} from '../../providers/provider/provider.js';
+} from '../../providers/provider/faults.js';
 import {toHttpError} from './error-mapper.js';
 
 /**
- * This layer is provider-agnostic, so every case here is built from the NEUTRAL vocabulary — no ARCA error
- * class appears, which is the property under test as much as the statuses are. The other half of the wire
- * contract (which ARCA failure becomes which category/code/details) is pinned in
- * `providers/arca/faults/faults.test.ts`; the two together reproduce the exact envelopes CONTRACT §8 documents,
- * and neither file needs the other's layer to do it.
+ * This layer is provider-agnostic, so every case here is built from the neutral vocabulary — no ARCA error
+ * class appears, which is as much the property under test as the statuses are. The other half of the wire
+ * contract is pinned in `faults.test.ts`, and neither file needs the other's layer.
  */
 describe('toHttpError — ProviderFault category → status', () => {
     const cases: ReadonlyArray<[ProviderFaultCategory, number]> = [
@@ -86,7 +84,7 @@ describe('toHttpError — VoucherNotFoundError', () => {
 });
 
 describe('toHttpError — framework validation (400) details', () => {
-    /** A routing-controllers BadRequestError: an Error subclass with `httpCode` + class-validator `errors`. */
+    /** A framework `BadRequestError`: an `Error` subclass with `httpCode` and class-validator `errors`. */
     function validationError(errors: unknown): Error {
         const err = new Error("Invalid body, check 'errors' property…") as Error & {
             httpCode: number;

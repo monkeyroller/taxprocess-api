@@ -1,7 +1,6 @@
-// ---- WSFEv1 wire helpers ----
-
-import {ArcaAuth} from "../../core/types.js";
-import {ArcaObservation} from "./common-invoice.types.js";
+import type {ArcaCodeMessage} from "../../core/errors.js";
+import type {ArcaAuth} from "../../core/types.js";
+import {asArray, integer, text} from "../../../../xml-node/xml-node.js";
 
 export function authElement(auth: ArcaAuth): Record<string, unknown> {
     return {Token: auth.token, Sign: auth.sign, Cuit: auth.cuit};
@@ -11,35 +10,34 @@ export function money(value: number): string {
     return value.toFixed(2);
 }
 
-/** Normalizes fast-xml-parser's single-vs-array output to the first element (or undefined). */
-export function firstOf(node: unknown): Record<string, any> | undefined {
-    if (node === undefined || node === null) {
-        return undefined;
-    }
-    return (Array.isArray(node) ? node[0] : node) as Record<string, any>;
+/**
+ * A whole number from a wire field, falling back to `0` when the authority sent nothing usable. Named for
+ * the fallback because the fallback is the dangerous part: a silent `0` from a missing element is how a
+ * malformed response becomes a confident wrong answer. `parseLastAuthorizedNumber` deliberately refuses this
+ * default, since there `0` is also ARCA's legitimate answer for "never authorized".
+ *
+ * The default is tolerable on the two kinds of field that keep it. `CbteDesde`/`CbteHasta` are echoed back
+ * by ARCA, so absent means a malformed response, and `0` is an impossible voucher number that only ever
+ * travels beside a `Resultado` defaulted to `R`. `Nro` on a point of sale is likewise visibly unusable at
+ * `0` rather than quietly wrong.
+ *
+ * Built on `integer` rather than a bare `Number`, so blank reads as absent and a fractional value becomes
+ * `0` rather than a plausible-looking `1.5`.
+ */
+export function toIntOrZero(value: unknown): number {
+    return integer(value) ?? 0;
 }
 
-export function toInt(value: unknown): number {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-}
-
-/** Treats ARCA's empty markers (`""`, `"0"`) as absent. */
+/** Treats ARCA's own empty markers (`""`, `"0"`) as absent. */
 export function cleanCode(value: unknown): string | undefined {
-    if (value === undefined || value === null) {
-        return undefined;
-    }
-    const s = String(value).trim();
-    return s === '' || s === '0' ? undefined : s;
+    const s = text(value);
+    return s === undefined || s === '0' ? undefined : s;
 }
 
-/** Like {@link cleanCode} for date fields that ARCA fills with the literal `"NULL"` when empty (e.g. `FchBaja`). */
+/** The same, for date fields ARCA fills with the literal `"NULL"` when empty. */
 export function cleanArcaDate(value: unknown): string | undefined {
-    if (value === undefined || value === null) {
-        return undefined;
-    }
-    const s = String(value).trim();
-    return s === '' || s === '0' || s.toUpperCase() === 'NULL' ? undefined : s;
+    const s = cleanCode(value);
+    return s === undefined || s.toUpperCase() === 'NULL' ? undefined : s;
 }
 
 export function normalizeResultCode(value: string | undefined): 'A' | 'R' | 'P' {
@@ -47,23 +45,35 @@ export function normalizeResultCode(value: string | undefined): 'A' | 'R' | 'P' 
 }
 
 /**
- * An observation's `Code`/`Msg` as text, with an absent child rendered as `''` rather than the literal
- * string `"undefined"`. Core persists observations verbatim on every outcome (`docs/CONTRACT.md`,
- * `/invoices/authorize`), so a half-formed `Obs` must not write the word "undefined" onto an authorized
- * sale — blank is "the authority sent nothing", the same reading {@link cleanCode} gives everywhere else.
+ * A `Code`/`Msg` child as text, with an absent one rendered as `''` rather than the literal `"undefined"`.
+ * Both places that read these pairs put the result somewhere durable — observations are persisted verbatim
+ * onto an authorized sale, and error entries reach the caller in `details` — so blank has to mean "the
+ * authority sent nothing".
  */
-function observationText(value: unknown): string {
-    return value === undefined || value === null ? '' : String(value).trim();
+function codeMsgText(value: unknown): string {
+    return text(value) ?? '';
 }
 
-export function extractObservations(node: unknown): Array<ArcaObservation> {
-    const obs = (node as { Obs?: unknown } | undefined)?.Obs;
-    if (!obs) {
-        return [];
-    }
-    const list = Array.isArray(obs) ? obs : [obs];
-    return list.map((o: { Code?: unknown; Msg?: unknown }) => ({
-        code: observationText(o.Code),
-        message: observationText(o.Msg),
-    }));
+/**
+ * ARCA's repeated `{Code, Msg}` pairs under `childKey`, as `{code, message}`. One reader for both shapes —
+ * non-fatal `Obs` and fatal `Err` — since they are the same wire structure and had drifted into two
+ * implementations with different absent-child handling.
+ *
+ * A pair stating neither a code nor a message is dropped rather than returned blank. An empty element parses
+ * to `''`, so it is a value and survives `asArray`, arriving as an entry the authority never wrote. Neither
+ * reader can absorb one: an observation is persisted verbatim onto an authorized sale, so a phantom is a
+ * blank row core keeps for the life of the voucher, and `assertNoErrors` raises on a non-empty list, so a
+ * phantom manufactures a `502` out of an empty element.
+ *
+ * A pair carrying only one of the two is kept: ARCA does send a `Msg` with no `Code`, and half a pair is
+ * still something the authority said.
+ */
+export function codeMsgPairs(node: unknown, childKey: 'Obs' | 'Err'): Array<ArcaCodeMessage> {
+    const children = (node as Record<string, unknown> | undefined)?.[childKey];
+    return asArray(children)
+        .map((child) => ({
+            code: codeMsgText(child.Code),
+            message: codeMsgText(child.Msg),
+        }))
+        .filter((pair) => pair.code !== '' || pair.message !== '');
 }

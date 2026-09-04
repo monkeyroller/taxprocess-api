@@ -1,10 +1,18 @@
 import {ArcaValidationError} from '../core/errors.js';
 
+/** One row of the VAT catalog: the rate as a percentage, and the id ARCA knows it by. */
+export interface VatRateId {
+    /** The rate as a percentage, as an invoice line carries it (e.g. `21`, not `0.21`). */
+    readonly percent: number;
+    /** ARCA's `Iva.Id` for that rate. */
+    readonly id: number;
+}
+
 /**
  * ARCA VAT ("alícuota de IVA") catalog: percentage → ARCA `Iva.Id`.
  * These ids are fixed by ARCA and shared across WSFEv1/WSFEXv1.
  */
-export const VAT_RATE_IDS: ReadonlyArray<{percent: number; id: number}> = [
+export const VAT_RATE_IDS: ReadonlyArray<VatRateId> = [
     {percent: 0, id: 3},
     {percent: 10.5, id: 4},
     {percent: 21, id: 5},
