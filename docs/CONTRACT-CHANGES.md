@@ -6,6 +6,203 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-04 (later) — Factura de Exportación: one endpoint, a sixth and fifth canonical code, and a key core owns
+
+Branch `feature/export-invoice`. This service can now issue a **Factura E** and its notas — ARCA's
+`WSFEXv1` — which unblocks the two cases that prompted it: goods leaving the mainland for the **Área
+Aduanera Especial de Tierra del Fuego** (an export under Ley 19.640 even though the buyer is an Argentine
+CUIT and the invoice is in pesos), and **exports of services**.
+
+**No new invoicing endpoint.** `POST /invoices/authorize` serves both, and the provider decides which ARCA
+service authorizes. That follows from decisions this contract already made: §9 keeps `CbteTipo` off the
+wire, and §7 already specifies the web service as per-entity configuration. It also means *factura
+electrónica con detalle* (`WSMTXCA`) will later be a third branch inside the provider rather than a third
+endpoint.
+
+🔴 **One blocking ask (18.1): core must own a per-issuer request-id sequence.** Nothing else here is
+blocking, and every existing call behaves exactly as before.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 18.1 | 🔴 `invoice.requestId` — ARCA's idempotency key for an export voucher (`Cmp.Id`). Unique per issuer, **persisted before the call**, never reused | **Own the sequence.** This service has no database. Seed or recover it from `POST /invoices/last-request-id`. See below — reuse is silent |
+| 18.2 | `invoice.export` — the foreign-trade block. Its presence makes the voucher an export and selects the service | **Send it** for document types 19/20/21 |
+| 18.3 | `invoice.items` — per-product detail. **Not** `invoice.lines`, which stays the tax subtotal | **Send it** on an export (`lines: []`); it is also what `WSMTXCA` will need |
+| 18.4 | `invoice.receiver` and `invoice.concept` are now conditional: exactly one of `receiver` / `export`, and `concept` travels only with `receiver` | **None** for domestic vouchers — unchanged. Do not send `concept` with `export` |
+| 18.5 | `invoice.webService` — the entity's `configuration.webService`. Optional; omitted means WSFEv1 | Send it once you have somewhere to read it from. A value contradicting `documentTypeCode` is a `400` |
+| 18.6 | The result gains `reprocessed` | **Treat `true` as an error** unless you deliberately retried — see below |
+| 18.7 | `POST /invoices/last-request-id` — new. `501` on a WSFEv1-only entity | Use it to seed/recover 18.1 |
+| 18.8 | `POST /points-of-sale` gains an optional `webService`. The export register is a **different register** | **Send `"WSFEXv1"`** when checking whether the issuer can emit a Factura E |
+| 18.9 | `POST /currencies/rates` gains an optional `webService` | Optional — see 18.13 |
+| 18.10 | **`destinationCode`** — a fifth canonical fiscal code (ARCA `Dst_cmp`), 310 values | **Seed it.** `250` is the Tierra del Fuego AAE |
+| 18.11 | **`unitOfMeasureCode`** — a sixth canonical fiscal code (ARCA `Pro_umed`), 49 values, three of which are **not units** | **Seed it**, and read the note on `0`/`97`/`99` |
+| 18.12 | `exportType`, `language`, `incoterm`, `receiverPersonType` — neutral, closed sets | **None** beyond using them |
+| 18.13 | `WSMTXCA` answers `501 NOT_IMPLEMENTED` | Do not send it yet. It is in §7's enum, so you *can* — it will not silently fall back |
+
+### 18.1 — the request id, and why it is the one blocking ask
+
+WSFEX's idempotency is a caller-supplied key. Re-send the same `Cmp.Id` and ARCA returns the **stored
+answer** with `Reproceso = "S"` rather than authorizing again. That is the whole recovery mechanism, and it
+replaces the `10016` + `FECompConsultar` reconciliation this service does for WSFEv1 — there is nothing to
+reconcile, so we do not call `FEXGetCMP` to reconcile it.
+
+This service cannot allocate the key: it holds no database, by design (§1). So core must.
+
+> ⚠️ **The failure mode is silent.** Reusing a key for a genuinely new voucher does not error. ARCA returns
+> the *older* voucher — different total, possibly different receiver — with a real CAE, and every field of
+> our result describes that older voucher. `reprocessed: true` is the only signal. So:
+>
+> - persist the key **before** the call, not after;
+> - on `reprocessed: true` for a key you believe is new, **treat it as a failure** and reconcile — do not
+>   store the CAE against the new sale;
+> - on a deliberate retry after a timeout, `reprocessed: true` is the success case.
+
+`POST /invoices/last-request-id` returns the highest key ARCA has seen for the issuer. Measured on
+production 2026-09-04 for our delegate CUIT: `0` — an untouched sequence.
+
+### 18.10 / 18.11 — two more canonical fiscal codes, and why they are codes
+
+Same reason `currencyCode` is one, and measured the same way — production, 2026-09-04, re-takeable with
+`PROBE_ENVIRONMENT=production pnpm dump:wsfex-table <pais|umed>`.
+
+**`destinationCode` is a customs-destination list, not a country list.** 60 of its 310 rows have no ISO
+3166-1 expression at all:
+
+| kind | count | examples |
+| --- | --- | --- |
+| free zones | 35 | `250 AAE Tierra del Fuego`, `251`–`275` Argentine ZFs, `280`–`291` foreign |
+| territory aggregates | 11 | `227 TERRIT.VINCULADO AL R.UNIDO`, `230 TERRIT. HOLANDESES` |
+| catch-alls and zones | 9 | `297 RESTO AMERICA`, `298 INDETERMINADO`, `265 SECTOR ANTARTICO ARG.` |
+
+A free zone is a destination *distinct from* the country containing it — `280 ZF Colonia - URUGUAY` and
+`225 URUGUAY` both exist and mean different things. And the row the whole feature exists for, `250`, is in
+that unmappable set: an ISO-keyed field would have made Tierra del Fuego unreachable. This is the
+`currencyIso` lesson again, so we did not repeat it.
+
+> We publish **no ISO annotation**, even for the ~250 rows that would map. `254 ARGENTINA - ISLAS MALVINAS`
+> is why: ISO assigns that destination `FK`, and a bulk transcription would have this service state a
+> sovereignty position in a lookup table without anyone deciding to. Use the authority's own wording in a
+> picker.
+
+**`unitOfMeasureCode` has three values that are not units.** They are line *modes*, and they change which
+amount rules apply:
+
+| code | ARCA's wording | meaning |
+| --- | --- | --- |
+| `0` | *(blank in ARCA's own table)* | no unit; quantity, unit price and discount must be zero or absent |
+| `97` | `seña/anticipo` | a deposit line — total unrestricted, **may be negative** |
+| `99` | `bonificación` | a discount line — total **must** be negative |
+
+`98 otras unidades` is *not* one of them: it is an ordinary escape hatch for a unit the catalogue does not
+name. A neutral `unitOfMeasure: "KG"` cannot say "this line is a global discount", which is why the code
+travels rather than a name.
+
+### 18.4 — why `concept` and `exportType` are not the same field
+
+They look interchangeable and are not. `concept` is 1 goods / 2 services / **3 both**; `exportType` is
+`GOODS` / `SERVICES` / **`OTHER`**. Each has a member the other lacks — ARCA's own `Tipo_expo` numbering
+skips 3 — so unifying them would make two unrelated vocabularies assignable right up until one gained a
+member. Sending both is a `400` rather than a resolution.
+
+### The Tierra del Fuego case, and the one thing most likely to be got wrong
+
+> ⚠️ **`fiscalConditionCode` 10 (`IVA_LIBERADO`) is not how you invoice into Tierra del Fuego.**
+>
+> Both are Ley 19.640 and both say "Tierra del Fuego", and they are different documents:
+>
+> - a **domestic** sale to a Tierra del Fuego buyer exempt under the law → an ordinary voucher carrying
+>   `fiscalConditionCode: 10`;
+> - **goods shipped into the AAE** → an **export**: `documentTypeCode: 19`, `export.destinationCode: "250"`.
+
+For the AAE case, `export.clientTaxId` carries the buyer's real CUIT. There is no country tax id to use —
+see below.
+
+### `clientCountryTaxId` cannot be derived, so it is sent or omitted
+
+ARCA publishes `Cuit_pais_cliente` as 917 generic per-country CUITs, and **no key joining them to
+`Dst_cmp`**. We checked three ways before concluding it:
+
+- the rows carry only a CUIT and a description (`"BRASIL - Persona Jurídica"`); there is no país code on them;
+- the CUIT does not encode one. `ESTADOS UNIDOS` is `50000002124`, whose body *is* its código `212` — but
+  `URUGUAY` is `50000000016`, `BRASIL` `50000000059`, `CHILE` `50000000032`: a legacy sequence unrelated to
+  their códigos 225, 203, 208;
+- joining on the description matches **157 of 310**, the two tables spelling countries differently
+  (`KENYA`/`Kenia`, `TUNEZ`/`Túnez`).
+
+And **92 país codes have no row at all** — every AAE, every zona franca, `254`, and the catch-alls. So for
+Tierra del Fuego there is no country CUIT even in principle. `clientTaxId` (ARCA `Id_impositivo`) is the
+ordinary path; `clientCountryTaxId` is a pass-through we validate against the published set when you send
+it. ARCA wants at least one of the two, and the DTO enforces that.
+
+### 18.9 — the rate selector changes the *set*, not the numbers
+
+Worth stating plainly because an earlier draft of this work assumed otherwise, and the measurement retracted
+it. Production, 2026-09-04, `pnpm probe:wsfex-rates 20260903`:
+
+- **all 27 currencies priced that day agree exactly** between `FEParamGetCotizacion` (wsfe) and
+  `FEXGetPARAM_Ctz` (wsfex);
+- WSFEX's whole-table method agrees with its own per-currency method on all 27;
+- `FEXGetPARAM_MON` is **the same 49-row catalogue** WSFEv1 publishes.
+
+So there is **no per-service rate**, and **no change to `fiscal_currency_rate`** — in particular its primary
+key does not need a service dimension. If you saw a draft of this asking for that, disregard it.
+
+What the export service *does* differ on is breadth: it prices only the subset an export voucher may name —
+**27 of 49** on the day measured, which is ARCA's rule 1600. So `webService: "WSFEXv1"` on
+`/currencies/rates` answers "which currencies may an export voucher name today, and at what rate", in one
+call instead of a fan-out. A requested code the day did not price comes back `unavailable` with
+`reason: "NO_PUBLICATION"`.
+
+One more measurement worth having: asked for a **Saturday or Sunday**, the batch does not return empty — it
+returns the previous business day's close and says so in each row's `Fecha_ctz`. So the authority resolves
+the day itself, and `rateDate` on our answer still means what §3 says it means.
+
+### If you want the rate-service split anyway
+
+You asked about a `common.fiscal_rate_service` table bound to a fiscal entity, with `is_for_retail` and
+`is_for_customs` as non-exclusive flags, and public rate lookups keyed on the service rather than the
+entity. That shape is sound and we would still recommend it — a service belongs to exactly one entity, so
+naming the service makes an inconsistent (entity, service) pair **unrepresentable** rather than merely
+checked, which is strictly better than the runtime check we ended up writing on our side.
+
+Two notes if you build it:
+
+- The purpose flags should be **seeded from §5's services catalogue**, not inferred from the service name.
+  Inferring is what breaks when a second entity arrives whose decomposition differs. For ARCA today:
+  `WSFEv1` retail, `WSMTXCA` retail, `WSFEXv1` customs.
+- Consider `CHECK (is_for_retail OR is_for_customs)`, and a partial unique index per purpose per entity. A
+  row true for neither can never be selected; two rows true for the same purpose is an ambiguity with no
+  defined answer.
+- It is **not** needed for rates, per 18.9. Its value is selecting which service issues a voucher.
+
+### What did NOT change
+
+- **Every existing call.** A domestic `/invoices/authorize` body validates and behaves exactly as before —
+  the 728 tests that covered it pass unmodified, which is how we checked rather than by reading.
+- `fiscal_currency_rate`, its primary key, and the whole cotización cache. Rates are per (currency, day),
+  not per service.
+- The supported currency catalogue: still the 47 codes of entry 17, and the export service accepts the same
+  set.
+- `bandBasis` stays informational and untyped, and gains no new value here. You already store an
+  unrecognised one and warn rather than failing, which is the right shape.
+- The `CREDENTIALS_REQUIRED` handshake (§4), the date/UTC rule (§2), delegated authorization (§10), and the
+  peso short-circuit: `PES` still resolves locally at `1/1/1` with no ticket, on both services.
+- No QR for an export voucher. RG 4892's payload is specified for the domestic comprobante, so emitting one
+  would be inventing a format. `qr` is simply absent.
+
+### Two operational preconditions, neither of them code
+
+Both measured on production 2026-09-04 with `pnpm probe:wsfex-smoke`:
+
+1. **The certificate needs its own `wsfex` enrolment.** WSAA issues per service. Our delegate certificate is
+   enrolled and resolved a ticket; a tenant's own certificate needs the same adhesion to *"Factura
+   Electrónica de exportación"* or every call is a `1000`.
+2. 🔴 **No FEEWS point of sale is registered.** `FEXGetPARAM_PtoVenta` returned an empty list for our
+   delegate CUIT. The export register is separate from the CAE/CAEA one, so a point of sale of kind
+   *"Comprobantes de Exportación – Web Services"* has to be created before any Factura E can be authorized.
+   This is an ABM task, not a deploy.
+
+---
+
 ## 2026-09-04 — `RUB` and `NZD` are dropped: ARCA catalogues them and will not quote them
 
 Branch `feature/foreign-currency-electronic-sales`. **Prompted by your observation**, and it was the right

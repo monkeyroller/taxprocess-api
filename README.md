@@ -110,7 +110,8 @@ src/
 │   │   ├── provider.ts                 # abstract TaxEntityProvider + the outbound fault guard
 │   │   ├── environment.ts              # production/testing, the generic environment selector
 │   │   ├── entity-auth.ts              # the entity/issuer block + issuer credentials
-│   │   ├── neutral-invoice.ts          # the neutral invoice core sends
+│   │   ├── neutral-invoice.ts          # the neutral invoice core sends (domestic + export)
+│   │   ├── web-service.ts              # which of an entity's web services a request is for
 │   │   ├── neutral-results.ts          # the result aliases (naming the http/dto shapes)
 │   │   ├── credential-validation.ts    # validateCredentials input/output
 │   │   ├── faults.ts                   # the neutral error contract (ProviderFault + friends)
@@ -127,7 +128,7 @@ src/
 │       ├── arca-provider/          # orchestration: resolve a ticket, call the SDK, map the answer
 │       ├── clients.ts              # shared SDK clients
 │       ├── faults/                 # what an ARCA failure IS (pure classification)
-│       ├── voucher-recovery.ts     # already-authorized (10016) reconciliation
+│       ├── voucher-recovery.ts     # already-authorized (10016) reconciliation — WSFEv1 only
 │       ├── auth/                   # who we sign as
 │       │   ├── ticket-store/           # WSAA ticket cache + CREDENTIALS_REQUIRED signal
 │       │   ├── credentials/            # PEM/CUIT credential validation
@@ -138,15 +139,20 @@ src/
 │       │   ├── code-maps/              # canonical code → ARCA code (documentTypeCode→CbteTipo, …)
 │       │   ├── currency-codes/         # the ARCA MonId catalogue + currencyCode → MonId
 │       │   ├── padron-routing/         # identification type → which padrón service answers
+│       │   ├── invoice-routing/        # document type + webService → which invoicing service authorizes
+│       │   ├── destination-codes/      # the ARCA Dst_cmp customs-destination catalogue (+ per-country CUITs)
+│       │   ├── unit-of-measure-codes/  # the ARCA Pro_umed catalogue (0/97/99 are modes, not units)
+│       │   ├── export-codes/           # exportType/language/incoterm — the neutral export vocabularies
 │       │   ├── identifiers.ts          # CUIT/id parsing + canonicalization
 │       │   ├── invoice-mapper/         # neutral invoice ↔ WSFEv1 request/result
+│       │   ├── export-invoice-mapper/  # neutral invoice ↔ WSFEXv1 request/result
 │       │   ├── taxpayer-mapper/        # SDK padrón data → neutral taxpayer DTOs
 │       │   ├── fiscal-condition/       # ARCA impuestos → canonical fiscalConditionCode
 │       │   ├── authority-day/          # an accepted date → the ARCA day it lands on (+ day arithmetic)
 │       │   ├── cotizacion/             # AR rate policy: the band, the reference currency, which day prices a voucher
 │       │   ├── geography/              # idProvincia → ISO 3166-2, localidad → INDEC code
 │       │   └── indec/                  # the vendored INDEC catalog + the folding applied to it
-│       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + padrón)
+│       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + WSFEXv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
     ├── dto/               # one module per request body and per result family
     │   └── authority-date/     # which date FORMS the contract accepts (shape only — no zone, no entity)
