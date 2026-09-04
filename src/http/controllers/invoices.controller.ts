@@ -4,10 +4,14 @@ import {getProvider} from '../../providers/registry/registry.js';
 import {
     AuthorizeInvoiceRequestDto,
     LastAuthorizedRequestDto,
+    LastRequestIdRequestDto,
     NextNumbersRequestDto,
     QueryVoucherRequestDto,
 } from '../dto/invoice-request.dto.js';
-import type {LastAuthorizedResultDto} from '../dto/authorization-result.dto.js';
+import type {
+    LastAuthorizedResultDto,
+    LastRequestIdResultDto,
+} from '../dto/authorization-result.dto.js';
 import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
@@ -54,6 +58,24 @@ export class InvoicesController {
                 body.pointOfSaleNumber,
                 body.documentTypeCodes,
             );
+            return res.json(result);
+        } catch (err) {
+            return sendError(res, err);
+        }
+    }
+
+    /**
+     * The highest idempotency key the authority has seen for this issuer (AR: WSFEX `FEXGetLast_ID`).
+     *
+     * Core owns that sequence, this service having no database to keep it in, so this is how core seeds it
+     * or recovers it after losing track — the only way back from a timeout, since re-using a key returns the
+     * older voucher rather than an error. Answers `501` on an entity whose authority keeps no such key.
+     */
+    @Post('/last-request-id')
+    async lastRequestId(@Body() body: LastRequestIdRequestDto, @Res() res: Response): Promise<Response> {
+        try {
+            const {entity} = body;
+            const result: LastRequestIdResultDto = await getProvider(entity.entityCode).lastRequestId(entity);
             return res.json(result);
         } catch (err) {
             return sendError(res, err);

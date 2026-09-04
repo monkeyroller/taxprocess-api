@@ -14,8 +14,11 @@ export class PointsOfSaleController {
     @Post()
     async list(@Body() body: PointsOfSaleRequestDto, @Res() res: Response): Promise<Response> {
         try {
-            const {entity} = body;
-            const result: PointsOfSaleResultDto = await getProvider(entity.entityCode).pointsOfSale(entity);
+            const {entity, webService} = body;
+            const result: PointsOfSaleResultDto = await getProvider(entity.entityCode).pointsOfSale(
+                entity,
+                webService,
+            );
             return res.json(result);
         } catch (err) {
             return sendError(res, err);

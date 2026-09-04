@@ -82,3 +82,16 @@ export class QueryVoucherRequestDto {
     @IsPositive()
     voucherNumber!: number;
 }
+
+/**
+ * Body for `POST /invoices/last-request-id`.
+ *
+ * Only the entity block: the answer is a property of the issuer, not of any one voucher. Answers `501` on an
+ * entity whose authority keeps no such key.
+ */
+export class LastRequestIdRequestDto {
+    @IsDefined()
+    @ValidateNested()
+    @Type(() => EntityAuthDto)
+    entity!: EntityAuthDto;
+}
