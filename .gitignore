@@ -24,8 +24,12 @@ logs/
 # Test coverage
 coverage/
 
-# WSAA ticket cache (sensitive auth material at rest)
-.arca-tickets.json
+# WSAA ticket cache (sensitive auth material at rest). It now lives at .secrets/cache/ and is covered by the
+# directory rule above; this filename rule is kept as a second net -- it matches at any depth, so a cache
+# pointed somewhere else by ARCA_TICKET_CACHE_PATH is still ignored. The trailing * catches the
+# `<path>.<pid>.tmp` files the atomic write in ExpiringCache.writeFile leaves behind if a write dies; the
+# leading one catches the older, dot-prefixed `.arca-tickets.json` name.
+*arca-tickets.json*
 
 # Editor / OS
 .idea/

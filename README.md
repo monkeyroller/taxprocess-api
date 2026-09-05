@@ -37,8 +37,29 @@ This service **stores no secrets at rest** and **never makes core-initiated outb
 ```bash
 pnpm install
 cp .env.example .env
-pnpm dev          # hot-reload dev server (ts-node/esm)
+mkdir -p .secrets/arca/testing .secrets/cache   # gitignored; see layout below
+pnpm dev                                        # hot-reload dev server (ts-node/esm)
 ```
+
+### `.secrets/`
+
+Every local credential lives here, and nothing in it is committed. It is laid out
+`<entity>/<environment>/`, mirroring `src/providers/<entity>/` and the per-environment dispatch — so a
+second authority is a new sibling directory rather than a longer filename:
+
+```
+.secrets/
+├── arca/
+│   ├── production/       # delegate.crt + delegate.key — issued by CN=Computadores
+│   └── testing/          # delegate.crt + delegate.key — homologación ("Computadores Test")
+└── cache/                # arca-tickets.json — ARCA_TICKET_CACHE_PATH
+```
+
+`cache/` is separate on purpose: it is **derived** and safe to delete at any time (tickets are re-minted on
+demand), whereas a deleted certificate has to be re-issued by ARCA. Ticket persistence is best-effort, so a
+missing `cache/` does not crash the service — it silently drops back to an in-memory cache, and since WSAA
+will not re-mint a ticket while a prior one is still valid, restarts then stall for up to ~12h per
+certificate. That silence is why the `mkdir` above is part of setup.
 
 Verify:
 
