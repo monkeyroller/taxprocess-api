@@ -275,6 +275,25 @@ describe('FexInvoiceService.queryVoucher (FEXGetCMP)', () => {
         });
         expect(result).toMatchObject({cae: '69000000000001', voucherNumber: 7});
     });
+
+    it("reads the query response's own spelling of the voucher date", async () => {
+        // ARCA spells it `Fch_cbte` when authorizing and `Fecha_cbte` when answering a query -- the same
+        // inconsistency that has `Cbte_Tipo` in one payload and `Cbte_tipo` in the other. Reading only the
+        // authorize spelling left a queried export voucher with no date at all.
+        const {service} = serviceReturning({
+            FEXGetCMPResult: {
+                FEXResultGet: {
+                    Cbte_nro: 7,
+                    Cae: '69000000000001',
+                    Fch_venc_Cae: '20261015',
+                    Fecha_cbte: '20260904',
+                    Resultado: 'A',
+                },
+            },
+        });
+
+        expect((await service.queryVoucher(AUTH, 3, 19, 7)).voucherDate).toBe('20260904');
+    });
 });
 
 describe('FexInvoiceService.getPointsOfSale (FEXGetPARAM_PtoVenta)', () => {

@@ -182,7 +182,12 @@ export class FexInvoiceService extends InvoiceWebService<FexInvoiceRequest, FexI
 
     /**
      * `FEXAuthorize` and `FEXGetCMP` describe the same voucher under different result elements, so one reader
-     * serves both — the difference is only where it is rooted.
+     * serves both — the difference is only where it is rooted, and in one field name.
+     *
+     * That field is the voucher's own date, which the authorize response spells `Fch_cbte` and the query
+     * response spells `Fecha_cbte` — ARCA's own inconsistency, and the same one that has the query taking
+     * `Cbte_tipo` where the authorize request takes `Cbte_Tipo`. Reading only the first spelling left a
+     * queried export voucher with no date at all.
      */
     private readVoucher(info: Record<string, unknown>): FexInvoiceResult {
         const cae = cleanCode(info.Cae);
@@ -191,7 +196,7 @@ export class FexInvoiceService extends InvoiceWebService<FexInvoiceRequest, FexI
             cae,
             caeExpiration: cae === undefined ? undefined : cleanArcaDate(info.Fch_venc_Cae),
             voucherNumber: toIntOrZero(info.Cbte_nro),
-            voucherDate: cleanArcaDate(info.Fch_cbte),
+            voucherDate: cleanArcaDate(info.Fch_cbte ?? info.Fecha_cbte),
             requestId: integer(info.Id),
             // Anything but an explicit "S" is a fresh authorization. Defaulting the other way would report
             // every voucher as a replay on a response that simply omitted the field.
