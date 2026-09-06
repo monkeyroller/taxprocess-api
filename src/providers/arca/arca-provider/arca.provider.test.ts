@@ -2066,7 +2066,6 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
             currencyCode: 'DOL',
             currencyRate: 1508,
             issueDate: '2026-08-05',
-            requestId: 41,
             lines: [],
             items: [{description: 'Consultoría', quantity: 1, unitOfMeasureCode: 7, unitPrice: 500, totalAmount: 500}],
             export: {
@@ -2114,9 +2113,7 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
         // Withdrawn from the caller deliberately: reusing a Cmp.Id replays a stored voucher under a 200 with
         // a real CAE, and nothing downstream catches it -- ARCA short-circuits on a stored id without ever
         // validating the submitted document, so the voucher-number sequence rule never runs.
-        const {requestId: _dropped, ...withoutKey} = exportInvoice();
-
-        await new ArcaProvider().authorizeInvoice(ENTITY, withoutKey);
+        await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
 
         const sent = fexRequestAuthorization.mock.calls[0]?.[1];
         expect(sent?.requestId).toBeGreaterThan(0);
@@ -2124,12 +2121,18 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
         expect(sent?.requestId).toBeLessThanOrEqual(999_999_999_999_999);
     });
 
-    it('carries reprocessed out to the caller, who alone knows if it meant to retry', async () => {
+    it('warns rather than reports when the authority replays a key we generated', async () => {
+        // A replay is impossible on a key this service produced, so it means the generator repeated and two
+        // sales are about to share a voucher. Nothing downstream can see it -- the flag left the contract
+        // with the key -- so the only place it can surface is the log.
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
         fexRequestAuthorization.mockResolvedValue({...fexApproved, reprocessed: true});
 
         const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
 
-        expect(result.reprocessed).toBe(true);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('replayed a stored export voucher'));
+        expect(result).not.toHaveProperty('reprocessed');
+        warn.mockRestore();
     });
 
     it('never runs WSFEv1 idempotent recovery on an export voucher', async () => {
@@ -2187,7 +2190,9 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
         fexRequestAuthorization.mockResolvedValue({...fexApproved, result: 'R', cae: undefined, observations: []});
         fexQueryVoucher.mockResolvedValue({
             ...fexApproved,
-            raw: {Id: '99', Imp_total: '500', Moneda_Id: 'DOL', Dst_cmp: '203', Tipo_expo: '2'},
+            // A different total. Note the stored `Id` is deliberately NOT compared: this service generates a
+            // fresh key per attempt, so it differs on every legitimate retry.
+            raw: {Imp_total: '999', Moneda_Id: 'DOL', Dst_cmp: '203', Tipo_expo: '2'},
         });
 
         await expect(new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice())).rejects.toMatchObject(
@@ -2274,12 +2279,6 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
         });
     });
 
-    it('answers the last request id off WSFEXv1', async () => {
-        fexGetLastRequestId.mockResolvedValue(41);
-
-        expect(await new ArcaProvider().lastRequestId(ENTITY)).toEqual({requestId: 41});
-        expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
-    });
 });
 
 /**

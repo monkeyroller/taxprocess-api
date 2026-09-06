@@ -5,7 +5,6 @@ import type {
     AuthorityStatusResult,
     CurrencyRatesResult,
     LastAuthorizedResult,
-    LastRequestIdResult,
     NextNumbersResult,
     PointsOfSaleResult,
     TaxAuthorizationResult,
@@ -13,7 +12,6 @@ import type {
 } from './neutral-results.js';
 import type {CredentialValidationResult, ValidateCredentialsInput} from './credential-validation.js';
 import type {WebService} from './web-service.js';
-import {ProviderFault} from './faults.js';
 
 /**
  * Provider abstraction for the general tax service. Each tax entity is registered under an entity code;
@@ -85,17 +83,6 @@ export abstract class TaxEntityProvider {
             this.queryVoucherImpl(entity, pointOfSaleNumber, documentTypeCode, voucherNumber),
         );
     }
-    /**
-     * The highest idempotency key the authority has seen for this issuer — how a caller seeds or recovers
-     * the sequence it owns.
-     *
-     * Not `abstract`, unlike every hook above it: an authority that has no such key has nothing to answer,
-     * and forcing every future provider to implement one would make the contract claim a capability the
-     * entity does not have. The default reports that honestly as a `501`.
-     */
-    lastRequestId(entity: EntityAuthBlock): Promise<LastRequestIdResult> {
-        return this.guarded(() => this.lastRequestIdImpl(entity));
-    }
     authorityStatus(environment: GenericEnvironment): Promise<AuthorityStatusResult> {
         return this.guarded(() => this.authorityStatusImpl(environment));
     }
@@ -125,20 +112,6 @@ export abstract class TaxEntityProvider {
     protected abstract lastAuthorizedImpl(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number): Promise<LastAuthorizedResult>;
     protected abstract nextNumbersImpl(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCodes: ReadonlyArray<number>): Promise<NextNumbersResult>;
     protected abstract queryVoucherImpl(entity: EntityAuthBlock, pointOfSaleNumber: number, documentTypeCode: number, voucherNumber: number): Promise<TaxAuthorizationResult>;
-    /**
-     * Default: this entity keeps no idempotency key of its own. Overridden only by a provider whose
-     * authority does, and reported as `NOT_IMPLEMENTED` → `501` otherwise, so a caller asking gets a clear
-     * answer rather than a fabricated zero — which, as a request id, would replay an existing voucher.
-     */
-    protected lastRequestIdImpl(_entity: EntityAuthBlock): Promise<LastRequestIdResult> {
-        return Promise.reject(
-            new ProviderFault(
-                'NOT_IMPLEMENTED',
-                'NOT_IMPLEMENTED',
-                'This entity does not keep a request-id sequence.',
-            ),
-        );
-    }
     protected abstract authorityStatusImpl(environment: GenericEnvironment): Promise<AuthorityStatusResult>;
     /**
      * Looks up whoever the authority's registry holds under `identificationNumber`, read according to

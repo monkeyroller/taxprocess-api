@@ -97,7 +97,6 @@ import type {
     AuthorityStatusResult,
     CurrencyRatesResult,
     LastAuthorizedResult,
-    LastRequestIdResult,
     NextNumbersResult,
     PointsOfSaleResult,
     TaxAuthorizationResult,
@@ -441,13 +440,22 @@ export class ArcaProvider extends TaxEntityProvider {
             // The idempotency key is this service's to produce, never the caller's to track: reusing one
             // replays a stored voucher under a `200` with a real CAE, and nothing downstream catches it.
             buildRequest: (invoice, voucherNumber) =>
-                buildFexInvoiceRequest(
-                    invoice,
-                    voucherNumber,
-                    invoice.requestId ?? nextRequestId(new Date(), Math.random),
-                ),
+                buildFexInvoiceRequest(invoice, voucherNumber, nextRequestId(new Date(), Math.random)),
             service: fexInvoiceService,
-            toNeutral: (result) => toNeutralExportResult(result),
+            toNeutral: (result, request): TaxAuthorizationResult => {
+                // On a key this service generated, a replay is impossible — so if the authority reports one,
+                // the generator has repeated and two sales are about to share a voucher. Nothing downstream
+                // can see this, `reprocessed` having left the contract with the key, so it is logged here.
+                if (result.reprocessed) {
+                    console.warn(
+                        `ARCA replayed a stored export voucher for request id ${String(request.requestId)}, ` +
+                            `which this service generated and should never reuse. The voucher described is ` +
+                            `an older one — reconcile it before filing the CAE, and check the generator ` +
+                            `against \`pnpm probe:wsfex-smoke\` (FEXGetLast_ID).`,
+                    );
+                }
+                return toNeutralExportResult(result);
+            },
         };
     }
 
@@ -478,22 +486,6 @@ export class ArcaProvider extends TaxEntityProvider {
                   ),
         );
         return {number};
-    }
-
-    /**
-     * The highest `Cmp.Id` WSFEX has seen for this issuer (`FEXGetLast_ID`).
-     *
-     * Only WSFEXv1 has such a sequence, so this is the one method that names its service outright rather
-     * than routing: there is no document type to route on, and the base class already answers `501` for a
-     * provider without one.
-     */
-    protected override async lastRequestIdImpl(entity: EntityAuthBlock): Promise<LastRequestIdResult> {
-        const auth = await this.issuerAuth(entity, 'WSFEXV1');
-        const service = fexInvoiceService(toArcaEnvironment(entity.environment));
-        const requestId = await this.delegationAware(entity, ServiceId.WSFEXV1, () =>
-            service.getLastRequestId(auth),
-        );
-        return {requestId};
     }
 
     protected async nextNumbersImpl(

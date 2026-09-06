@@ -258,7 +258,6 @@ export const WSFEV1_RECOVERY: RecoveryDialect<CommonInvoiceRequest, CommonInvoic
  * `Concepto`, and is zero-rated so it carries no receiver VAT condition at all.
  */
 interface StoredExportVoucherFields {
-    readonly Id?: unknown;
     readonly Imp_total?: unknown;
     readonly Moneda_Id?: unknown;
     readonly Fecha_cbte?: unknown;
@@ -272,10 +271,13 @@ interface StoredExportVoucherFields {
  * fields stored against the already-authorized voucher must match what we just tried to authorize, or
  * returning its CAE would hand back a fiscal document for the wrong invoice.
  *
- * `Id` is the strongest signal and the domestic guard has no equivalent — it is the authority's own record
- * of which submission produced this voucher, so a difference there is conclusive rather than circumstantial.
- * `Imp_total` carries the same ±0.01 tolerance for the same reason; the rest are discrete values where an
- * exact mismatch is unambiguous.
+ * **`Id` is deliberately not compared**, though it looks like the strongest signal available. The stored
+ * one belongs to the *earlier* attempt, and this service generates a fresh key for every request — so on a
+ * legitimate retry the two differ by construction, and comparing them would refuse every recovery this
+ * guard exists to allow. It is evidence about which submission won, not about which sale it was for.
+ *
+ * `Imp_total` carries a ±0.01 tolerance so rounding drift cannot read as a difference; the rest are discrete
+ * values where an exact mismatch is unambiguous.
  *
  * Excludes what the domestic guard excludes, for the reasons it gives: free text the authority may
  * normalize (`Cliente`, `Domicilio_cliente`, `Id_impositivo`), `Moneda_ctz` as rounding-prone and redundant
@@ -299,11 +301,6 @@ export function assertRecoveredExportVoucherMatches(
 
     // `text`/`decimal` again: the parser runs with `parseTagValue: false`, so an empty element reads as `''`
     // and a bare `Number('')` would be a finite `0` reported as a confirmed difference.
-
-    const storedRequestId = decimal(raw.Id);
-    if (storedRequestId !== undefined && storedRequestId !== request.requestId) {
-        mismatch('request id', request.requestId, storedRequestId);
-    }
 
     const storedTotal = decimal(raw.Imp_total);
     if (storedTotal !== undefined && Math.abs(storedTotal - request.totalAmount) > 0.01) {

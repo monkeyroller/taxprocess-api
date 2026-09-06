@@ -356,8 +356,12 @@ function statusOf(result: FexInvoiceResult['result']): NeutralAuthorizationStatu
  * Maps the WSFEX result into the neutral authorization result.
  *
  * No QR: `buildArcaQrUrl` implements RG 4892, whose payload is specified for the domestic voucher, and
- * emitting one for a Factura E would be inventing a format. `reprocessed` is carried through because a
- * caller cannot otherwise tell a replayed voucher from a fresh one.
+ * emitting one for a Factura E would be inventing a format.
+ *
+ * `Reproceso` is not carried through either, and that follows from the key being ours: a caller that never
+ * supplied an idempotency key cannot have meant to retry with one, so the flag has nothing to tell it. It
+ * survives on the SDK result as an internal alarm — on a key this service generated, a replay should be
+ * impossible.
  */
 export function toNeutralExportResult(
     result: FexInvoiceResult,
@@ -371,7 +375,6 @@ export function toNeutralExportResult(
         authorizedNumber: result.voucherNumber,
         status: statusOf(result.result),
         observations: result.observations,
-        reprocessed: result.reprocessed,
         providerMetadata,
     };
 }

@@ -57,7 +57,6 @@ describe('assertRecoveredExportVoucherMatches', () => {
     });
 
     it.each([
-        ['request id', {Id: '99'}],
         ['amount', {Imp_total: '999'}],
         ['currency', {Moneda_Id: 'PES'}],
         ['voucher date', {Fecha_cbte: '20260101'}],
@@ -80,7 +79,6 @@ describe('assertRecoveredExportVoucherMatches', () => {
         // The parser reads a blank element as `''`, and `Number('')` is a finite `0` -- which would report
         // every unreturned field as a confirmed difference and refuse a legitimate recovery.
         const blank = stored({
-            Id: '',
             Imp_total: '',
             Moneda_Id: '',
             Fecha_cbte: '',
@@ -94,6 +92,13 @@ describe('assertRecoveredExportVoucherMatches', () => {
     it('tolerates rounding drift on the amount, which is why the total carries a tolerance', () => {
         expect(() => assertRecoveredExportVoucherMatches(SENT, stored({Imp_total: '500.009'}))).not.toThrow();
         expect(() => assertRecoveredExportVoucherMatches(SENT, stored({Imp_total: '500.02'}))).toThrow();
+    });
+
+    it('ignores the stored request id, which a retry never matches by construction', () => {
+        // It looks like the strongest signal and is the opposite: this service generates a fresh key per
+        // attempt, so the stored one belongs to the earlier submission and differing is expected. Comparing
+        // it would refuse every recovery this guard exists to allow.
+        expect(() => assertRecoveredExportVoucherMatches(SENT, stored({Id: '99'}))).not.toThrow();
     });
 
     it('says nothing about a field the caller never sent', () => {

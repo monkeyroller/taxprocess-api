@@ -161,15 +161,6 @@ export interface NeutralInvoice {
     /** The buyer of a domestic voucher. Absent on an export, which carries `export` instead. */
     readonly receiver?: NeutralInvoiceReceiver;
     /**
-     * The authority's idempotency key for this request, where it keeps one (AR: WSFEX `Id`).
-     *
-     * **Core owns this sequence** — this service has no database to keep it in. It must be unique per
-     * issuer and persisted before the call, because it is the only way to recover after a timeout: re-send
-     * the same key and the authority replays its stored answer with `reprocessed` set, rather than
-     * authorizing twice. Reusing a key for a genuinely new voucher silently returns the old one.
-     */
-    readonly requestId?: number;
-    /**
      * Which of the entity's web services should answer (the entity's `configuration.webService`).
      *
      * Omitted is the authority's ordinary domestic service. Only the caller can settle the cases a document

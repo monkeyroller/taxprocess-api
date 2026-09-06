@@ -267,22 +267,6 @@ export class NeutralInvoiceDto {
     @Type(() => InvoiceExportDto)
     export?: InvoiceExportDto;
 
-    /**
-     * The authority's idempotency key for this request, where the entity keeps one (AR: WSFEX `Cmp.Id`).
-     *
-     * **Core owns this sequence** — this service has no database to hold it. It must be unique per issuer
-     * and persisted before the call, because it is the only recovery path after a timeout: re-send the same
-     * key and the authority replays its stored answer with `reprocessed` set, rather than authorizing twice.
-     * Reusing a key for a genuinely new voucher silently returns the older one, and the result's
-     * `reprocessed` is how that shows up.
-     *
-     * `POST /invoices/last-request-id` reports the highest key the authority has seen, for seeding or
-     * recovering the sequence.
-     */
-    @IsOptional()
-    @IsInt()
-    @Min(0)
-    requestId?: number;
 
     /**
      * Which of the entity's web services should authorize this voucher (its `configuration.webService`).

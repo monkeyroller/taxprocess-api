@@ -13,7 +13,6 @@ const SERVICES: NeutralInvoice = {
     currencyCode: 'DOL',
     currencyRate: 1508,
     issueDate: '2026-09-04',
-    requestId: 41,
     lines: [],
     items: [
         {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
@@ -221,11 +220,10 @@ describe('buildFexInvoiceRequest', () => {
             expect(() => buildFexInvoiceRequest(rest, 7, 41)).toThrow(ArcaValidationError);
         });
 
-        it('needs no requestId from the caller — the provider resolves one', () => {
-            // Withdrawn from the contract deliberately. The key is per-CUIT and its misuse is silent, so a
-            // caller that never sees it cannot reuse it; see `mapping/request-id/`.
-            const {requestId: _dropped, ...rest} = SERVICES;
-            expect(buildFexInvoiceRequest(rest, 7, 41).requestId).toBe(41);
+        it('takes its idempotency key as an argument, never from the invoice', () => {
+            // Withdrawn from the contract deliberately: the key is per-CUIT and its misuse is silent, so a
+            // caller that never sees it cannot reuse it. See `mapping/request-id/`.
+            expect(buildFexInvoiceRequest(SERVICES, 7, 41).requestId).toBe(41);
         });
 
         it('refuses a voucher with no items', () => {
@@ -285,13 +283,14 @@ describe('toNeutralExportResult', () => {
             authorizedNumber: 7,
             status: 'AUTHORIZED',
             observations: [],
-            reprocessed: false,
             providerMetadata: {},
         });
     });
 
-    it('carries reprocessed through, which is the only way a caller can spot a replay', () => {
-        expect(toNeutralExportResult({...authorized, reprocessed: true}).reprocessed).toBe(true);
+    it("reports no replay flag, the key being ours rather than the caller's", () => {
+        // A caller that never supplied an idempotency key cannot have meant to retry with one, so the flag
+        // has nothing to tell it. It survives on the SDK result as an internal alarm instead.
+        expect(toNeutralExportResult({...authorized, reprocessed: true})).not.toHaveProperty('reprocessed');
     });
 
     it('emits no QR, RG 4892 being specified for the domestic voucher', () => {

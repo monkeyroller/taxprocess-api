@@ -151,7 +151,6 @@ describe('every nested request block is required, not merely validated', () => {
                     documentTypeCode: 19,
                     concept: undefined,
                     lines: [],
-                    requestId: 41,
                     items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
                     export: exportBlock,
                 }),
@@ -169,7 +168,6 @@ describe('every nested request block is required, not merely validated', () => {
                 invoiceBody({
                     documentTypeCode: 19,
                     lines: [],
-                    requestId: 41,
                     items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
                     export: exportBlock,
                 }),
