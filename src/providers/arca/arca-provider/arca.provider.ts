@@ -67,7 +67,8 @@ import {
     isAlreadyAuthorizedError,
     isAlreadyAuthorizedRejection,
     recoverAuthorizedVoucher,
-} from '../voucher-recovery.js';
+    WSFEV1_RECOVERY,
+} from '../voucher-recovery/voucher-recovery.js';
 import {
     buildCommonInvoiceRequest,
     buildQrUrl,
@@ -417,6 +418,7 @@ export class ArcaProvider extends TaxEntityProvider {
         request: CommonInvoiceRequest,
     ): Promise<TaxAuthorizationResult | undefined> {
         return recoverAuthorizedVoucher({
+            dialect: WSFEV1_RECOVERY,
             service,
             auth,
             invoice,

@@ -1,18 +1,65 @@
-import {ArcaServiceError, ArcaValidationError} from './sdk/core/errors.js';
-import type {ArcaAuth} from './sdk/core/types.js';
-import {decimal, text} from '../xml-node/xml-node.js';
-import type {CommonInvoiceRequest, CommonInvoiceResult} from './sdk/invoicing/common/common-invoice.types.js';
-import type {commonInvoiceService} from './clients.js';
-import {buildQrUrl, toNeutralResult} from './mapping/invoice-mapper/invoice.mapper.js';
-import {toCbteTipo} from './mapping/code-maps/code-maps.js';
-import type {NeutralInvoice} from '../provider/neutral-invoice.js';
-import type {TaxAuthorizationResult} from '../provider/neutral-results.js';
+import {ArcaServiceError, ArcaValidationError} from '../sdk/core/errors.js';
+import type {ArcaAuth} from '../sdk/core/types.js';
+import {decimal, text} from '../../xml-node/xml-node.js';
+import type {CommonInvoiceRequest, CommonInvoiceResult} from '../sdk/invoicing/common/common-invoice.types.js';
+import {buildQrUrl, toNeutralResult} from '../mapping/invoice-mapper/invoice.mapper.js';
+import {toCbteTipo} from '../mapping/code-maps/code-maps.js';
+import type {NeutralInvoice} from '../../provider/neutral-invoice.js';
+import type {TaxAuthorizationResult} from '../../provider/neutral-results.js';
+import {ServiceId, type ServiceIdValue} from '../sdk/core/constants.js';
 
 /**
  * Idempotent recovery of a voucher ARCA has already authorized: recognizing the conflict, proving the stored
  * voucher is the same sale, and handing back its CAE. Core may re-send a number ARCA already authorized
  * after losing its own CAE to a persistence failure, and the honest answer is that CAE, not the rejection.
+ *
+ * **One engine, one dialect per service.** The structure — recognize a candidate, query, gate on
+ * authenticity, prove it is the same sale, return its CAE — is what both of ARCA's invoicing services need.
+ * What differs between them is spellings and one predicate, so those become a {@link RecoveryDialect} the
+ * way the error envelope and the parameter tables already did. Writing a second copy for the export service
+ * would have duplicated the parts that were expensive to get right (the authenticity gate, "blank is not a
+ * mismatch", the delegation-aware query) to vary the parts that were cheap.
  */
+
+/** The minimum an authorize or query result must expose for the shared authenticity gate to read it. */
+export interface RecoverableResult {
+    readonly result: 'A' | 'R' | 'P';
+    readonly cae?: string;
+}
+
+/**
+ * What one service contributes to the shared engine. Everything here is a spelling or a predicate; anything
+ * that is a *decision* stays in the engine, so a second service cannot quietly acquire different semantics.
+ */
+export interface RecoveryDialect<Req, Res extends RecoverableResult> {
+    /** Whose ticket the reconciling query runs under. Never defaulted — see `translateDelegatedTokenError`. */
+    readonly serviceId: ServiceIdValue;
+    /** Whether a soft rejection is worth a query. */
+    isConflictCandidate(result: Res): boolean;
+    /** Whether a thrown error is the same conflict surfaced through the error block instead. */
+    isConflictError(err: ArcaServiceError): boolean;
+    /** The voucher number the authority echoed, which the engine checks against the one asked about. */
+    voucherNumberOf(queried: Res): number | undefined;
+    /** The comparison policy — the member list *is* the policy. Throws on a confirmed difference. */
+    assertMatches(request: Req, queried: Res): void;
+    /**
+     * Builds the neutral answer. WSFEv1 rebuilds the RG-4892 QR here; the export service emits none.
+     *
+     * `cae` is passed rather than re-read off `queried` because the engine's gate already proved it present,
+     * and re-deriving it would make every dialect assert away a narrowing it did not perform.
+     */
+    toNeutral(queried: Res, request: Req, issuerTaxId: string, cae: string): TaxAuthorizationResult;
+}
+
+/** The one operation the engine needs, which every `InvoiceWebService` already exposes identically. */
+export interface QueryableService<Res> {
+    queryVoucher(
+        auth: ArcaAuth,
+        pointOfSaleNumber: number,
+        voucherType: number,
+        voucherNumber: number,
+    ): Promise<Res>;
+}
 
 /**
  * ARCA's observation code for `CbteDesde` not being the next number to authorize, which includes core
@@ -122,11 +169,12 @@ export function assertRecoveredVoucherMatches(request: CommonInvoiceRequest, que
 }
 
 /** What is needed to reconcile one voucher against the authority. */
-export interface RecoveryContext {
-    readonly service: ReturnType<typeof commonInvoiceService>;
+export interface RecoveryContext<Req, Res extends RecoverableResult> {
+    readonly dialect: RecoveryDialect<Req, Res>;
+    readonly service: QueryableService<Res>;
     readonly auth: ArcaAuth;
     readonly invoice: NeutralInvoice;
-    readonly request: CommonInvoiceRequest;
+    readonly request: Req;
     /** The issuer whose CUIT signs the rebuilt RG-4892 QR. */
     readonly issuerTaxId: string;
     /**
@@ -139,17 +187,17 @@ export interface RecoveryContext {
 }
 
 /**
- * Recovers an already-authorized voucher's CAE via `FECompConsultar` — the only ARCA call that returns a
- * stored CAE, since `requestAuthorization` never echoes a prior one. Returns the neutral result with the QR
- * rebuilt from `request`, or `undefined` when the number is not genuinely authorized, leaving the caller to
- * surface the original authorize outcome. A not-found query counts as "not recoverable" rather than an error.
+ * Recovers an already-authorized voucher's CAE by querying the authority — the only call that returns a
+ * stored CAE, since an authorize request never echoes a prior one. Returns the neutral result, or
+ * `undefined` when the number is not genuinely authorized, leaving the caller to surface the original
+ * authorize outcome. A not-found query counts as "not recoverable" rather than an error.
  */
-export async function recoverAuthorizedVoucher(
-    context: RecoveryContext,
+export async function recoverAuthorizedVoucher<Req, Res extends RecoverableResult>(
+    context: RecoveryContext<Req, Res>,
 ): Promise<TaxAuthorizationResult | undefined> {
-    const {service, auth, invoice, request, issuerTaxId, run} = context;
+    const {dialect, service, auth, invoice, request, issuerTaxId, run} = context;
 
-    let queried: CommonInvoiceResult;
+    let queried: Res;
     try {
         queried = await run(() =>
             service.queryVoucher(
@@ -166,15 +214,34 @@ export async function recoverAuthorizedVoucher(
         throw err;
     }
 
+    // The authenticity gate, shared: an answer that is not approved, carries no CAE, or describes a
+    // different number than the one asked about is not the voucher we are reconciling against.
     if (
         queried.result !== 'A' ||
         queried.cae === undefined ||
-        queried.voucherNumberFrom !== invoice.voucherNumberFrom
+        dialect.voucherNumberOf(queried) !== invoice.voucherNumberFrom
     ) {
         return undefined;
     }
 
-    assertRecoveredVoucherMatches(request, queried);
-    const qr = buildQrUrl(issuerTaxId, request, queried.cae);
-    return toNeutralResult(queried, qr);
+    dialect.assertMatches(request, queried);
+    return dialect.toNeutral(queried, request, issuerTaxId, queried.cae);
 }
+
+/**
+ * WSFEv1's dialect — today's behaviour, unchanged.
+ *
+ * Its conflict predicates key on `10016`, which the export service has no analogue for. That asymmetry is
+ * measured, not stylistic: WSFEX publishes no coded observation channel at all, so a code-keyed candidate
+ * test is not merely risky there but impossible. Keeping the code here is what stops the domestic path —
+ * the highest-traffic one in the service — from querying on every rejection to gain nothing.
+ */
+export const WSFEV1_RECOVERY: RecoveryDialect<CommonInvoiceRequest, CommonInvoiceResult> = {
+    serviceId: ServiceId.WSFEV1,
+    isConflictCandidate: isAlreadyAuthorizedRejection,
+    isConflictError: isAlreadyAuthorizedError,
+    voucherNumberOf: (queried) => queried.voucherNumberFrom,
+    assertMatches: assertRecoveredVoucherMatches,
+    toNeutral: (queried, request, issuerTaxId, cae) =>
+        toNeutralResult(queried, buildQrUrl(issuerTaxId, request, cae)),
+};
