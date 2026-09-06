@@ -6,6 +6,79 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-06 — The export idempotency key is withdrawn: 18.1 is no longer yours to build
+
+Branch `feature/export-invoice`. **If you have not started on 18.1, stop here — there is nothing to do.**
+If you have, this deletes it.
+
+The entry below asked core to own a per-issuer monotonic `requestId` (ARCA's `Cmp.Id`), persist it before
+every export call and never reuse it. That was the only 🔴 in it. It is withdrawn: this service generates
+the key itself, and an export voucher is now shape-identical to a domestic one.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 19.1 | ~~`invoice.requestId`~~ — **removed**. This service generates it | **Stop sending it.** An undeclared field is now a `400` |
+| 19.2 | ~~`result.reprocessed`~~ — **removed** | Stop reading it; it is always absent |
+| 19.3 | ~~`POST /invoices/last-request-id`~~ — **removed**. The route is gone | Delete the client. Nothing seeds a sequence you no longer own |
+| 19.4 | An export voucher now recovers **exactly** the way a domestic one does | **None** — it is the code path you already have |
+
+### Why it was withdrawn rather than made optional
+
+Because optional would have left the trap on the wire. Re-send a key the authority has stored and it
+returns the **stored voucher** — a different sale, a different total, possibly a different buyer — with a
+real CAE, under a `200`, and nothing in the answer to mark it. We had asked you to treat `reprocessed: true`
+as the tripwire, which is a lot of care to demand for a field whose whole purpose was to let us hand you a
+sharp edge.
+
+And nothing downstream backstops it. We previously implied the voucher-number sequence rule was a second
+guard; it is not. When the authority finds a stored key it replays the answer **without validating the
+submitted document**, so that rule never runs. Uniqueness was the entire safety property, which is exactly
+the kind of thing a service should not delegate to its callers.
+
+What made removal possible is that the authority states only one rule on the field — a number greater than
+or equal to zero. No uniqueness check, no monotonicity requirement. So a time-derived key is legal (and is
+one of the two generators its own manual suggests), needs no counter, and therefore needs no database —
+which is what had made this ours to ask for rather than ours to solve.
+
+> We did not simply move the counter inside. A counter would have to be read before it is written, and we
+> have nowhere to serialize that: two of our instances issuing for one CUIT would read the same maximum and
+> send the same key — the identical collision, manufactured where it is *worse*, since you at least know
+> which sale you asked about.
+
+### What replaces it, and why you already have the code
+
+An export voucher now recovers through the mechanism the domestic path has always used. Lose a CAE to a
+persistence failure and the answer is the same on both: **re-send the same voucher number**, with the same
+`issueDate` and the same amounts, and this service reconciles against what the authority has on file and
+returns the stored CAE. Send a number already authorized for a *different* sale and you get a `400`
+(`details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than someone else's document.
+
+That is the same guarantee, reached without a second key — and it is the point of the change: there is now
+one invoicing behaviour, not two. `public.numerator` remains what it always was, per point of sale.
+
+### 🔴 One thing to check before you deploy
+
+**If you already send `requestId`, remove it in the same release.** Unknown fields are now refused, so a
+body still carrying it gets a `400` on every export voucher. This is the one way this change can break you,
+and it is a one-line fix on your side.
+
+### What did NOT change
+
+- **Every existing call**, domestic and export alike, apart from the removed field and route.
+- The voucher number, its ownership, and `public.numerator`. You still allocate it and we authorize exactly
+  the one you send.
+- The recovery contract you already rely on for domestic vouchers, including the requirement to re-send the
+  *original* `issueDate` rather than a freshly stamped one — reconciliation compares it.
+- Everything else in entry 18: the two canonical code catalogues, the export block, `items`,
+  `webService`, and the rate-service split.
+
+### Still true, and still not code
+
+**No FEEWS point of sale is registered.** No Factura E can be authorized until one of kind *"Comprobantes de
+Exportación – Web Services"* exists. An ABM task, unchanged by any of this.
+
+---
+
 ## 2026-09-04 (later) — Factura de Exportación: one endpoint, a sixth and fifth canonical code, and a key core owns
 
 Branch `feature/export-invoice`. This service can now issue a **Factura E** and its notas — ARCA's
@@ -19,18 +92,18 @@ wire, and §7 already specifies the web service as per-entity configuration. It 
 electrónica con detalle* (`WSMTXCA`) will later be a third branch inside the provider rather than a third
 endpoint.
 
-🔴 **One blocking ask (18.1): core must own a per-issuer request-id sequence.** Nothing else here is
-blocking, and every existing call behaves exactly as before.
+> ⚠️ **This entry's one blocking ask, 18.1, was withdrawn on 2026-09-06** — see the entry above. Its rows
+> are struck through below and need no action. Everything else here still stands.
 
 | # | What changed | Core action |
 | --- | --- | --- |
-| 18.1 | 🔴 `invoice.requestId` — ARCA's idempotency key for an export voucher (`Cmp.Id`). Unique per issuer, **persisted before the call**, never reused | **Own the sequence.** This service has no database. Seed or recover it from `POST /invoices/last-request-id`. See below — reuse is silent |
+| 18.1 | ~~`invoice.requestId`~~ — **withdrawn by the 2026-09-06 entry above.** This service generates the key | **None.** Do not build the sequence this row asked for |
 | 18.2 | `invoice.export` — the foreign-trade block. Its presence makes the voucher an export and selects the service | **Send it** for document types 19/20/21 |
 | 18.3 | `invoice.items` — per-product detail. **Not** `invoice.lines`, which stays the tax subtotal | **Send it** on an export (`lines: []`); it is also what `WSMTXCA` will need |
 | 18.4 | `invoice.receiver` and `invoice.concept` are now conditional: exactly one of `receiver` / `export`, and `concept` travels only with `receiver` | **None** for domestic vouchers — unchanged. Do not send `concept` with `export` |
 | 18.5 | `invoice.webService` — the entity's `configuration.webService`. Optional; omitted means WSFEv1 | Send it once you have somewhere to read it from. A value contradicting `documentTypeCode` is a `400` |
-| 18.6 | The result gains `reprocessed` | **Treat `true` as an error** unless you deliberately retried — see below |
-| 18.7 | `POST /invoices/last-request-id` — new. `501` on a WSFEv1-only entity | Use it to seed/recover 18.1 |
+| 18.6 | ~~`reprocessed`~~ — **withdrawn by the 2026-09-06 entry above** | **None** |
+| 18.7 | ~~`POST /invoices/last-request-id`~~ — **withdrawn by the 2026-09-06 entry above**; the route is gone | **None** |
 | 18.8 | `POST /points-of-sale` gains an optional `webService`. The export register is a **different register** | **Send `"WSFEXv1"`** when checking whether the issuer can emit a Factura E |
 | 18.9 | 🟡 `POST /currencies/rates` gains an optional `webService`, and the answer now always carries one | **Send it, and key your rate cache by it** — see below |
 | 18.10 | **`destinationCode`** — a fifth canonical fiscal code (ARCA `Dst_cmp`), 310 values | **Seed it.** `250` is the Tierra del Fuego AAE |
@@ -40,7 +113,11 @@ blocking, and every existing call behaves exactly as before.
 | 18.15 | Five of the authority's conditional rules now answer `400` with a named `details.code` instead of a Spanish `502` | **None** — a body that was valid stays valid. Read the codes if you surface errors |
 | 18.13 | `WSMTXCA` answers `501 NOT_IMPLEMENTED` | Do not send it yet. It is in §7's enum, so you *can* — it will not silently fall back |
 
-### 18.1 — the request id, and why it is the one blocking ask
+### 18.1 — the request id, and why it *was* the one blocking ask — ⚠️ SUPERSEDED
+
+> **Withdrawn on 2026-09-06 (entry above). Do not implement any of this.** It is kept because the failure
+> mode it describes is real and is exactly why the key stopped being yours: everything below is now handled
+> inside this service, which generates the key per request and never reuses one.
 
 WSFEX's idempotency is a caller-supplied key. Re-send the same `Cmp.Id` and ARCA returns the **stored
 answer** with `Reproceso = "S"` rather than authorizing again. That is the whole recovery mechanism, and it

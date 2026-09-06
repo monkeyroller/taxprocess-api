@@ -325,7 +325,7 @@ sent — never both, never neither — and `concept` travels only with `receiver
 | buyer | `receiver` (id type + number + fiscal condition) | `export` (name, address, destination) |
 | what is invoiced | `concept` (1/2/3) | `export.exportType` (`GOODS`/`SERVICES`/`OTHER`) |
 | money | `lines` (tax subtotals) + `totals` | `items` (per-product detail); `lines: []` |
-| idempotency | the voucher number | `requestId` — **core owns the sequence** |
+| idempotency | the voucher number | the voucher number — **identical**, see below |
 | QR | RG 4892 | none — the RG specifies a domestic payload |
 
 Request:
@@ -337,7 +337,6 @@ Request:
     "pointOfSaleNumber": 3,           // must be of the EXPORT register — see /points-of-sale
     "voucherNumberFrom": 7,
     "voucherNumberTo": 7,
-    "requestId": 42,                  // the authority's idempotency key — unique per issuer, persist first
     "currencyCode": "DOL",
     "currencyRate": 1508,
     "issueDate": "2026-09-04",
@@ -370,7 +369,7 @@ a customs despacho), `incoterm` + `incotermDescription`, `clientCountryTaxId`,
 `settledInInvoiceCurrency`, `commercialObservations`, `observations`. `associatedVouchers[]` and `optionals[]`
 sit on the invoice itself, alongside `items`.
 
-The response is the ordinary authorization result, plus one field:
+The response is the ordinary authorization result — the same shape a domestic voucher answers with:
 
 ```jsonc
 {
@@ -379,28 +378,21 @@ The response is the ordinary authorization result, plus one field:
   "authorizedNumber": 7,
   "status": "AUTHORIZED",
   "observations": [],
-  "reprocessed": false,          // the authority replayed a stored answer rather than authorizing afresh
   "providerMetadata": {}
 }
 ```
 
-> ⚠️ **`requestId` is the one thing core must own, and its failure mode is silent.**
+> **An export voucher recovers exactly the way a domestic one does.** Lose a CAE to a persistence failure
+> and the answer is the same on both: re-send the same voucher number, with the same `issueDate` and the
+> same amounts, and this service reconciles against what the authority has on file and returns the stored
+> CAE. If the number is taken by a *different* sale it answers `400`
+> (`details.code: "VOUCHER_ALREADY_AUTHORIZED_MISMATCH"`) rather than handing back someone else's document.
 >
-> The authority's idempotency is a caller-supplied key, not the voucher number. Re-send the same key and it
-> returns the **stored answer** with `reprocessed: true` instead of authorizing again — which is the wanted
-> outcome on a deliberate retry after a timeout, and a serious bug otherwise.
->
-> Reusing a key for a genuinely new voucher **does not error**. The authority returns the *older* voucher —
-> different total, possibly different receiver — with a real authorization code, and every field of the
-> result above describes that older voucher. So:
->
-> - the key must be **unique per issuer** and **persisted before the call**;
-> - on `reprocessed: true` for a key core believes is new, treat it as a failure and reconcile — do not file
->   the code against the new sale;
-> - `POST /invoices/last-request-id` reports the highest key the authority has seen, for seeding or
->   recovering the sequence.
->
-> This service holds no database (§1), so it cannot allocate the key itself.
+> The authority's own export service does have a second idempotency key of its own, a per-issuer id
+> distinct from the voucher number. **This service owns it and does not expose it.** Its misuse is silent —
+> reusing one returns an *older voucher* under a `200`, with a real CAE and nothing to mark it — and a
+> caller that never sees the key cannot reuse it. There is no field for it, and a body still carrying one
+> from an earlier draft of this contract is refused as an unknown field.
 
 > ⚠️ **The export register is a different register.** A point of sale enrolled for ordinary invoicing cannot
 > issue a Factura E. Ask `POST /points-of-sale` with `"webService": "WSFEXv1"` before assuming an issuer can.
@@ -419,7 +411,8 @@ Many of the authority's own conditional rules are enforced by this service and r
 | what is refused | `details.code` |
 | --- | --- |
 | an unknown destination, unit, incoterm or per-country tax id | `UNKNOWN_CODE` |
-| no `requestId`, `items`, `currencyCode` or `export` block | `MISSING_REQUEST_ID`, `MISSING_ITEMS`, `UNMAPPED_CURRENCY`, `MISSING_EXPORT` |
+| no `items`, `currencyCode` or `export` block | `MISSING_ITEMS`, `UNMAPPED_CURRENCY`, `MISSING_EXPORT` |
+| a voucher number already authorized for a *different* sale | `VOUCHER_ALREADY_AUTHORIZED_MISMATCH` |
 | a `webService` contradicting `documentTypeCode` | `WEB_SERVICE_DOCUMENT_TYPE_MISMATCH` |
 | neither `clientTaxId` nor `clientCountryTaxId` | a `400` from the request body itself |
 | `currencyRate` other than exactly `1` on a peso voucher | `CURRENCY_RATE_MISMATCH` |
@@ -435,21 +428,6 @@ derived from `items` for the same reason — there is no field for it to disagre
 
 What stays the authority's is what needs *its* state rather than its codes: the rate band, and the
 cross-checks a nota's referenced voucher must satisfy. Those arrive as its own rejection.
-
-### `POST /api/invoices/last-request-id`
-
-The highest idempotency key the authority has seen for this issuer. Core owns that sequence (this service has
-no database), so this is how it seeds it or recovers it after losing track.
-
-```jsonc
-// request
-{ "entity": { "entityCode":"ARCA", "issuerTaxId":"20123456789", "environment":"testing" } }
-// 200
-{ "requestId": 41 }
-```
-
-`501 NOT_IMPLEMENTED` on an entity whose authority keeps no such key — for ARCA, an issuer using only
-WSFEv1. A fresh sequence answers `0`.
 
 ### `POST /api/invoices/last-authorized`
 Body `{ "entity": {...}, "pointOfSaleNumber": 1, "documentTypeCode": 1 }` → `200 { "number": 42 }`.
@@ -1065,7 +1043,6 @@ where the three translations are the identity — canonical code == ARCA code).
 | `invoice.export.exportType` | neutral enum | `Tipo_expo` |
 | `invoice.export.language` | ISO 639-1 | `Idioma_cbte` |
 | `invoice.export.incoterm` | ICC Incoterms 2020 | `Incoterms` (identity) |
-| `invoice.requestId` | core's own per-issuer sequence | `Cmp.Id` (export idempotency key) |
 | `invoice.webService` | `configuration.webService` (§7) | selects the web service — **not** sent to ARCA |
 
 This service owns the canonical-code→code translation plus the mechanical mapping: tax%→id + subtotal
@@ -1230,7 +1207,7 @@ customer needs either currency, say so and we will re-measure.
 
 `webService` is unlike every other value in this section. It is not a code this service translates — it is a
 **selector** that decides which of the entity's services answers, and therefore which of the catalogues
-below apply, which point-of-sale register is read, and whether an idempotency key is needed. Its values are
+below apply and which point-of-sale register is read. Its values are
 §7's `configuration.webService` enum.
 
 Per-entity, for the same reason the other catalogues are: a future entity registers its own. For ARCA:
@@ -1248,8 +1225,8 @@ Per-entity, for the same reason the other catalogues are: a future entity regist
 | currency catalogue | the 47 codes below | not determined | **the same 47**, resolved per service |
 | rate source | one call per currency | not determined | **one call for the whole day** |
 | points of sale | CAE/CAEA register | not determined | **FEEWS — a separate register** |
-| `requestId` | not used | not determined | **required** |
-| `/invoices/last-request-id` | `501` | `501` | supported |
+| idempotency | the voucher number | not determined | the voucher number |
+| second key of the authority's | none | not determined | **held internally, never on the wire** |
 
 The **purpose** row is two independent facts rather than an enum: a service may serve both. It is what a
 caller (or core's own rate-service table) should key "which service issues this kind of voucher" on, rather
@@ -1576,8 +1553,16 @@ abstracts CAE → `authorizationCode`.
 export vouchers rather than a second endpoint doing it. The decision is made in
 `mapping/invoice-routing/invoice-routing.ts` from the document type, with `webService` (§7) settling what a
 document type cannot — an authority may run two services that issue the same types. What core names is the
-service it has configured, never `wsfe`/`wsfex` or a voucher-type code; the WSAA scopes, the separate
-per-service tickets, and `Cmp.Id`'s wire spelling all stay inside the provider.
+service it has configured, never `wsfe`/`wsfex` or a voucher-type code; the WSAA scopes and the separate
+per-service tickets stay inside the provider.
+
+**The export service's own idempotency key (`Cmp.Id`) is on this list outright**, not merely its spelling.
+It was a contract field until we understood its failure mode: reusing one returns an *older voucher* under a
+`200`, with a real CAE and nothing in the answer to mark it, and no downstream rule catches it — the
+authority replays a stored id without validating the submitted document, so its voucher-number sequence
+check never runs. A key whose only failure mode is silent is one no caller should be asked to hold. This
+service generates it per request, and recovery works off the voucher number instead, exactly as it does for
+a domestic voucher.
 
 Two more of the same kind arrived with the export document, and each is why its neutral field is a *code*
 rather than a name: ARCA's **`Dst_cmp`** customs-destination list, which ISO 3166-1 cannot express, and
