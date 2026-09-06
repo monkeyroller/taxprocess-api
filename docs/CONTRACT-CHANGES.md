@@ -174,10 +174,8 @@ seeding. Each row carries ARCA's own two columns (`DST_CUIT`, `DST_Ds`) plus a `
 `receiverPersonType` is **withdrawn** from the request. It was in an earlier draft of this entry as the
 second half of a resolution we then found ARCA's data cannot support, and it does nothing — an accepted
 field with no effect is worse than no field. Its meaning survives as the catalogue's `entityType` column,
-which is where the choice actually happens. If you already send it, **stop sending it** — measured on the
-running service, an undeclared field is currently *ignored* rather than refused, so it would fail silently
-rather than tell you. (This service is configured to reject unknown fields and does not actually do so; that
-is a defect on our side, tracked separately. Do not rely on either behaviour.)
+which is where the choice actually happens. If you already send it, stop: `forbidNonWhitelisted` will
+reject the body.
 
 ### 18.9 — 🟡 the rates the two services publish are equal today; key your cache by service anyway
 
