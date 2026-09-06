@@ -249,18 +249,124 @@ export const WSFEV1_RECOVERY: RecoveryDialect<CommonInvoiceRequest, CommonInvoic
 };
 
 /**
+ * The fields of an already-authorized export voucher this guard compares, in the spellings `FEXGetCMP`
+ * answers with — which are not always the ones `FEXAuthorize` uses, so they are read off the query schema
+ * rather than assumed from the request.
+ *
+ * Four of the seven the domestic guard compares have no counterpart here: an export identifies its buyer by
+ * free text plus tax ids rather than `DocTipo`/`DocNro`, has `Tipo_expo` where a domestic voucher has
+ * `Concepto`, and is zero-rated so it carries no receiver VAT condition at all.
+ */
+interface StoredExportVoucherFields {
+    readonly Id?: unknown;
+    readonly Imp_total?: unknown;
+    readonly Moneda_Id?: unknown;
+    readonly Fecha_cbte?: unknown;
+    readonly Dst_cmp?: unknown;
+    readonly Tipo_expo?: unknown;
+    readonly Cuit_pais_cliente?: unknown;
+}
+
+/**
+ * The export counterpart of {@link assertRecoveredVoucherMatches}, and the same policy: the identifying
+ * fields stored against the already-authorized voucher must match what we just tried to authorize, or
+ * returning its CAE would hand back a fiscal document for the wrong invoice.
+ *
+ * `Id` is the strongest signal and the domestic guard has no equivalent — it is the authority's own record
+ * of which submission produced this voucher, so a difference there is conclusive rather than circumstantial.
+ * `Imp_total` carries the same ±0.01 tolerance for the same reason; the rest are discrete values where an
+ * exact mismatch is unambiguous.
+ *
+ * Excludes what the domestic guard excludes, for the reasons it gives: free text the authority may
+ * normalize (`Cliente`, `Domicilio_cliente`, `Id_impositivo`), `Moneda_ctz` as rounding-prone and redundant
+ * with the total, and every array — items, permits, associated vouchers, optionals — as too fragile to
+ * compare against ARCA's own wire representation. A missing stored value is never a mismatch: this guard
+ * rejects only a confirmed difference.
+ */
+export function assertRecoveredExportVoucherMatches(
+    request: FexInvoiceRequest,
+    queried: FexInvoiceResult,
+): void {
+    const raw = queried.raw as StoredExportVoucherFields;
+
+    const mismatch = (label: string, sent: string | number, stored: string | number): never => {
+        throw new ArcaValidationError(
+            `Voucher ${request.voucherNumber} is already authorized for a different ${label} ` +
+                `(sent ${sent}, stored ${stored}); refusing to return its CAE.`,
+            'VOUCHER_ALREADY_AUTHORIZED_MISMATCH',
+        );
+    };
+
+    // `text`/`decimal` again: the parser runs with `parseTagValue: false`, so an empty element reads as `''`
+    // and a bare `Number('')` would be a finite `0` reported as a confirmed difference.
+
+    const storedRequestId = decimal(raw.Id);
+    if (storedRequestId !== undefined && storedRequestId !== request.requestId) {
+        mismatch('request id', request.requestId, storedRequestId);
+    }
+
+    const storedTotal = decimal(raw.Imp_total);
+    if (storedTotal !== undefined && Math.abs(storedTotal - request.totalAmount) > 0.01) {
+        mismatch('amount', request.totalAmount, storedTotal);
+    }
+
+    const storedCurrency = text(raw.Moneda_Id);
+    if (storedCurrency !== undefined && storedCurrency !== request.currencyId) {
+        mismatch('currency', request.currencyId, storedCurrency);
+    }
+
+    const storedVoucherDate = text(raw.Fecha_cbte);
+    if (
+        request.voucherDate !== undefined &&
+        storedVoucherDate !== undefined &&
+        storedVoucherDate !== request.voucherDate
+    ) {
+        mismatch('voucher date', request.voucherDate, storedVoucherDate);
+    }
+
+    const storedDestination = decimal(raw.Dst_cmp);
+    if (storedDestination !== undefined && storedDestination !== request.destinationCode) {
+        mismatch('destination', request.destinationCode, storedDestination);
+    }
+
+    const storedExportType = decimal(raw.Tipo_expo);
+    if (storedExportType !== undefined && storedExportType !== request.exportType) {
+        mismatch('export type', request.exportType, storedExportType);
+    }
+
+    const storedCountryTaxId = decimal(raw.Cuit_pais_cliente);
+    if (
+        request.clientCountryTaxId !== undefined &&
+        storedCountryTaxId !== undefined &&
+        storedCountryTaxId !== request.clientCountryTaxId
+    ) {
+        mismatch("buyer's country tax id", request.clientCountryTaxId, storedCountryTaxId);
+    }
+}
+
+/**
  * WSFEXv1's dialect.
  *
- * **Reconciles nothing yet.** The export service still relies on the caller's `Cmp.Id` for idempotency, so
- * a rejection there is the truthful outcome and querying would be asking a question ARCA already answered.
- * Both predicates therefore answer `false`, which is today's behaviour stated explicitly rather than left
- * as a gap in a table — and the shape is here so the flow that will use it is already wired.
+ * **Every rejection is a candidate**, where WSFEv1 filters on `10016` first. Two reasons, both measured
+ * rather than stylistic:
+ *
+ * - WSFEX publishes no coded observation channel at all. `Motivos_Obs` is a single delimited string, read
+ *   into one code-less entry, so a soft rejection here carries nothing to key on.
+ * - On the thrown path a code does exist, but *which* code means "not the next number in sequence" is what
+ *   the manual cannot tell us: its validation table spreads that rule across `Punto_vta`/`Cbte_nro`/
+ *   `Cbte_Tipo` with 1510/1520/1530/1535 adjacent and the code column scrambled. Guessing it would be the
+ *   same class of mistake as reading `Mon_fecha` off an XML sample whose field table said `Fecha_ctz`.
+ *
+ * The cost is one query per rejected export voucher, which is rare and cheap. The matcher was always the
+ * arbiter — the domestic module's own header says its code "only flags a candidate" — so dropping the hint
+ * removes an optimization, not a safeguard. If a live sequence violation is ever captured, its code can
+ * become the same fast path WSFEv1 has.
  */
 export const WSFEX_RECOVERY: RecoveryDialect<FexInvoiceRequest, FexInvoiceResult> = {
     serviceId: ServiceId.WSFEXV1,
-    isConflictCandidate: () => false,
-    isConflictError: () => false,
+    isConflictCandidate: (result) => result.result === 'R',
+    isConflictError: () => true,
     voucherNumberOf: (queried) => queried.voucherNumber,
-    assertMatches: () => undefined,
+    assertMatches: assertRecoveredExportVoucherMatches,
     toNeutral: (queried) => toNeutralExportResult(queried),
 };

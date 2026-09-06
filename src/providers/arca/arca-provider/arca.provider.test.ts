@@ -2133,12 +2133,80 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
     });
 
     it('never runs WSFEv1 idempotent recovery on an export voucher', async () => {
-        // WSFEX has the mechanism natively -- re-sending Cmp.Id replays the stored answer -- so there is
-        // nothing to reconcile and FEXGetCMP must not be called to reconcile it.
+        // The dialects must not cross: an export reconciles through FEXGetCMP or not at all. Asserted on an
+        // approved voucher, where neither service should be queried in the first place.
         await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
 
         expect(fexQueryVoucher).not.toHaveBeenCalled();
         expect(queryVoucher).not.toHaveBeenCalled();
+    });
+
+    it('reconciles a rejected export voucher against the one on file, and returns its CAE', async () => {
+        // The parity that makes an export behave like a domestic voucher: core re-sends a number it lost
+        // the CAE for, and the honest answer is that CAE rather than the rejection.
+        fexRequestAuthorization.mockResolvedValue({...fexApproved, result: 'R', cae: undefined, observations: []});
+        fexQueryVoucher.mockResolvedValue({
+            ...fexApproved,
+            raw: {
+                Id: '41',
+                Imp_total: '500',
+                Moneda_Id: 'DOL',
+                Fecha_cbte: '20260805',
+                Dst_cmp: '203',
+                Tipo_expo: '2',
+            },
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexQueryVoucher).toHaveBeenCalledWith(expect.anything(), 3, 19, 7);
+        expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
+    });
+
+    it('queries on any export rejection, having no code to filter on', async () => {
+        // WSFEX publishes no coded observation channel -- Motivos_Obs is one string, read code-less -- so
+        // unlike WSFEv1 there is nothing to test before deciding a rejection is worth reconciling.
+        fexRequestAuthorization.mockResolvedValue({
+            ...fexApproved,
+            result: 'R',
+            cae: undefined,
+            observations: [{code: '', message: 'un motivo cualquiera'}],
+        });
+        fexQueryVoucher.mockRejectedValue(new ArcaServiceError('[1015] no existe', [{code: '1015', message: 'no existe'}]));
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexQueryVoucher).toHaveBeenCalledTimes(1);
+        // Nothing on file, so the original rejection stands rather than being dressed up as a failure.
+        expect(result).toMatchObject({status: 'REJECTED'});
+    });
+
+    it('refuses to return a CAE stored against a different sale', async () => {
+        // The matcher is the arbiter, and its field list is the policy. Here the stored request id belongs
+        // to another submission, so handing back its CAE would file a fiscal document for the wrong invoice.
+        fexRequestAuthorization.mockResolvedValue({...fexApproved, result: 'R', cae: undefined, observations: []});
+        fexQueryVoucher.mockResolvedValue({
+            ...fexApproved,
+            raw: {Id: '99', Imp_total: '500', Moneda_Id: 'DOL', Dst_cmp: '203', Tipo_expo: '2'},
+        });
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice())).rejects.toMatchObject(
+            validationFault('VOUCHER_ALREADY_AUTHORIZED_MISMATCH'),
+        );
+    });
+
+    it('reconciles on a thrown conflict too, not only a soft rejection', async () => {
+        fexRequestAuthorization.mockRejectedValue(
+            new ArcaServiceError('[1520] no es el proximo', [{code: '1520', message: 'no es el proximo'}]),
+        );
+        fexQueryVoucher.mockResolvedValue({
+            ...fexApproved,
+            raw: {Id: '41', Imp_total: '500', Moneda_Id: 'DOL', Dst_cmp: '203', Tipo_expo: '2'},
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
     });
 
     it('emits no QR for an export voucher, RG 4892 being a domestic specification', async () => {
