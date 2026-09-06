@@ -3,6 +3,8 @@ import type {ArcaAuth} from '../sdk/core/types.js';
 import {decimal, text} from '../../xml-node/xml-node.js';
 import type {CommonInvoiceRequest, CommonInvoiceResult} from '../sdk/invoicing/common/common-invoice.types.js';
 import {buildQrUrl, toNeutralResult} from '../mapping/invoice-mapper/invoice.mapper.js';
+import {toNeutralExportResult} from '../mapping/export-invoice-mapper/export-invoice.mapper.js';
+import type {FexInvoiceRequest, FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
 import {toCbteTipo} from '../mapping/code-maps/code-maps.js';
 import type {NeutralInvoice} from '../../provider/neutral-invoice.js';
 import type {TaxAuthorizationResult} from '../../provider/neutral-results.js';
@@ -244,4 +246,21 @@ export const WSFEV1_RECOVERY: RecoveryDialect<CommonInvoiceRequest, CommonInvoic
     assertMatches: assertRecoveredVoucherMatches,
     toNeutral: (queried, request, issuerTaxId, cae) =>
         toNeutralResult(queried, buildQrUrl(issuerTaxId, request, cae)),
+};
+
+/**
+ * WSFEXv1's dialect.
+ *
+ * **Reconciles nothing yet.** The export service still relies on the caller's `Cmp.Id` for idempotency, so
+ * a rejection there is the truthful outcome and querying would be asking a question ARCA already answered.
+ * Both predicates therefore answer `false`, which is today's behaviour stated explicitly rather than left
+ * as a gap in a table — and the shape is here so the flow that will use it is already wired.
+ */
+export const WSFEX_RECOVERY: RecoveryDialect<FexInvoiceRequest, FexInvoiceResult> = {
+    serviceId: ServiceId.WSFEXV1,
+    isConflictCandidate: () => false,
+    isConflictError: () => false,
+    voucherNumberOf: (queried) => queried.voucherNumber,
+    assertMatches: () => undefined,
+    toNeutral: (queried) => toNeutralExportResult(queried),
 };

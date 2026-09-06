@@ -1,4 +1,4 @@
-import {ServiceId, type ServiceIdValue} from '../sdk/core/constants.js';
+import {ServiceId, type ArcaEnvironment, type ServiceIdValue} from '../sdk/core/constants.js';
 import {
     ArcaAuthError,
     ArcaServiceError,
@@ -33,6 +33,7 @@ import {
     buildFexInvoiceRequest,
     toNeutralExportResult,
 } from '../mapping/export-invoice-mapper/export-invoice.mapper.js';
+import type {FexInvoiceRequest, FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
 import {toArcaDay, arcaDayToIsoDate, isArcaDay} from '../mapping/authority-day/authority-day.js';
 import {
     applicabilityRange,
@@ -64,10 +65,12 @@ import {
     toProviderFault,
 } from '../faults/faults.js';
 import {
-    isAlreadyAuthorizedError,
-    isAlreadyAuthorizedRejection,
     recoverAuthorizedVoucher,
     WSFEV1_RECOVERY,
+    WSFEX_RECOVERY,
+    type QueryableService,
+    type RecoverableResult,
+    type RecoveryDialect,
 } from '../voucher-recovery/voucher-recovery.js';
 import {
     buildCommonInvoiceRequest,
@@ -118,6 +121,29 @@ const ENTITY_CODE = 'ARCA';
  * so an `ArcaAuthError` stops the batch after at most this many calls.
  */
 export const CURRENCY_FAN_OUT_LIMIT = 8;
+
+/** A service that can both authorize a voucher and be asked about one afterwards. */
+interface AuthorizingService<Req, Res> extends QueryableService<Res> {
+    requestAuthorization(auth: ArcaAuth, request: Req): Promise<Res>;
+}
+
+/**
+ * What one of ARCA's invoicing services contributes to the shared authorize flow.
+ *
+ * Everything here is a spelling, a factory or an optional extra step. The order of operations, the
+ * reconciliation and the error handling live in `authorizeThrough`, so adding a third service cannot give it
+ * different semantics by leaving a field out.
+ */
+interface AuthorizationRoute<Req, Res extends RecoverableResult> {
+    readonly route: InvoiceRoute;
+    readonly recovery: RecoveryDialect<Req, Res>;
+    buildRequest(invoice: NeutralInvoice, voucherNumber: number): Req;
+    service(environment: ArcaEnvironment): AuthorizingService<Req, Res>;
+    /** A rule this service refuses locally rather than relaying. WSFEv1 has one; the export document does not. */
+    preflightError?(invoice: NeutralInvoice, now: Date): Error | undefined;
+    /** Maps a fresh authorization. The recovered-voucher path has its own, on the recovery dialect. */
+    toNeutral(result: Res, request: Req, issuerTaxId: string): TaxAuthorizationResult;
+}
 
 /** The route `exportRates` answers for. Named so the two catalogue filters and the echo cannot disagree. */
 const EXPORT_ROUTE: InvoiceRoute = 'WSFEXV1';
@@ -244,6 +270,101 @@ export class ArcaProvider extends TaxEntityProvider {
      * The WSAA scope a route authenticates against. Separate tickets, not one shared credential: WSAA issues
      * per service, and the certificate has to be enrolled in each one independently.
      */
+    /**
+     * Authorizes one voucher through whichever of ARCA's services owns it.
+     *
+     * One flow for both, because the steps are the same steps: build the request before spending a
+     * credential on it, resolve the issuing ticket, call once, reconcile an already-authorized number, map
+     * the answer. Only the spellings and two optional steps differ, and those are the {@link
+     * AuthorizationRoute}. Written twice, the reconciliation is what drifts — it is the part with the
+     * expensive reasoning and the part a second service is most likely to be given by omission.
+     */
+    private async authorizeThrough<Req, Res extends RecoverableResult>(
+        entity: EntityAuthBlock,
+        invoice: NeutralInvoice,
+        route: AuthorizationRoute<Req, Res>,
+    ): Promise<TaxAuthorizationResult> {
+        // Built before the ticket, not after, because building is where every canonical code is translated.
+        // Resolving first made an unmapped code cost a `409 CREDENTIALS_REQUIRED`, a re-send carrying the
+        // issuer's certificate and a full WSAA login before the `400` that was decidable from the body
+        // alone. Both mappers are pure and clock-free, so nothing here needs the ticket.
+        const request = route.buildRequest(invoice, invoice.voucherNumberFrom);
+
+        const auth = await this.issuerAuth(entity, route.route);
+        const service = route.service(toArcaEnvironment(entity.environment));
+        const recover = (): Promise<TaxAuthorizationResult | undefined> =>
+            recoverAuthorizedVoucher({
+                dialect: route.recovery,
+                service,
+                auth,
+                invoice,
+                request,
+                issuerTaxId: entity.issuerTaxId,
+                run: (op) => this.delegationAware(entity, route.recovery.serviceId, op),
+            });
+
+        // A rule this service applies itself would otherwise reach ARCA as its own rejection, so it is
+        // checked here for an actionable code — but only after giving idempotent recovery its chance. A
+        // resend of a voucher ARCA already authorized must still get that CAE back, and recovery reconciles
+        // against the stored voucher, which no pre-flight rule affects.
+        const preflightError = route.preflightError?.(invoice, new Date());
+        if (preflightError !== undefined) {
+            const recovered = await recover();
+            if (recovered !== undefined) {
+                return recovered;
+            }
+            throw preflightError;
+        }
+
+        let result: Res;
+        try {
+            result = await this.delegationAware(entity, route.recovery.serviceId, () =>
+                service.requestAuthorization(auth, request),
+            );
+        } catch (err) {
+            // ARCA may surface an already-authorized number as a thrown error block rather than a soft
+            // rejection. Reconcile only that conflict; any other business rejection is the truthful outcome
+            // and is re-thrown.
+            if (err instanceof ArcaServiceError && route.recovery.isConflictError(err)) {
+                const recovered = await recover();
+                if (recovered !== undefined) {
+                    return recovered;
+                }
+            }
+            throw err;
+        }
+
+        // The number is not the next to authorize, which includes core re-sending one already authorized.
+        // If the voucher is genuinely authorized, return its stored CAE.
+        if (route.recovery.isConflictCandidate(result)) {
+            const recovered = await recover();
+            if (recovered !== undefined) {
+                return recovered;
+            }
+        }
+
+        return route.toNeutral(result, request, entity.issuerTaxId);
+    }
+
+    /** WSFEv1: a QR to rebuild, and the concept-1 date window this service refuses locally. */
+    private static domesticRoute(): AuthorizationRoute<CommonInvoiceRequest, CommonInvoiceResult> {
+        return {
+            route: 'WSFEV1',
+            recovery: WSFEV1_RECOVERY,
+            buildRequest: buildCommonInvoiceRequest,
+            service: commonInvoiceService,
+            preflightError: (invoice, now) => concept1DateWindowError(invoice, now),
+            toNeutral: (result, request, issuerTaxId): TaxAuthorizationResult => {
+                // Build the QR only for an approved voucher; the guard narrows `result.cae` to a string.
+                const qr =
+                    result.result === 'A' && result.cae !== undefined && result.caeExpiration !== undefined
+                        ? buildQrUrl(issuerTaxId, request, result.cae)
+                        : undefined;
+                return toNeutralResult(result, qr);
+            },
+        };
+    }
+
     private static readonly SERVICE_BY_ROUTE: Readonly<Record<InvoiceRoute, ServiceIdValue>> = {
         WSFEV1: ServiceId.WSFEV1,
         WSMTXCA: ServiceId.WSFEV1,
@@ -299,134 +420,29 @@ export class ArcaProvider extends TaxEntityProvider {
         const route = invoiceRoute({webService: invoice.webService, documentTypeCode: invoice.documentTypeCode});
         ArcaProvider.assertRouteImplemented(route);
         if (route === 'WSFEXV1') {
-            return this.authorizeExportInvoice(entity, invoice);
+            return this.authorizeThrough(entity, invoice, ArcaProvider.exportRoute());
         }
-
-        // Core owns the voucher number: authorize exactly the one it sent, never a computed correlative.
-        //
-        // Built before the ticket, not after, because building is where every canonical code is translated —
-        // currency, document type, receiver identification and IVA condition. Resolving first made an
-        // unmapped code cost a `409 CREDENTIALS_REQUIRED`, a re-send carrying the issuer's certificate and a
-        // full WSAA login before the `400` that was decidable from the body alone. The mapper is pure and
-        // clock-free, so nothing here needs the ticket, and this is the same order every other method on
-        // this class states: validate what the body says before spending a credential on it.
-        const request = buildCommonInvoiceRequest(invoice, invoice.voucherNumberFrom);
-
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
-
-        // ARCA would refuse an out-of-window concept-1 `CbteFch` anyway, so refuse it ourselves with an
-        // actionable code — but only after giving idempotent recovery its chance. A resend of a voucher ARCA
-        // already authorized must still get that CAE back, and recovery reconciles against the stored
-        // voucher, which the date never affects.
-        const dateWindowError = concept1DateWindowError(invoice, new Date());
-        if (dateWindowError !== undefined) {
-            const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
-            if (recovered !== undefined) {
-                return recovered;
-            }
-            throw dateWindowError;
-        }
-
-        let result: CommonInvoiceResult;
-        try {
-            result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-                service.requestAuthorization(auth, request),
-            );
-        } catch (err) {
-            // AFIP may surface an already-authorized number as a thrown `10016` `Errors` block rather than a
-            // soft rejection. Reconcile only that conflict; any other business rejection is the truthful
-            // outcome and is re-thrown.
-            if (err instanceof ArcaServiceError && isAlreadyAuthorizedError(err)) {
-                const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
-                if (recovered !== undefined) {
-                    return recovered;
-                }
-            }
-            throw err;
-        }
-
-        // A `10016` rejection means the number is not the next to authorize, which includes core re-sending
-        // one ARCA already authorized. If the voucher is genuinely authorized, return its stored CAE.
-        if (isAlreadyAuthorizedRejection(result)) {
-            const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
-            if (recovered !== undefined) {
-                return recovered;
-            }
-        }
-
-        // Build the QR only for an approved voucher; the guard narrows `result.cae` to a string.
-        const qr =
-            result.result === 'A' && result.cae !== undefined && result.caeExpiration !== undefined
-                ? buildQrUrl(entity.issuerTaxId, request, result.cae)
-                : undefined;
-        return toNeutralResult(result, qr);
+        return this.authorizeThrough(entity, invoice, ArcaProvider.domesticRoute());
     }
+
 
     /**
-     * Authorizes a Factura E or one of its notas through WSFEXv1.
+     * WSFEXv1: no QR, and no pre-flight rule of its own.
      *
-     * Mirrors the WSFEv1 path — build before the ticket, then one delegation-aware call — and departs from
-     * it in exactly one place: **there is no idempotent recovery here.**
-     *
-     * WSFEv1 has none of its own, so this service reconstructs it: a `10016` means the number is taken, and
-     * `FECompConsultar` is asked whether the voucher on file is the one being re-sent. WSFEX has the
-     * mechanism natively. `Cmp.Id` is the caller's idempotency key, and re-sending it returns the stored
-     * answer with `Reproceso = "S"` instead of a rejection — so there is nothing to reconcile, and calling
-     * `FEXGetCMP` to reconcile it would be asking a question ARCA already answered.
-     *
-     * The consequence travels to the caller rather than being absorbed: `reprocessed` says which happened,
-     * because only the caller knows whether it meant to retry. On a deliberate retry a replay is the wanted
-     * outcome; on a request it believes is new, the same flag means the id was reused and the voucher
-     * described is an older one.
-     *
-     * Also no QR — see `toNeutralExportResult`.
+     * The export document's date window (1500) is ARCA's to apply — unlike the domestic concept-1 window,
+     * this service does not second-guess it — and RG 4892's QR payload is specified for the domestic
+     * comprobante, so emitting one here would be inventing a format.
      */
-    private async authorizeExportInvoice(
-        entity: EntityAuthBlock,
-        invoice: NeutralInvoice,
-    ): Promise<TaxAuthorizationResult> {
-        // Built first for the reason the domestic path states: this is where every canonical code is
-        // translated, and an unmapped one should cost a `400` rather than a WSAA login and a `409`.
-        const request = buildFexInvoiceRequest(invoice, invoice.voucherNumberFrom);
-
-        const auth = await this.issuerAuth(entity, 'WSFEXV1');
-        const service = fexInvoiceService(toArcaEnvironment(entity.environment));
-
-        const result = await this.delegationAware(entity, ServiceId.WSFEXV1, () =>
-            service.requestAuthorization(auth, request),
-        );
-        return toNeutralExportResult(result);
+    private static exportRoute(): AuthorizationRoute<FexInvoiceRequest, FexInvoiceResult> {
+        return {
+            route: 'WSFEXV1',
+            recovery: WSFEX_RECOVERY,
+            buildRequest: buildFexInvoiceRequest,
+            service: fexInvoiceService,
+            toNeutral: (result) => toNeutralExportResult(result),
+        };
     }
 
-    /**
-     * Binds `recoverAuthorizedVoucher` to this request: the issuer whose CUIT signs the rebuilt QR, and the
-     * delegation-aware wrapper the query runs under.
-     */
-    private recoverAuthorizedVoucher(
-        entity: EntityAuthBlock,
-        service: ReturnType<typeof commonInvoiceService>,
-        auth: ArcaAuth,
-        invoice: NeutralInvoice,
-        request: CommonInvoiceRequest,
-    ): Promise<TaxAuthorizationResult | undefined> {
-        return recoverAuthorizedVoucher({
-            dialect: WSFEV1_RECOVERY,
-            service,
-            auth,
-            invoice,
-            request,
-            issuerTaxId: entity.issuerTaxId,
-            run: (op) => this.delegationAware(entity, ServiceId.WSFEV1, op),
-        });
-    }
 
     protected async lastAuthorizedImpl(
         entity: EntityAuthBlock,
