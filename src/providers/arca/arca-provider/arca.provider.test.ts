@@ -2110,6 +2110,20 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
         expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
     });
 
+    it('resolves its own idempotency key, so the caller never has to track one', async () => {
+        // Withdrawn from the caller deliberately: reusing a Cmp.Id replays a stored voucher under a 200 with
+        // a real CAE, and nothing downstream catches it -- ARCA short-circuits on a stored id without ever
+        // validating the submitted document, so the voucher-number sequence rule never runs.
+        const {requestId: _dropped, ...withoutKey} = exportInvoice();
+
+        await new ArcaProvider().authorizeInvoice(ENTITY, withoutKey);
+
+        const sent = fexRequestAuthorization.mock.calls[0]?.[1];
+        expect(sent?.requestId).toBeGreaterThan(0);
+        // Long(N15) is the field ARCA declares.
+        expect(sent?.requestId).toBeLessThanOrEqual(999_999_999_999_999);
+    });
+
     it('carries reprocessed out to the caller, who alone knows if it meant to retry', async () => {
         fexRequestAuthorization.mockResolvedValue({...fexApproved, reprocessed: true});
 

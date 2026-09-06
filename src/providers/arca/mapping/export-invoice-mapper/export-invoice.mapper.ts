@@ -66,22 +66,6 @@ function exportBlock(invoice: NeutralInvoice): NeutralInvoiceExport {
     return invoice.export;
 }
 
-/**
- * The caller's request id, which WSFEX requires and has no way to invent.
- *
- * This service keeps no database, so it cannot allocate one: the sequence belongs to core. A fabricated
- * value would be worse than a rejection — a collision replays a stored voucher and reports it as success.
- */
-function requestIdOf(invoice: NeutralInvoice): number {
-    if (invoice.requestId === undefined) {
-        throw new ArcaValidationError(
-            'invoice names no requestId — an export voucher needs the idempotency key the caller owns',
-            'MISSING_REQUEST_ID',
-        );
-    }
-    return invoice.requestId;
-}
-
 function toFexItems(invoice: NeutralInvoice): Array<FexItem> {
     const items = invoice.items ?? [];
     if (items.length === 0) {
@@ -277,10 +261,15 @@ function settlementFlag(
 /**
  * Builds the WSFEXv1 authorization request for `voucherNumber`. Pure and clock-free, like its WSFEv1
  * sibling: ARCA owns the date window (1500) for this document, so nothing here reads the clock.
+ *
+ * `requestId` arrives resolved for that reason — it is derived from the clock, and generating it here would
+ * cost this function the property that makes it testable without one. Same shape as `voucherNumber`, which
+ * the provider also resolves and passes in.
  */
 export function buildFexInvoiceRequest(
     invoice: NeutralInvoice,
     voucherNumber: number,
+    requestId: number,
 ): FexInvoiceRequest {
     const block = exportBlock(invoice);
     const voucherType = toCbteTipo(invoice.documentTypeCode);
@@ -300,7 +289,7 @@ export function buildFexInvoiceRequest(
     assertRequiredForInvoice(block, voucherType);
 
     const request: FexInvoiceRequest = {
-        requestId: requestIdOf(invoice),
+        requestId,
         voucherType,
         pointOfSaleNumber: invoice.pointOfSaleNumber,
         voucherNumber,

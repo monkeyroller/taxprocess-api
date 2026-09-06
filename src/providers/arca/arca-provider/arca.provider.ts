@@ -34,6 +34,7 @@ import {
     toNeutralExportResult,
 } from '../mapping/export-invoice-mapper/export-invoice.mapper.js';
 import type {FexInvoiceRequest, FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
+import {nextRequestId} from '../mapping/request-id/request-id.js';
 import {toArcaDay, arcaDayToIsoDate, isArcaDay} from '../mapping/authority-day/authority-day.js';
 import {
     applicabilityRange,
@@ -437,7 +438,14 @@ export class ArcaProvider extends TaxEntityProvider {
         return {
             route: 'WSFEXV1',
             recovery: WSFEX_RECOVERY,
-            buildRequest: buildFexInvoiceRequest,
+            // The idempotency key is this service's to produce, never the caller's to track: reusing one
+            // replays a stored voucher under a `200` with a real CAE, and nothing downstream catches it.
+            buildRequest: (invoice, voucherNumber) =>
+                buildFexInvoiceRequest(
+                    invoice,
+                    voucherNumber,
+                    invoice.requestId ?? nextRequestId(new Date(), Math.random),
+                ),
             service: fexInvoiceService,
             toNeutral: (result) => toNeutralExportResult(result),
         };
