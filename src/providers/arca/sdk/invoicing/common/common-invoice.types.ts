@@ -1,6 +1,5 @@
 import type {ArcaCodeMessage} from '../../core/errors.js';
 import type {VatSubtotal} from '../invoice-totals/invoice-totals.js';
-import type {NeutralInvoiceConcept} from '../../../../provider/neutral-invoice.js';
 
 /**
  * SDK-facing request/response types for WSFEv1. The request is the SDK's own shape, translated into the
@@ -9,11 +8,15 @@ import type {NeutralInvoiceConcept} from '../../../../provider/neutral-invoice.j
  */
 
 /**
- * ARCA `Concepto`: 1 = productos, 2 = servicios, 3 = productos y servicios. The neutral union under ARCA's
- * name rather than a copy, since the mapper assigns straight into this field and two declarations would be
- * assignable right up until one gained a member.
+ * ARCA `Concepto`: 1 = productos, 2 = servicios, 3 = productos y servicios.
+ *
+ * Its own union rather than an alias of the neutral one. It used to alias it, on the grounds that the mapper
+ * assigns straight into this field and two declarations would stay assignable "right up until one gained a
+ * member" — which is exactly what happened: the neutral catalogue now carries a fourth code, `OTHER`, that
+ * only the export service can express. Aliasing would have this type claim `Concepto` accepts a value ARCA
+ * would reject. `toConcepto` is where the narrowing is enforced.
  */
-export type InvoiceConcept = NeutralInvoiceConcept;
+export type InvoiceConcept = 1 | 2 | 3;
 
 /** An associated voucher (`CbtesAsoc`), e.g. the invoice a credit note references. */
 export interface AssociatedVoucher {

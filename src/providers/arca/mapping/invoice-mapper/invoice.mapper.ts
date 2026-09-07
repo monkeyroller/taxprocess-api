@@ -18,12 +18,13 @@ import {
     toDocTipo,
 } from '../code-maps/code-maps.js';
 import {toMonId} from '../currency-codes/currency-codes.js';
+import {toConcepto} from '../concept-codes/concept-codes.js';
 // Shared with the cotización path so the two can never disagree about which day a value names. A zoneless
 // datetime is refused rather than passed to `new Date`, which is host-local per the ES spec — that made the
 // voucher's legal date depend on the container's `TZ`.
 import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
-import type {NeutralInvoice} from '../../../provider/neutral-invoice.js';
+import {CONCEPT_GOODS, type NeutralInvoice} from '../../../provider/neutral-invoice.js';
 import type {
     NeutralAuthorizationResultDto,
     NeutralAuthorizationStatus,
@@ -110,10 +111,10 @@ function argentinaMidnight(date: Date): number {
  * already-authorized voucher must still get its CAE back.
  */
 export function concept1DateWindowError(invoice: NeutralInvoice, now: Date): ArcaValidationError | undefined {
-    // An absent concept means an export voucher, which has no `Concepto` and its own date rule (WSFEX 1500,
-    // a ±5-day window plus a current-month ceiling for services). ARCA applies that one, so this returns
-    // nothing rather than guessing which of the two it should enforce.
-    if (invoice.concept !== 1) {
+    // An absent concept means an export voucher, which has its own date rule (WSFEX 1500, a ±5-day window
+    // plus a current-month ceiling for services). ARCA applies that one, so this returns nothing rather
+    // than guessing which of the two it should enforce.
+    if (invoice.concept !== CONCEPT_GOODS) {
         return undefined;
     }
     const date = parseAuthorityDate(invoice.issueDate, 'issueDate');
@@ -222,7 +223,7 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
     const request: CommonInvoiceRequest = {
         pointOfSaleNumber: invoice.pointOfSaleNumber,
         voucherType,
-        concept,
+        concept: toConcepto(concept),
         docType: toDocTipo(receiver.identificationTypeCode),
         docNumber: parseArcaId(receiver.identificationNumber, 'receiver.identificationNumber'),
         voucherNumberFrom: voucherNumber,
@@ -241,10 +242,11 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
         tributes,
     };
 
-    // Services (concept 2/3) require the FchServ*/FchVtoPago dates. `!= null` for the same reason
-    // `invoiceCurrencyId` uses it: a `null` that slipped past validation would throw a `TypeError` off
-    // `.trim()`, and an omitted element is the honest rendering of a field the caller left blank.
-    if (concept !== 1) {
+    // Anything but goods requires the FchServ*/FchVtoPago dates, services being rendered over a period
+    // rather than shipped on a day. `!= null` for the same reason `invoiceCurrencyId` uses it: a `null`
+    // that slipped past validation would throw a `TypeError` off `.trim()`, and an omitted element is the
+    // honest rendering of a field the caller left blank.
+    if (concept !== CONCEPT_GOODS) {
         if (invoice.serviceDateFrom != null) {
             request.serviceDateFrom = formatArcaDate(parseAuthorityDate(invoice.serviceDateFrom, 'serviceDateFrom'));
         }

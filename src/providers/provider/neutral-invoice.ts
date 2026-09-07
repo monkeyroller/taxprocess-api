@@ -5,12 +5,34 @@
 import type {WebService} from './web-service.js';
 
 /**
- * What is being invoiced: 1 = goods, 2 = services, 3 = both (AR: `Concepto`). A runtime value paired with
- * the type below, so the DTO's validator cannot keep validating an old set after a member is added here.
+ * What is being invoiced — **this contract's own catalogue**, four codes covering every document an entity
+ * can issue. A runtime value paired with the type below, so the DTO's validator cannot keep validating an
+ * old set after a member is added here.
+ *
+ * **Not every code is valid on every voucher**, which makes this the one catalogue whose accepted set
+ * depends on which of an entity's services answers. A domestic voucher cannot be `OTHER` and an export
+ * cannot be `GOODS_AND_SERVICES`, because the authorities that issue them have no such code — the provider
+ * refuses the one its service cannot express, naming the field.
+ *
+ * The numbers are **ours**, not an authority's, even where they coincide: for ARCA both mappings happen to
+ * be the identity, which is a fact about ARCA's numbering rather than a rule. A second entity maps these to
+ * whatever it uses, exactly as it would its own currency codes.
  */
-export const NEUTRAL_INVOICE_CONCEPTS = [1, 2, 3] as const;
+export const NEUTRAL_INVOICE_CONCEPTS = [1, 2, 3, 4] as const;
 
 export type NeutralInvoiceConcept = (typeof NEUTRAL_INVOICE_CONCEPTS)[number];
+
+/** Goods. Shipped on a date, which is what every rule keyed on this member turns on. */
+export const CONCEPT_GOODS = 1;
+
+/** Services. Rendered over a period, so the entity asks when they are paid rather than when they ship. */
+export const CONCEPT_SERVICES = 2;
+
+/** Goods and services on one voucher. **Domestic only** — no export authority has a code for it. */
+export const CONCEPT_GOODS_AND_SERVICES = 3;
+
+/** Neither, as the entity classifies it. **Export only** — no domestic authority has a code for it. */
+export const CONCEPT_OTHER = 4;
 
 /** One taxed line: net (base) + tax amount at a given rate. */
 export interface NeutralInvoiceLine {
