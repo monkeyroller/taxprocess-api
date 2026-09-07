@@ -6,6 +6,25 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-07 — A body that never parsed is a `400`, not a `500`
+
+Branch `feature/export-invoice`. A request whose body the parser refused — malformed JSON, a truncated
+send, an oversized payload — was answered `500 INTERNAL`. express's body parser reports its status as
+`status`/`statusCode`, where the framework this service maps from uses `httpCode`, so the failure fell
+through to the unexpected-error catch-all: this service claiming its own fault for a request that was
+broken on arrival, under a status core may retry.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 21.1 | An unparseable body is now `400 INVALID_REQUEST_BODY` (`413` oversized, `415` unsupported charset) instead of `500 INTERNAL` | **Stop retrying it.** If you treat `5xx` as retryable, this class previously retried forever; an unchanged body cannot parse on the second attempt |
+| 21.2 | `details.reason` names the parser's own reason — `entity.parse.failed`, `entity.too.large`, `charset.unsupported` | Log it; it distinguishes "core built bad JSON" from "the payload is too big" |
+
+`message` is the fixed string `Request body could not be read` rather than the parser's. V8 renders the
+fragment it choked on into its message, and these bodies carry `entity.credentials.keyPem` on the
+handshake re-send — the same reason validation `details` has always dropped `value` and `target`.
+
+---
+
 ## 2026-09-07 — One field says what a voucher bills, domestic or export
 
 Branch `feature/export-invoice`. `invoice.concept` now covers both documents and
