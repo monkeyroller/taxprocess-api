@@ -155,6 +155,7 @@ src/
 │       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + WSFEXv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
     ├── app.ts             # the Express 5 + routing-controllers wiring, assembled apart from listening
+    ├── decorator-metadata.ts   # boot guard: no `design:paramtypes` means no body validation, silently
     ├── dto/               # one module per request body and per result family
     │   └── authority-date/     # which date FORMS the contract accepts (shape only — no zone, no entity)
     └── error-mapper/      # neutral fault category → HTTP status + envelope

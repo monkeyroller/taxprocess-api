@@ -10,6 +10,16 @@ import {EntitiesController} from './controllers/entities.controller.js';
 import {CurrenciesController} from './controllers/currencies.controller.js';
 import {sendError} from './error-mapper/error-mapper.js';
 
+/** Every controller mounted by the service, in the order `useExpressServer` registers them. */
+export const CONTROLLERS = [
+    StatusController,
+    InvoicesController,
+    PointsOfSaleController,
+    TaxpayersController,
+    EntitiesController,
+    CurrenciesController,
+] as const;
+
 /**
  * Safety net for errors that reach the framework layer, chiefly the class-validator `400`s raised before an
  * action runs. Controllers map their own errors in-action; this catches the rest.
@@ -38,14 +48,7 @@ export function createApp(): express.Express {
 
     useExpressServer(app, {
         routePrefix: '/api',
-        controllers: [
-            StatusController,
-            InvoicesController,
-            PointsOfSaleController,
-            TaxpayersController,
-            EntitiesController,
-            CurrenciesController,
-        ],
+        controllers: [...CONTROLLERS],
         validation: {
             whitelist: true,
             forbidNonWhitelisted: true

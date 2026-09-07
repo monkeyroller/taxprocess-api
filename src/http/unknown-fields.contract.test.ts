@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import {afterAll, beforeAll, describe, expect, it} from '@jest/globals';
 import type {Server} from 'node:http';
 import {createApp} from './app.js';
+import {assertDecoratorMetadataEmitted} from './decorator-metadata.js';
 import type {HttpErrorResult, ValidationSummary} from './error-mapper/error-mapper.js';
 
 /**
@@ -65,6 +66,10 @@ function rejectedProperties(json: ErrorEnvelope): Array<string> {
 const ENTITY = {entityCode: 'ARCA', issuerTaxId: '20111111112', environment: 'testing'};
 
 describe('unknown request fields are refused (forbidNonWhitelisted)', () => {
+    it('emits design:paramtypes — the read every case below depends on', () => {
+        expect(() => { assertDecoratorMetadataEmitted(); }).not.toThrow();
+    });
+
     it('rejects a bogus key at the top of the /invoices/authorize envelope', async () => {
         const {status, json} = await post('/api/invoices/authorize', {
             bogusTop: 1,

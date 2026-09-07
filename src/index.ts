@@ -3,8 +3,13 @@ import {createServer} from 'node:http';
 import {env} from './config/env.js';
 import {delegateCredentialStore} from './providers/arca/auth/delegate-credentials/delegate-credentials.js';
 import {createApp} from './http/app.js';
+import {assertDecoratorMetadataEmitted} from './http/decorator-metadata.js';
 
 function bootstrap(): void {
+    // Fails fast if the runtime strips `design:paramtypes`, which silently disables ALL body validation.
+    // See `assertDecoratorMetadataEmitted` — this is not a theoretical guard.
+    assertDecoratorMetadataEmitted();
+
     // Fails fast if a delegate certificate is configured but unusable, rather than on the first delegated
     // request. A no-op when none is configured.
     delegateCredentialStore.validateConfigured();
