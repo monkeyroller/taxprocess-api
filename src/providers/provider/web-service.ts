@@ -15,6 +15,7 @@ export type WebService = 'WSFEv1' | 'WSMTXCA' | 'WSFEXv1';
 
 /**
  * The runtime companion of the union, so a DTO validator cannot keep accepting an old set after a member is
- * added — the reason `GENERIC_ENVIRONMENTS` and `NEUTRAL_INVOICE_CONCEPTS` exist in the same shape.
+ * added — the reason `GENERIC_ENVIRONMENTS` exists in the same shape. (`concept` needs *named* members
+ * as well, so it is a `const` object with its list derived; see `Concept`.)
  */
 export const WEB_SERVICES = ['WSFEv1', 'WSMTXCA', 'WSFEXv1'] as const;

@@ -6,8 +6,7 @@ import type {WebService} from './web-service.js';
 
 /**
  * What is being invoiced — **this contract's own catalogue**, four codes covering every document an entity
- * can issue. A runtime value paired with the type below, so the DTO's validator cannot keep validating an
- * old set after a member is added here.
+ * can issue.
  *
  * **Not every code is valid on every voucher**, which makes this the one catalogue whose accepted set
  * depends on which of an entity's services answers. A domestic voucher cannot be `OTHER` and an export
@@ -17,22 +16,35 @@ import type {WebService} from './web-service.js';
  * The numbers are **ours**, not an authority's, even where they coincide: for ARCA both mappings happen to
  * be the identity, which is a fact about ARCA's numbering rather than a rule. A second entity maps these to
  * whatever it uses, exactly as it would its own currency codes.
+ *
+ * A `const` object rather than an `enum`, following `ServiceId`. Three properties it needs at once, and no
+ * other shape has all three: the names and the values are **one** declaration (four loose constants beside
+ * a literal array were two, with nothing tying `4` in one to `4` in the other); a plain `1` still satisfies
+ * the type, so a caller, a DTO and a fixture all read naturally; and `Object.values` carries no enum
+ * reverse mapping, so the runtime list below holds numbers only.
+ *
+ * That last point is why the DTO validates with `@IsIn` over this list rather than `@IsEnum` over an enum:
+ * `isEnum` accepts `Object.keys(e).map(k => e[k])`, which for a numeric enum is `['GOODS', 1, …]` — it
+ * would take the member *name* as a valid value and pass a string through to the wire.
  */
-export const NEUTRAL_INVOICE_CONCEPTS = [1, 2, 3, 4] as const;
+export const Concept = {
+    /** Goods. Shipped on a date, which is what every rule keyed on this member turns on. */
+    GOODS: 1,
+    /** Services. Rendered over a period, so the entity asks when they are paid rather than when they ship. */
+    SERVICES: 2,
+    /** Goods and services on one voucher. **Domestic only** — no export authority has a code for it. */
+    GOODS_AND_SERVICES: 3,
+    /** Neither, as the entity classifies it. **Export only** — no domestic authority has a code for it. */
+    OTHER: 4,
+} as const;
 
-export type NeutralInvoiceConcept = (typeof NEUTRAL_INVOICE_CONCEPTS)[number];
+export type NeutralInvoiceConcept = (typeof Concept)[keyof typeof Concept];
 
-/** Goods. Shipped on a date, which is what every rule keyed on this member turns on. */
-export const CONCEPT_GOODS = 1;
-
-/** Services. Rendered over a period, so the entity asks when they are paid rather than when they ship. */
-export const CONCEPT_SERVICES = 2;
-
-/** Goods and services on one voucher. **Domestic only** — no export authority has a code for it. */
-export const CONCEPT_GOODS_AND_SERVICES = 3;
-
-/** Neither, as the entity classifies it. **Export only** — no domestic authority has a code for it. */
-export const CONCEPT_OTHER = 4;
+/**
+ * The runtime companion, derived so it cannot fall behind the catalogue — which is the whole reason for the
+ * shape above. The DTO's validator reads this.
+ */
+export const NEUTRAL_INVOICE_CONCEPTS: ReadonlyArray<NeutralInvoiceConcept> = Object.values(Concept);
 
 /** One taxed line: net (base) + tax amount at a given rate. */
 export interface NeutralInvoiceLine {

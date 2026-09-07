@@ -24,7 +24,7 @@ import {toConcepto} from '../concept-codes/concept-codes.js';
 // voucher's legal date depend on the container's `TZ`.
 import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
-import {CONCEPT_GOODS, type NeutralInvoice} from '../../../provider/neutral-invoice.js';
+import {Concept, type NeutralInvoice} from '../../../provider/neutral-invoice.js';
 import type {
     NeutralAuthorizationResultDto,
     NeutralAuthorizationStatus,
@@ -114,7 +114,7 @@ export function concept1DateWindowError(invoice: NeutralInvoice, now: Date): Arc
     // An absent concept means an export voucher, which has its own date rule (WSFEX 1500, a ±5-day window
     // plus a current-month ceiling for services). ARCA applies that one, so this returns nothing rather
     // than guessing which of the two it should enforce.
-    if (invoice.concept !== CONCEPT_GOODS) {
+    if (invoice.concept !== Concept.GOODS) {
         return undefined;
     }
     const date = parseAuthorityDate(invoice.issueDate, 'issueDate');
@@ -243,7 +243,7 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
     // rather than shipped on a day. `!= null` for the same reason `invoiceCurrencyId` uses it: a `null`
     // that slipped past validation would throw a `TypeError` off `.trim()`, and an omitted element is the
     // honest rendering of a field the caller left blank.
-    if (concept !== CONCEPT_GOODS) {
+    if (concept !== Concept.GOODS) {
         if (invoice.serviceDateFrom != null) {
             request.serviceDateFrom = formatArcaDate(parseAuthorityDate(invoice.serviceDateFrom, 'serviceDateFrom'));
         }

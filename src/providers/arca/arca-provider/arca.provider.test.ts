@@ -20,7 +20,7 @@ import {
     type ProviderFaultCategory,
 } from '../../provider/faults.js';
 import type {EntityAuthBlock} from '../../provider/entity-auth.js';
-import {CONCEPT_SERVICES, type NeutralInvoice} from '../../provider/neutral-invoice.js';
+import {Concept, type NeutralInvoice} from '../../provider/neutral-invoice.js';
 import type {DelegateCredentialStore} from '../auth/delegate-credentials/delegate-credentials.js';
 import {NeutralInvoiceDto} from '../../../http/dto/invoice.dto.js';
 import {NextNumbersRequestDto} from '../../../http/dto/invoice-request.dto.js';
@@ -2080,7 +2080,7 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
             ...overrides,
             // `...overrides` is a Partial, which would widen the now-required `concept` to include
             // undefined. Only an explicit override replaces it; concepts are 1-4, so `??` never misfires.
-            concept: overrides.concept ?? CONCEPT_SERVICES,
+            concept: overrides.concept ?? Concept.SERVICES,
         };
     }
 

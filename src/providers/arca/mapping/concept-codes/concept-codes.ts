@@ -1,11 +1,7 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
 import type {InvoiceConcept} from '../../sdk/invoicing/common/common-invoice.types.js';
 import type {FexExportType} from '../../sdk/invoicing/export/fex-invoice.types.js';
-import {
-    CONCEPT_GOODS_AND_SERVICES,
-    CONCEPT_OTHER,
-    type NeutralInvoiceConcept,
-} from '../../../provider/neutral-invoice.js';
+import {Concept, type NeutralInvoiceConcept} from '../../../provider/neutral-invoice.js';
 
 /**
  * What is being invoiced, translated to whichever of ARCA's two invoicing services authorizes the voucher.
@@ -33,9 +29,9 @@ import {
  * message naming the field rather than relayed as ARCA's own Spanish rejection.
  */
 export function toConcepto(concept: NeutralInvoiceConcept): InvoiceConcept {
-    if (concept === CONCEPT_OTHER) {
+    if (concept === Concept.OTHER) {
         throw new ArcaValidationError(
-            `concept ${String(CONCEPT_OTHER)} (other) is not available on a domestic voucher — ARCA's ` +
+            `concept ${String(Concept.OTHER)} (other) is not available on a domestic voucher — ARCA's ` +
                 'Concepto covers goods, services and both, and has no code for anything else',
             'UNKNOWN_CODE',
         );
@@ -51,9 +47,9 @@ export function toConcepto(concept: NeutralInvoiceConcept): InvoiceConcept {
  * document it. ARCA's own numbering skipping 3 is what makes it unrepresentable, not a limit of ours.
  */
 export function toTipoExpo(concept: NeutralInvoiceConcept): FexExportType {
-    if (concept === CONCEPT_GOODS_AND_SERVICES) {
+    if (concept === Concept.GOODS_AND_SERVICES) {
         throw new ArcaValidationError(
-            `concept ${String(CONCEPT_GOODS_AND_SERVICES)} (goods and services) is not available on an ` +
+            `concept ${String(Concept.GOODS_AND_SERVICES)} (goods and services) is not available on an ` +
                 "export voucher — ARCA's Tipo_expo has no code for it. Issue separate vouchers, or name " +
                 'the dominant one',
             'UNKNOWN_CODE',

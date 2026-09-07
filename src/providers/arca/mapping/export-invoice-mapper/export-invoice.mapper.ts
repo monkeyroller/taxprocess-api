@@ -21,7 +21,7 @@ import {
 import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
 import {
-    CONCEPT_GOODS,
+    Concept,
     type NeutralInvoice,
     type NeutralInvoiceConcept,
     type NeutralInvoiceExport,
@@ -191,7 +191,7 @@ function permitPresence(
     voucherType: number,
     concept: NeutralInvoiceConcept,
 ): 'S' | 'N' | undefined {
-    if (concept !== CONCEPT_GOODS || voucherType !== INVOICE) {
+    if (concept !== Concept.GOODS || voucherType !== INVOICE) {
         return undefined;
     }
     if (block.shippingPermitPresent === undefined) {
@@ -231,13 +231,13 @@ function assertRequiredForInvoice(
     if (voucherType !== INVOICE) {
         return;
     }
-    if (concept === CONCEPT_GOODS && block.incoterm === undefined) {
+    if (concept === Concept.GOODS && block.incoterm === undefined) {
         throw new ArcaValidationError(
-            `export.incoterm is required on an invoice for goods (concept ${String(CONCEPT_GOODS)})`,
+            `export.incoterm is required on an invoice for goods (concept ${String(Concept.GOODS)})`,
             'MISSING_INCOTERM',
         );
     }
-    if (concept !== CONCEPT_GOODS && block.paymentDate === undefined) {
+    if (concept !== Concept.GOODS && block.paymentDate === undefined) {
         throw new ArcaValidationError(
             `export.paymentDate is required on an invoice for concept ${String(concept)}, which is not goods`,
             'MISSING_PAYMENT_DATE',

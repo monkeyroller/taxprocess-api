@@ -1,12 +1,7 @@
 import {describe, expect, it} from '@jest/globals';
 import {buildFexInvoiceRequest, toNeutralExportResult} from './export-invoice.mapper.js';
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {
-    CONCEPT_GOODS,
-    CONCEPT_OTHER,
-    CONCEPT_SERVICES,
-    type NeutralInvoice,
-} from '../../../provider/neutral-invoice.js';
+import {Concept, type NeutralInvoice} from '../../../provider/neutral-invoice.js';
 import type {FexInvoiceResult} from '../../sdk/invoicing/export/fex-invoice.types.js';
 
 /** UC-2: an export of services, which is the shape with the fewest conditional fields switched on. */
@@ -18,7 +13,7 @@ const SERVICES: NeutralInvoice = {
     currencyCode: 'DOL',
     currencyRate: 1508,
     issueDate: '2026-09-04',
-    concept: CONCEPT_SERVICES,
+    concept: Concept.SERVICES,
     lines: [],
     items: [
         {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
@@ -39,7 +34,7 @@ const TIERRA_DEL_FUEGO: NeutralInvoice = {
     ...SERVICES,
     currencyCode: 'PES',
     currencyRate: 1,
-    concept: CONCEPT_GOODS,
+    concept: Concept.GOODS,
     export: {
         destinationCode: '250',
         shippingPermitPresent: false,
@@ -360,7 +355,7 @@ describe('the rules that need ARCA\'s own codes', () => {
     it('accepts the export-only concept, which ARCA numbers 4 rather than 3', () => {
         const other: NeutralInvoice = {
             ...SERVICES,
-            concept: CONCEPT_OTHER,
+            concept: Concept.OTHER,
             export: {...SERVICES.export!, paymentDate: '2026-09-30'},
         };
         expect(buildFexInvoiceRequest(other, 7, 41).exportType).toBe(4);
@@ -386,7 +381,7 @@ describe('the rules that need ARCA\'s own codes', () => {
         expect(
             codeOf(() =>
                 buildFexInvoiceRequest(
-                    {...unpaid, concept: CONCEPT_OTHER},
+                    {...unpaid, concept: Concept.OTHER},
                     7,
                     41,
                 ),

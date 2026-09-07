@@ -18,7 +18,7 @@ import {
     type ValidatorConstraintInterface,
 } from 'class-validator';
 import {
-    CONCEPT_GOODS,
+    Concept,
     NEUTRAL_INVOICE_CONCEPTS,
     type NeutralInvoiceConcept,
 } from '../../providers/provider/neutral-invoice.js';
@@ -167,7 +167,7 @@ class InvoiceNamesAReceiver implements ValidatorConstraintInterface {
 class InvoicePermitsAccompanyGoods implements ValidatorConstraintInterface {
     validate(_value: unknown, args: ValidationArguments): boolean {
         const {concept, export: exportBlock} = args.object as NeutralInvoiceDto;
-        if (exportBlock === undefined || concept === CONCEPT_GOODS) {
+        if (exportBlock === undefined || concept === Concept.GOODS) {
             return true;
         }
         return (exportBlock.shippingPermits ?? []).length === 0 && exportBlock.shippingPermitPresent !== true;
@@ -176,7 +176,7 @@ class InvoicePermitsAccompanyGoods implements ValidatorConstraintInterface {
     defaultMessage(): string {
         return (
             'a voucher that is not for goods has nothing to ship, so export.shippingPermits and ' +
-            `export.shippingPermitPresent must be omitted — send concept ${String(CONCEPT_GOODS)} if this ` +
+            `export.shippingPermitPresent must be omitted — send concept ${String(Concept.GOODS)} if this ` +
             'voucher covers a shipment'
         );
     }
