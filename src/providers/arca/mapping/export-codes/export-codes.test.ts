@@ -1,28 +1,11 @@
 import {describe, expect, it} from '@jest/globals';
-import {
-    INCOTERMS,
-    isKnownIncoterm,
-    toIdiomaCbte,
-    toIncoterms,
-    toTipoExpo,
-} from './export-codes.js';
+import {INCOTERMS, isKnownIncoterm, toIdiomaCbte, toIncoterms} from './export-codes.js';
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {NEUTRAL_INVOICE_CONCEPTS} from '../../../provider/neutral-invoice.js';
 
-describe('toTipoExpo', () => {
-    it('maps the three export types onto ARCA 1/2/4', () => {
-        expect(toTipoExpo('GOODS')).toBe(1);
-        expect(toTipoExpo('SERVICES')).toBe(2);
-        expect(toTipoExpo('OTHER')).toBe(4);
-    });
-
-    it('is not the concept vocabulary, whose 3 means something WSFEX has no code for', () => {
-        // Reusing `concept` would make two unrelated sets assignable until one gained a member. ARCA's own
-        // gap at 3 is the tell: `Tipo_expo` has no "productos y servicios".
-        expect(NEUTRAL_INVOICE_CONCEPTS).toContain(3);
-        expect(Object.values({GOODS: 1, SERVICES: 2, OTHER: 4})).not.toContain(3);
-    });
-});
+// `toTipoExpo` moved to `concept-codes/`, tested there. The case that used to sit here asserted the export
+// vocabulary was NOT the concept one -- the conclusion this change overturned, so it is gone rather than
+// reworded: ARCA's gap at 3 turned out to be the slot the export-only code occupies, not proof the two sets
+// are unrelated.
 
 describe('toIdiomaCbte', () => {
     it('maps ISO 639-1 onto ARCA 1/2/3', () => {

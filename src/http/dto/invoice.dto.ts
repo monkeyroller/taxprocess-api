@@ -17,7 +17,11 @@ import {
     type ValidationArguments,
     type ValidatorConstraintInterface,
 } from 'class-validator';
-import {NEUTRAL_INVOICE_CONCEPTS, type NeutralInvoiceConcept} from '../../providers/provider/neutral-invoice.js';
+import {
+    CONCEPT_GOODS,
+    NEUTRAL_INVOICE_CONCEPTS,
+    type NeutralInvoiceConcept,
+} from '../../providers/provider/neutral-invoice.js';
 import {WEB_SERVICES, type WebService} from '../../providers/provider/web-service.js';
 import {IsAuthorityDate} from './authority-date/authority-date.js';
 import {
@@ -129,36 +133,52 @@ class InvoiceCarriesAmount implements ValidatorConstraintInterface {
  * customs destination, and has no equivalent of any of the three. Carrying both would leave the provider
  * choosing which document the caller meant.
  *
- * `concept` travels with `receiver` for the same reason: it is the domestic "what is being invoiced", whose
- * export counterpart is `export.exportType` — a different vocabulary rather than a renaming, with a member
- * (`OTHER`) `concept` lacks and lacking one (`both`) `concept` has. Sending it alongside `export` means the
- * caller has confused the two.
+ * `concept` is deliberately *not* part of this rule. It says what the voucher bills, which both documents
+ * have to answer, so it is required throughout — only which of its codes are valid narrows per document,
+ * and that is the provider's call, needing the authority's voucher-type numbering.
  */
 @ValidatorConstraint({name: 'invoiceNamesAReceiver'})
 class InvoiceNamesAReceiver implements ValidatorConstraintInterface {
     validate(_value: unknown, args: ValidationArguments): boolean {
-        const {receiver, export: exportBlock, concept} = args.object as NeutralInvoiceDto;
-        const domestic = present(receiver);
-        const foreign = present(exportBlock);
-        if (domestic === foreign) {
-            return false;
-        }
-        return domestic ? present(concept) : !present(concept);
+        const {receiver, export: exportBlock} = args.object as NeutralInvoiceDto;
+        return present(receiver) !== present(exportBlock);
     }
 
     defaultMessage(args: ValidationArguments): string {
-        const {receiver, export: exportBlock} = args.object as NeutralInvoiceDto;
-        const domestic = present(receiver);
-        const foreign = present(exportBlock);
-        if (domestic && foreign) {
-            return 'send either receiver (a domestic voucher) or export (a foreign-trade voucher), not both';
+        const {receiver} = args.object as NeutralInvoiceDto;
+        return present(receiver)
+            ? 'send either receiver (a domestic voucher) or export (a foreign-trade voucher), not both'
+            : 'invoice names no buyer — send receiver for a domestic voucher or export for a foreign-trade one';
+    }
+}
+
+/**
+ * A shipment can only accompany goods.
+ *
+ * Entity-agnostic in a way the export block's other rules are not: it reads `concept`, which is this
+ * contract's own catalogue, rather than any authority code. A services export has nothing to ship, so a
+ * permit on one is a caller mistake in any jurisdiction.
+ *
+ * Lives here rather than on `InvoiceExportDto` because a class-level validator sees only the object it is
+ * attached to, and the two halves of the rule are on different objects: `concept` on the invoice, the
+ * permits inside `export`. From the export block the concept is unreadable.
+ */
+@ValidatorConstraint({name: 'invoicePermitsAccompanyGoods'})
+class InvoicePermitsAccompanyGoods implements ValidatorConstraintInterface {
+    validate(_value: unknown, args: ValidationArguments): boolean {
+        const {concept, export: exportBlock} = args.object as NeutralInvoiceDto;
+        if (exportBlock === undefined || concept === CONCEPT_GOODS) {
+            return true;
         }
-        if (!domestic && !foreign) {
-            return 'invoice names no buyer — send receiver for a domestic voucher or export for a foreign-trade one';
-        }
-        return domestic
-            ? 'a domestic voucher needs concept (1 goods, 2 services, 3 both)'
-            : 'an export voucher has no concept — its counterpart is export.exportType';
+        return (exportBlock.shippingPermits ?? []).length === 0 && exportBlock.shippingPermitPresent !== true;
+    }
+
+    defaultMessage(): string {
+        return (
+            'a voucher that is not for goods has nothing to ship, so export.shippingPermits and ' +
+            `export.shippingPermitPresent must be omitted — send concept ${String(CONCEPT_GOODS)} if this ` +
+            'voucher covers a shipment'
+        );
     }
 }
 
@@ -223,12 +243,16 @@ export class NeutralInvoiceDto {
     /**
      * Concept: 1 = goods, 2 = services, 3 = both.
      *
-     * Required for a domestic voucher and forbidden on an export, whose counterpart is `export.exportType`.
-     * `InvoiceNamesAReceiver` enforces which.
+     * Required on every voucher. Which of its four codes are valid depends on the document — an export
+     * cannot be `3` (goods and services) and a domestic voucher cannot be `4` (other) — and the provider
+     * refuses the one its service cannot express, since deciding that needs the authority's own
+     * voucher-type numbering.
+     *
+     * Also hosts `InvoicePermitsAccompanyGoods`, which needs both this and the `export` block to read.
      */
-    @IsOptional()
     @IsIn(NEUTRAL_INVOICE_CONCEPTS)
-    concept?: NeutralInvoiceConcept;
+    @Validate(InvoicePermitsAccompanyGoods)
+    concept!: NeutralInvoiceConcept;
 
     @IsInt()
     @IsPositive()

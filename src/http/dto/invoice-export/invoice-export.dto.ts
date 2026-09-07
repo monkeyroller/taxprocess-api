@@ -53,32 +53,6 @@ export class InvoiceShippingPermitDto {
 }
 
 /**
- * A shipment can only accompany goods.
- *
- * Entity-agnostic in a way the neighbouring rules are not: it reads `exportType`, which is this contract's
- * own vocabulary, rather than any authority code. A services export has nothing to ship, so a permit on one
- * is a caller mistake in any jurisdiction.
- */
-@ValidatorConstraint({name: 'exportPermitsAccompanyGoods'})
-class ExportPermitsAccompanyGoods implements ValidatorConstraintInterface {
-    validate(_value: unknown, args: ValidationArguments): boolean {
-        const {exportType, shippingPermits, shippingPermitPresent} = args.object as InvoiceExportDto;
-        if (exportType === 'GOODS') {
-            return true;
-        }
-        return (shippingPermits ?? []).length === 0 && shippingPermitPresent !== true;
-    }
-
-    defaultMessage(args: ValidationArguments): string {
-        const {exportType} = args.object as InvoiceExportDto;
-        return (
-            `a ${exportType} export has nothing to ship, so shippingPermits/shippingPermitPresent must be ` +
-            'omitted — send exportType "GOODS" if this voucher covers a shipment'
-        );
-    }
-}
-
-/**
  * The buyer has to be identifiable.
  *
  * The authority wants at least one of the two (AR: 1580), and neither can be made unconditionally required:
@@ -107,10 +81,6 @@ function present(value: unknown): boolean {
 }
 
 export class InvoiceExportDto {
-    /** What is being exported. Distinct from `concept`, which has a "both" this vocabulary lacks. */
-    @IsIn(['GOODS', 'SERVICES', 'OTHER'])
-    exportType!: 'GOODS' | 'SERVICES' | 'OTHER';
-
     /**
      * Where the voucher is destined, as the authority's own customs-destination code (AR: `Dst_cmp`).
      *
@@ -145,7 +115,6 @@ export class InvoiceExportDto {
     @IsString()
     @MinLength(1)
     @Length(1, 200)
-    @Validate(ExportPermitsAccompanyGoods)
     @Validate(ExportNamesTheBuyer)
     clientName!: string;
 

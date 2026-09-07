@@ -11,7 +11,8 @@ import {roundToTwo} from '../../sdk/invoicing/invoice-totals/invoice-totals.js';
 import {toCbteTipo} from '../code-maps/code-maps.js';
 import {toMonId} from '../currency-codes/currency-codes.js';
 import {toCountryTaxId, toDstCmp} from '../destination-codes/destination-codes.js';
-import {toIdiomaCbte, toIncoterms, toTipoExpo} from '../export-codes/export-codes.js';
+import {toIdiomaCbte, toIncoterms} from '../export-codes/export-codes.js';
+import {toTipoExpo} from '../concept-codes/concept-codes.js';
 import {
     UNIT_DISCOUNT,
     isUnitModeCode,
@@ -19,10 +20,12 @@ import {
 } from '../unit-of-measure-codes/unit-of-measure-codes.js';
 import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
-import type {
-    NeutralInvoice,
-    NeutralInvoiceExport,
-    NeutralInvoiceItem,
+import {
+    CONCEPT_GOODS,
+    type NeutralInvoice,
+    type NeutralInvoiceConcept,
+    type NeutralInvoiceExport,
+    type NeutralInvoiceItem,
 } from '../../../provider/neutral-invoice.js';
 import type {
     NeutralAuthorizationResultDto,
@@ -186,8 +189,9 @@ function toFexAssociated(invoice: NeutralInvoice): Array<FexAssociatedVoucher> |
 function permitPresence(
     block: NeutralInvoiceExport,
     voucherType: number,
+    concept: NeutralInvoiceConcept,
 ): 'S' | 'N' | undefined {
-    if (block.exportType !== 'GOODS' || voucherType !== INVOICE) {
+    if (concept !== CONCEPT_GOODS || voucherType !== INVOICE) {
         return undefined;
     }
     if (block.shippingPermitPresent === undefined) {
@@ -215,24 +219,27 @@ function assertLocalCurrencyRate(currencyId: string, currencyRate: number): void
 /**
  * The two fields a Factura requires depending on what it exports (1640, 1673).
  *
- * Both hinge on the voucher type being a Factura rather than a nota, which is ARCA's numbering. `GOODS`
- * moves under an incoterm; `SERVICES` and `OTHER` ship nothing and are dated instead by when they are paid.
- * A nota requires neither — and `paymentDate` on one is forbidden outright, which is handled where it is
- * built.
+ * Both hinge on the voucher type being a Factura rather than a nota, which is ARCA's numbering. Goods move
+ * under an incoterm; everything else ships nothing and is dated instead by when it is paid. A nota requires
+ * neither — and `paymentDate` on one is forbidden outright, which is handled where it is built.
  */
-function assertRequiredForInvoice(block: NeutralInvoiceExport, voucherType: number): void {
+function assertRequiredForInvoice(
+    block: NeutralInvoiceExport,
+    voucherType: number,
+    concept: NeutralInvoiceConcept,
+): void {
     if (voucherType !== INVOICE) {
         return;
     }
-    if (block.exportType === 'GOODS' && block.incoterm === undefined) {
+    if (concept === CONCEPT_GOODS && block.incoterm === undefined) {
         throw new ArcaValidationError(
-            'export.incoterm is required on an invoice for a GOODS export',
+            `export.incoterm is required on an invoice for goods (concept ${String(CONCEPT_GOODS)})`,
             'MISSING_INCOTERM',
         );
     }
-    if (block.exportType !== 'GOODS' && block.paymentDate === undefined) {
+    if (concept !== CONCEPT_GOODS && block.paymentDate === undefined) {
         throw new ArcaValidationError(
-            'export.paymentDate is required on an invoice for a ' + block.exportType + ' export',
+            `export.paymentDate is required on an invoice for concept ${String(concept)}, which is not goods`,
             'MISSING_PAYMENT_DATE',
         );
     }
@@ -286,7 +293,7 @@ export function buildFexInvoiceRequest(
     // which is the same set the export rate series is filtered against.
     const currencyId = toMonId(invoice.currencyCode, 'WSFEXV1');
     assertLocalCurrencyRate(currencyId, invoice.currencyRate);
-    assertRequiredForInvoice(block, voucherType);
+    assertRequiredForInvoice(block, voucherType, invoice.concept);
 
     const request: FexInvoiceRequest = {
         requestId,
@@ -294,8 +301,8 @@ export function buildFexInvoiceRequest(
         pointOfSaleNumber: invoice.pointOfSaleNumber,
         voucherNumber,
         voucherDate: formatArcaDate(parseAuthorityDate(invoice.issueDate, 'issueDate')),
-        exportType: toTipoExpo(block.exportType),
-        permitPresent: permitPresence(block, voucherType),
+        exportType: toTipoExpo(invoice.concept),
+        permitPresent: permitPresence(block, voucherType, invoice.concept),
         permits: toFexPermits(block, voucherType),
         destinationCode: toDstCmp(block.destinationCode),
         clientName: block.clientName,

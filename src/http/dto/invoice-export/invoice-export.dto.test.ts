@@ -6,7 +6,6 @@ import {InvoiceExportDto, InvoiceItemDto} from './invoice-export.dto.js';
 
 /** A valid services export block — the shape with the fewest conditional fields switched on. */
 const block = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
-    exportType: 'SERVICES',
     destinationCode: '203',
     clientName: 'Joao Da Silva',
     clientAddress: 'Rua 76 km 34.5 Alagoas',
@@ -29,7 +28,6 @@ describe('InvoiceExportDto', () => {
                 plainToInstance(
                     InvoiceExportDto,
                     block({
-                        exportType: 'GOODS',
                         shippingPermitPresent: true,
                         shippingPermits: [{permitId: '09052EC01006154G', destinationCode: '203'}],
                         incoterm: 'CIF',
@@ -62,25 +60,20 @@ describe('InvoiceExportDto', () => {
         });
     });
 
-    describe('a shipment can only accompany goods', () => {
-        it('refuses permits on a services export', async () => {
-            expect(
-                await messagesOf(block({shippingPermits: [{permitId: 'X', destinationCode: '203'}]})),
-            ).toContain('nothing to ship');
-        });
-
-        it('refuses shippingPermitPresent on a services export', async () => {
-            expect(await messagesOf(block({shippingPermitPresent: true}))).toContain('nothing to ship');
-        });
-
-        it('allows an explicit "no permit yet" on a goods export', async () => {
-            expect(await messagesOf(block({exportType: 'GOODS', shippingPermitPresent: false}))).toBe('[]');
-        });
+    it('says nothing about permits, which now need the invoice to judge', async () => {
+        // "A shipment can only accompany goods" reads `concept`, which lives on the invoice -- and a
+        // class-level validator sees only the object it is attached to. The rule moved to
+        // `NeutralInvoiceDto`, which is the only place both halves are visible; see its test.
+        expect(await messagesOf(block({shippingPermitPresent: true}))).toBe('[]');
+        expect(await messagesOf(block({shippingPermits: [{permitId: 'X', destinationCode: '203'}]}))).toBe(
+            '[]',
+        );
     });
 
     describe('closed vocabularies', () => {
-        it('refuses an unknown export type or language', async () => {
-            expect(await messagesOf(block({exportType: 'BOTH'}))).toContain('exportType');
+        it('refuses an unknown language', async () => {
+            // What was being exported used to be a closed set here too. It is now `invoice.concept`, one
+            // catalogue serving both document kinds.
             expect(await messagesOf(block({language: 'fr'}))).toContain('language');
         });
     });

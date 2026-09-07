@@ -11,7 +11,6 @@ import {
 function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
     return {
         documentTypeCode: 1,
-        concept: 1,
         pointOfSaleNumber: 1,
         voucherNumberFrom: 1,
         voucherNumberTo: 1,
@@ -21,6 +20,9 @@ function invoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
         issueDate: '2026-08-05',
         lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}],
         ...overrides,
+        // `...overrides` is a Partial, which would widen the now-required `concept` to include undefined.
+        // Only an explicit override replaces it; concepts are 1-4, so `??` never misfires.
+        concept: overrides.concept ?? 1,
     };
 }
 
@@ -122,6 +124,27 @@ describe('buildCommonInvoiceRequest', () => {
         expect(buildCommonInvoiceRequest(invoice({issueDate: '2026-07-12T01:00:00Z'}), 1).voucherDate).toBe(
             '20260711',
         );
+    });
+});
+
+describe('the concepts a domestic voucher can express', () => {
+    it('sends goods, services and both straight through as Concepto', () => {
+        expect(buildCommonInvoiceRequest(invoice({concept: 1}), 1).concept).toBe(1);
+        expect(buildCommonInvoiceRequest(invoice({concept: 2}), 1).concept).toBe(2);
+        expect(buildCommonInvoiceRequest(invoice({concept: 3}), 1).concept).toBe(3);
+    });
+
+    it('refuses the export-only concept, which WSFEv1 has no Concepto for', () => {
+        // The catalogue is one set across both documents, so a domestic body can now name a code its own
+        // service cannot express. Caught here rather than relayed as ARCA's Spanish rejection.
+        expect(() => buildCommonInvoiceRequest(invoice({concept: 4}), 1)).toThrow(/domestic voucher/);
+    });
+
+    it('asks for service dates for anything but goods, both included', () => {
+        // The rule is "not goods", not "services" -- concept 3 bills services too, so it needs the dates.
+        const dated = {serviceDateFrom: '2026-08-01', serviceDateTo: '2026-08-31', paymentDueDate: '2026-09-10'};
+        expect(buildCommonInvoiceRequest(invoice({concept: 3, ...dated}), 1).serviceDateFrom).toBe('20260801');
+        expect(buildCommonInvoiceRequest(invoice({concept: 1, ...dated}), 1).serviceDateFrom).toBeUndefined();
     });
 });
 

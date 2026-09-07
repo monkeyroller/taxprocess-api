@@ -202,17 +202,14 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
     // after idempotent recovery has had its chance.
     const issueDate = parseAuthorityDate(invoice.issueDate, 'issueDate');
 
-    // Both became optional on the neutral invoice when the export document joined it, since an export
-    // identifies its buyer by free text plus a destination and has no `Concepto` at all. On this path they
-    // are still required, and the DTO already refuses a payload carrying neither `receiver` nor `export` —
-    // so reaching either throw means an internal caller bypassed validation.
+    // `receiver` became optional on the neutral invoice when the export document joined it, an export
+    // identifying its buyer by free text plus a destination instead. On this path it is still required, and
+    // the DTO already refuses a payload carrying neither `receiver` nor `export` — so reaching this throw
+    // means an internal caller bypassed validation.
+    //
+    // `concept` needs no such guard: it is required on every voucher, both documents having to say what
+    // they bill. What narrows per document is which of its codes are valid, which `toConcepto` enforces.
     const {concept, receiver} = invoice;
-    if (concept === undefined) {
-        throw new ArcaValidationError(
-            'invoice names no concept — required for a domestic voucher',
-            'MISSING_CONCEPT',
-        );
-    }
     if (receiver === undefined) {
         throw new ArcaValidationError(
             'invoice names no receiver — required for a domestic voucher',

@@ -1,7 +1,12 @@
 import {describe, expect, it} from '@jest/globals';
 import {buildFexInvoiceRequest, toNeutralExportResult} from './export-invoice.mapper.js';
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import type {NeutralInvoice} from '../../../provider/neutral-invoice.js';
+import {
+    CONCEPT_GOODS,
+    CONCEPT_OTHER,
+    CONCEPT_SERVICES,
+    type NeutralInvoice,
+} from '../../../provider/neutral-invoice.js';
 import type {FexInvoiceResult} from '../../sdk/invoicing/export/fex-invoice.types.js';
 
 /** UC-2: an export of services, which is the shape with the fewest conditional fields switched on. */
@@ -13,12 +18,12 @@ const SERVICES: NeutralInvoice = {
     currencyCode: 'DOL',
     currencyRate: 1508,
     issueDate: '2026-09-04',
+    concept: CONCEPT_SERVICES,
     lines: [],
     items: [
         {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
     ],
     export: {
-        exportType: 'SERVICES',
         destinationCode: '203',
         clientName: 'Joao Da Silva',
         clientAddress: 'Rua 76 km 34.5 Alagoas',
@@ -34,8 +39,8 @@ const TIERRA_DEL_FUEGO: NeutralInvoice = {
     ...SERVICES,
     currencyCode: 'PES',
     currencyRate: 1,
+    concept: CONCEPT_GOODS,
     export: {
-        exportType: 'GOODS',
         destinationCode: '250',
         shippingPermitPresent: false,
         clientName: 'Electrónica Fueguina SA',
@@ -344,6 +349,23 @@ describe('the rules that need ARCA\'s own codes', () => {
         expect(() => buildFexInvoiceRequest({...SERVICES, currencyRate: 0.01}, 7, 41)).not.toThrow();
     });
 
+    it('refuses the one concept an export cannot express, and says what to do instead', () => {
+        // Goods-and-services has no Tipo_expo. A real situation rather than a typo, so the message has to
+        // leave the caller somewhere to go -- the DTO cannot catch it, deciding that type 19 means export
+        // being ARCA's own numbering.
+        expect(codeOf(() => buildFexInvoiceRequest({...SERVICES, concept: 3}, 7, 41))).toBe('UNKNOWN_CODE');
+        expect(() => buildFexInvoiceRequest({...SERVICES, concept: 3}, 7, 41)).toThrow(/separate vouchers/);
+    });
+
+    it('accepts the export-only concept, which ARCA numbers 4 rather than 3', () => {
+        const other: NeutralInvoice = {
+            ...SERVICES,
+            concept: CONCEPT_OTHER,
+            export: {...SERVICES.export!, paymentDate: '2026-09-30'},
+        };
+        expect(buildFexInvoiceRequest(other, 7, 41).exportType).toBe(4);
+    });
+
     it('requires an incoterm on an invoice for goods, and only there (1640)', () => {
         const noIncoterm = {
             ...TIERRA_DEL_FUEGO,
@@ -364,7 +386,7 @@ describe('the rules that need ARCA\'s own codes', () => {
         expect(
             codeOf(() =>
                 buildFexInvoiceRequest(
-                    {...unpaid, export: {...unpaid.export!, exportType: 'OTHER'}},
+                    {...unpaid, concept: CONCEPT_OTHER},
                     7,
                     41,
                 ),

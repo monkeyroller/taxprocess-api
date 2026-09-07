@@ -20,7 +20,7 @@ import {
     type ProviderFaultCategory,
 } from '../../provider/faults.js';
 import type {EntityAuthBlock} from '../../provider/entity-auth.js';
-import type {NeutralInvoice} from '../../provider/neutral-invoice.js';
+import {CONCEPT_SERVICES, type NeutralInvoice} from '../../provider/neutral-invoice.js';
 import type {DelegateCredentialStore} from '../auth/delegate-credentials/delegate-credentials.js';
 import {NeutralInvoiceDto} from '../../../http/dto/invoice.dto.js';
 import {NextNumbersRequestDto} from '../../../http/dto/invoice-request.dto.js';
@@ -2069,7 +2069,6 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
             lines: [],
             items: [{description: 'Consultoría', quantity: 1, unitOfMeasureCode: 7, unitPrice: 500, totalAmount: 500}],
             export: {
-                exportType: 'SERVICES',
                 destinationCode: '203',
                 clientName: 'Joao Da Silva',
                 clientAddress: 'Rua 76 km 34.5 Alagoas',
@@ -2079,6 +2078,9 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
                 paymentDate: '2026-08-31',
             },
             ...overrides,
+            // `...overrides` is a Partial, which would widen the now-required `concept` to include
+            // undefined. Only an explicit override replaces it; concepts are 1-4, so `??` never misfires.
+            concept: overrides.concept ?? CONCEPT_SERVICES,
         };
     }
 

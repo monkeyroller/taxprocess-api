@@ -96,8 +96,6 @@ export interface NeutralAssociatedVoucher {
  * and fiscal-condition triple.
  */
 export interface NeutralInvoiceExport {
-    /** What is being exported. Distinct from `concept`, which has a "both" this vocabulary lacks. */
-    readonly exportType: 'GOODS' | 'SERVICES' | 'OTHER';
     /**
      * Where the voucher is destined, as the authority's own customs-destination code (AR: `Dst_cmp`).
      *
@@ -163,18 +161,21 @@ export interface NeutralInvoiceTotals {
  * so widening this is what lets an export voucher — and, later, one with per-item detail — travel the same
  * endpoint as a domestic one.
  *
- * That widening makes two long-required fields conditional. `receiver` and `concept` describe a domestic
- * voucher and have no meaning on an export, which identifies its buyer by free text plus a destination and
- * replaces the concept with an export type. Exactly one of `receiver` and `export` is present, and the DTO
- * is where that is enforced.
+ * That widening makes one long-required field conditional: `receiver` describes a domestic voucher and has
+ * no meaning on an export, which identifies its buyer by free text plus a destination. Exactly one of
+ * `receiver` and `export` is present, and the DTO is where that is enforced.
+ *
+ * `concept` is *not* one of them. It says what the voucher bills, which every document has to answer, so it
+ * is required throughout — only the set of codes it may take narrows per document.
  */
 export interface NeutralInvoice {
     readonly documentTypeCode: number;
     /**
-     * What is being invoiced. Present for a domestic voucher and absent for an export, whose equivalent is
-     * `export.exportType` — a different vocabulary, not a renaming.
+     * What is being invoiced, on every voucher — see {@link NEUTRAL_INVOICE_CONCEPTS}. Which codes are
+     * valid depends on the document: an export cannot be `GOODS_AND_SERVICES` and a domestic voucher cannot
+     * be `OTHER`.
      */
-    readonly concept?: NeutralInvoiceConcept;
+    readonly concept: NeutralInvoiceConcept;
     readonly pointOfSaleNumber: number;
     /** AR: `CbteDesde`. Core owns the number; the service never computes it. */
     readonly voucherNumberFrom: number;
