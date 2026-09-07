@@ -37,8 +37,29 @@ This service **stores no secrets at rest** and **never makes core-initiated outb
 ```bash
 pnpm install
 cp .env.example .env
-pnpm dev          # hot-reload dev server (ts-node/esm)
+mkdir -p .secrets/arca/testing   # gitignored; see layout below
+pnpm dev                         # hot-reload dev server (ts-node/esm)
 ```
+
+### `.secrets/`
+
+Every local credential lives here, and nothing in it is committed. It is laid out
+`<entity>/<environment>/`, mirroring `src/providers/<entity>/` and the per-environment dispatch — so a
+second authority is a new sibling directory rather than a longer filename:
+
+```
+.secrets/
+├── arca/
+│   ├── production/       # delegate.crt + delegate.key — issued by CN=Computadores
+│   └── testing/          # delegate.crt + delegate.key — homologación ("Computadores Test")
+└── cache/                # arca-tickets.json — ARCA_TICKET_CACHE_PATH
+```
+
+`cache/` is separate on purpose: it is **derived** and safe to delete at any time (tickets are re-minted on
+demand), whereas a deleted certificate has to be re-issued by ARCA. It is also the one entry the `mkdir`
+above omits, because `ExpiringCache` creates it on first write — a certificate directory cannot be
+conjured that way, but a cache directory can, and having it created rather than required is what keeps a
+missed setup step from silently costing a ~12h stall per certificate.
 
 Verify:
 

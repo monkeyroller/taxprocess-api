@@ -303,6 +303,20 @@ describe('ExpiringCache — the on-disk format', () => {
         expect(fs.readdirSync(path.dirname(cachePath))).toEqual([path.basename(cachePath)]);
     });
 
+    it('creates a missing parent directory rather than silently degrading to memory', async () => {
+        // A configured path can name a directory nobody has created yet — a gitignored `.secrets/cache/` on
+        // a fresh checkout is the ordinary case. `writeFile` swallows the resulting ENOENT, so without the
+        // mkdir the cache stays in memory with nothing logged, and an authority that refuses to re-issue
+        // while the old credential lives then stalls every restart until it expires.
+        const cachePath = path.join(tmpPath('a'), 'b', 'c.json');
+        await makeCache({cachePath}).getOrCreate('owner', 'svc', async () => ({
+            token: 'TOK',
+            expirationTime: inAnHour(),
+        }));
+
+        expect(makeCache({cachePath}).peek('owner', 'svc')?.token).toBe('TOK');
+    });
+
     it('treats an unreadable or corrupt file as empty rather than throwing', () => {
         // Persistence is best-effort: a torn or hand-edited file degrades to a cache miss rather than
         // failing the call that touched it.

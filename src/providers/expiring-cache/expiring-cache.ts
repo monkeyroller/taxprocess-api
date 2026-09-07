@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * A cache of values that expire, keyed by `(owner, scope)`, optionally surviving process restarts.
@@ -173,6 +174,11 @@ export class ExpiringCache<V, S> {
     /**
      * Replaces the file atomically, via a per-pid temp file renamed over the target. Best-effort:
      * persistence failing degrades to in-memory and never fails the call that triggered it.
+     *
+     * The containing directory is created rather than required, because the degradation this catch swallows
+     * is invisible and expensive: a configured path whose parent does not exist yet silently leaves the
+     * cache in memory, and an authority that refuses to re-issue while a prior credential lives then stalls
+     * every restart until it expires. A cache file is derived data, so owning its directory costs nothing.
      */
     private writeFile(all: Record<string, S>): void {
         const cachePath = this.options.cachePath;
@@ -180,6 +186,7 @@ export class ExpiringCache<V, S> {
             return;
         }
         try {
+            fs.mkdirSync(path.dirname(cachePath), {recursive: true});
             const tmpPath = `${cachePath}.${process.pid}.tmp`;
             fs.writeFileSync(tmpPath, JSON.stringify(all, null, 2));
             fs.renameSync(tmpPath, cachePath);
