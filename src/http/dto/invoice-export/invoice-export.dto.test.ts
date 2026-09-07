@@ -40,7 +40,7 @@ describe('InvoiceExportDto', () => {
     it('accepts the Tierra del Fuego destination, which ISO cannot name', async () => {
         expect(
             await validate(
-                plainToInstance(InvoiceExportDto, block({exportType: 'GOODS', destinationCode: '250'})),
+                plainToInstance(InvoiceExportDto, block({destinationCode: '250'})),
             ),
         ).toEqual([]);
     });

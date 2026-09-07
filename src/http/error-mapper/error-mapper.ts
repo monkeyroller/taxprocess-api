@@ -61,7 +61,7 @@ function messageOf(err: unknown, fallback: string): string {
  * A class-validator `ValidationError` trimmed to the caller-safe fields. Drops `value` and `target`, which
  * hold the submitted data — credentials included — and must never echo back in an error body.
  */
-interface ValidationSummary {
+export interface ValidationSummary {
     readonly property: string;
     readonly constraints?: Record<string, string>;
     readonly children?: ReadonlyArray<ValidationSummary>;

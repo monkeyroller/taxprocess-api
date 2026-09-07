@@ -103,7 +103,7 @@ convention creates.
 
 ```
 src/
-├── index.ts               # bootstrap (Express 5 + routing-controllers)
+├── index.ts               # bootstrap: the boot-time guards, then listen
 ├── config/env.ts          # typed, frozen env (no secrets, no master key)
 ├── providers/
 │   ├── provider/          # the neutral contract, one file per concern
@@ -154,6 +154,7 @@ src/
 │       │   └── indec/                  # the vendored INDEC catalog + the folding applied to it
 │       └── sdk/           # copied ARCA SDK (WSAA + WSFEv1 + WSFEXv1 + padrón)
 └── http/                  # controllers + DTOs (neutral contract)
+    ├── app.ts             # the Express 5 + routing-controllers wiring, assembled apart from listening
     ├── dto/               # one module per request body and per result family
     │   └── authority-date/     # which date FORMS the contract accepts (shape only — no zone, no entity)
     └── error-mapper/      # neutral fault category → HTTP status + envelope
