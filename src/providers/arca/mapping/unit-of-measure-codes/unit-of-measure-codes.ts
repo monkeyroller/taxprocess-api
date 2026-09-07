@@ -26,23 +26,35 @@ import {UNIT_OF_MEASURE_NAMES} from './unit-of-measure-codes.data.js';
 /** Every unit of measure the authority publishes, code → its own wording (`0` has none). */
 export const UNITS_OF_MEASURE: ReadonlyMap<string, string> = new Map(UNIT_OF_MEASURE_NAMES);
 
-/** No unit: quantity, unit price and discount must be zero or absent (1775). */
-export const UNIT_NONE = 0;
+/**
+ * The three ids that are line *modes* rather than units. A caller sending one of these is describing the
+ * kind of line, and the item's amounts are validated by a different rule as a result.
+ *
+ * A `const` object rather than three loose constants, following `Concept` and `ServiceId`: it gives the
+ * three a name as a group, and {@link UnitMode} below is what turns `isUnitModeCode` into a type guard so a
+ * caller that has narrowed cannot then compare against an ordinary unit id.
+ */
+export const UnitMode = {
+    /** No unit: quantity, unit price and discount must be zero or absent (1775). */
+    NONE: 0,
+    /** `seña/anticipo` — a deposit line, whose total may be negative (1815). */
+    DEPOSIT: 97,
+    /** `bonificación` — a discount line, whose total must be negative (1815). */
+    DISCOUNT: 99,
+} as const;
 
-/** `seña/anticipo` — a deposit line, whose total may be negative (1815). */
-export const UNIT_DEPOSIT = 97;
+export type UnitMode = (typeof UnitMode)[keyof typeof UnitMode];
 
-/** `bonificación` — a discount line, whose total must be negative (1815). */
-export const UNIT_DISCOUNT = 99;
+/** Derived, so the set cannot fall behind the three named above. */
+export const UNIT_MODE_CODES: ReadonlySet<number> = new Set(Object.values(UnitMode));
 
 /**
- * The ids that are line modes rather than units. A caller sending one of these is describing the *kind* of
- * line, and the item's amounts are validated by a different rule as a result.
+ * Whether `unitOfMeasureCode` is one of the three modes rather than a real unit.
+ *
+ * A type guard rather than a `boolean`, which is what the grouping above buys: inside the branch the value
+ * is one of the three, so comparing it against an ordinary unit id stops compiling.
  */
-export const UNIT_MODE_CODES: ReadonlySet<number> = new Set([UNIT_NONE, UNIT_DEPOSIT, UNIT_DISCOUNT]);
-
-/** Whether `unitOfMeasureCode` is one of the three modes rather than a real unit. */
-export function isUnitModeCode(unitOfMeasureCode: number): boolean {
+export function isUnitModeCode(unitOfMeasureCode: number): unitOfMeasureCode is UnitMode {
     return UNIT_MODE_CODES.has(unitOfMeasureCode);
 }
 

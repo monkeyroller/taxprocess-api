@@ -13,11 +13,7 @@ import {toMonId} from '../currency-codes/currency-codes.js';
 import {toCountryTaxId, toDstCmp} from '../destination-codes/destination-codes.js';
 import {toIdiomaCbte, toIncoterms} from '../export-codes/export-codes.js';
 import {toTipoExpo} from '../concept-codes/concept-codes.js';
-import {
-    UNIT_DISCOUNT,
-    isUnitModeCode,
-    toProUmed,
-} from '../unit-of-measure-codes/unit-of-measure-codes.js';
+import {UnitMode, isUnitModeCode, toProUmed} from '../unit-of-measure-codes/unit-of-measure-codes.js';
 import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
 import {
@@ -125,10 +121,10 @@ function assertItemAmounts(item: NeutralInvoiceItem, index: number): void {
         }
     }
     // A discount subtracts, so its total is negative. A deposit is unrestricted and may be either (1815).
-    if (item.unitOfMeasureCode === UNIT_DISCOUNT && item.totalAmount >= 0) {
+    if (item.unitOfMeasureCode === UnitMode.DISCOUNT && item.totalAmount >= 0) {
         throw new ArcaValidationError(
             at + '.totalAmount must be negative on a discount line (unitOfMeasureCode ' +
-                String(UNIT_DISCOUNT) + ')',
+                String(UnitMode.DISCOUNT) + ')',
             'INVALID_ITEM_AMOUNT',
         );
     }

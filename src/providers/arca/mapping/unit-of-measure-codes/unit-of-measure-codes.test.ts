@@ -1,9 +1,8 @@
 import {describe, expect, it} from '@jest/globals';
 import {
     UNITS_OF_MEASURE,
-    UNIT_DEPOSIT,
-    UNIT_DISCOUNT,
-    UNIT_NONE,
+    UNIT_MODE_CODES,
+    UnitMode,
     isKnownUnitOfMeasureCode,
     isUnitModeCode,
     toProUmed,
@@ -20,14 +19,14 @@ describe('UNITS_OF_MEASURE', () => {
 
 describe('the three ids that are not units', () => {
     it('names them by what they mean, in ARCA\'s own wording', () => {
-        expect(UNITS_OF_MEASURE.get(String(UNIT_DEPOSIT))).toBe('seña/anticipo');
-        expect(UNITS_OF_MEASURE.get(String(UNIT_DISCOUNT))).toBe('bonificación');
+        expect(UNITS_OF_MEASURE.get(String(UnitMode.DEPOSIT))).toBe('seña/anticipo');
+        expect(UNITS_OF_MEASURE.get(String(UnitMode.DISCOUNT))).toBe('bonificación');
         // `0` genuinely has no description in ARCA's table -- it is the "no unit" marker.
-        expect(UNITS_OF_MEASURE.get(String(UNIT_NONE))).toBe('');
+        expect(UNITS_OF_MEASURE.get(String(UnitMode.NONE))).toBe('');
     });
 
     it('reports them as modes rather than units', () => {
-        expect([UNIT_NONE, UNIT_DEPOSIT, UNIT_DISCOUNT].every(isUnitModeCode)).toBe(true);
+        expect([UnitMode.NONE, UnitMode.DEPOSIT, UnitMode.DISCOUNT].every(isUnitModeCode)).toBe(true);
     });
 
     it('does not include 98, which is an ordinary escape hatch', () => {
@@ -35,12 +34,28 @@ describe('the three ids that are not units', () => {
         expect(UNITS_OF_MEASURE.get('98')).toBe('otras unidades');
         expect(isUnitModeCode(98)).toBe(false);
     });
+
+    it('derives its set from the three named members, so the two cannot drift', () => {
+        expect([...UNIT_MODE_CODES].sort((a, b) => a - b)).toEqual([0, 97, 99]);
+        expect(UNIT_MODE_CODES).toEqual(new Set(Object.values(UnitMode)));
+    });
+
+    it('narrows to the three modes, which is what the guard buys over a boolean', () => {
+        // Inside the branch the value is one of the three, so a comparison against an ordinary unit id
+        // stops compiling. Asserted through @ts-expect-error, which fails the build if it ever compiles.
+        const code: number = 99;
+        if (isUnitModeCode(code)) {
+            // @ts-expect-error 7 is a real unit (unidades), so it can never equal a narrowed mode.
+            expect(code === 7).toBe(false);
+            expect(code === UnitMode.DISCOUNT).toBe(true);
+        }
+    });
 });
 
 describe('toProUmed', () => {
     it('is the identity for a known code', () => {
         expect(toProUmed(7)).toBe(7);
-        expect(toProUmed(UNIT_DISCOUNT)).toBe(99);
+        expect(toProUmed(UnitMode.DISCOUNT)).toBe(99);
     });
 
     it('refuses a code the authority does not publish', () => {
