@@ -83,7 +83,7 @@ The ARCA-specific codes/terms live only inside the provider; the wire never carr
 | `entity.environment` | generic environment selector | `"testing"`→homologación, `"production"`→producción |
 | `entity.credentials.certPem/keyPem` | issuer certificate + private key (on the re-send only) | the WSAA login cert/key |
 | `invoice.documentTypeCode` | document/voucher type (canonical code) | **CbteTipo** (Factura A=1, B=6, C=11, M=51, FCE A=201…) |
-| `invoice.concept` | goods / services / both | **Concepto** (1 / 2 / 3) |
+| `invoice.concept` | what the voucher bills — see §5 | **Concepto** (1/2/3) or **Tipo_expo** (1/2/4) |
 | `invoice.pointOfSaleNumber` | point of sale | **PtoVta** |
 | `invoice.receiver.identificationTypeCode` | receiver's id-document type (canonical code) | **DocTipo** (80=CUIT, 96=DNI, 99=consumidor final) |
 | `invoice.receiver.identificationNumber` | receiver's id number (string; `"0"` = anonymous) | **DocNro** |
@@ -217,7 +217,7 @@ Request:
   "entity": { "entityCode":"ARCA", "issuerTaxId":"20123456789", "environment":"testing" },
   "invoice": {
     "documentTypeCode": 1,            // canonical code → this service maps to CbteTipo
-    "concept": 1,                     // 1=goods, 2=services, 3=both
+    "concept": 1,                     // §5: 1 goods, 2 services, 3 both, 4 other (3 domestic-only)
     "pointOfSaleNumber": 1,            // PtoVta
     "voucherNumberFrom": 42,          // CbteDesde — core owns the number (see below)
     "voucherNumberTo": 42,            // CbteHasta — single-voucher flow: equals voucherNumberFrom
@@ -317,13 +317,13 @@ vocabulary internal, and §7 already specifies the web service as per-entity con
 `/export-invoices` route, and *factura electrónica con detalle* will later be a third branch inside the
 provider rather than a third endpoint.
 
-What makes a voucher an export is the presence of `invoice.export`. Exactly one of `receiver` and `export` is
-sent — never both, never neither — and `concept` travels only with `receiver`:
+What makes a voucher an export is the presence of `invoice.export`. Exactly one of `receiver` and `export`
+is sent — never both, never neither. **`concept` is sent on both**, one catalogue for either document:
 
 | | domestic voucher | export voucher |
 | --- | --- | --- |
 | buyer | `receiver` (id type + number + fiscal condition) | `export` (name, address, destination) |
-| what is invoiced | `concept` (1/2/3) | `export.exportType` (`GOODS`/`SERVICES`/`OTHER`) |
+| what is invoiced | `concept` — `1`/`2`/`3` | `concept` — `1`/`2`/`4` |
 | money | `lines` (tax subtotals) + `totals` | `items` (per-product detail); `lines: []` |
 | idempotency | the voucher number | the voucher number — **identical**, see below |
 | QR | RG 4892 | none — the RG specifies a domestic payload |
@@ -334,6 +334,7 @@ Request:
   "entity": { "entityCode":"ARCA", "issuerTaxId":"20123456789", "environment":"testing" },
   "invoice": {
     "documentTypeCode": 19,           // 19 Factura E, 20 Nota de Débito, 21 Nota de Crédito
+    "concept": 2,                     // §5; an export may not be 3 (goods and services)
     "pointOfSaleNumber": 3,           // must be of the EXPORT register — see /points-of-sale
     "voucherNumberFrom": 7,
     "voucherNumberTo": 7,
@@ -351,14 +352,13 @@ Request:
       }
     ],
     "export": {
-      "exportType": "SERVICES",             // GOODS | SERVICES | OTHER
       "destinationCode": "203",             // canonical code (§5); "250" is the Tierra del Fuego AAE
       "clientName": "Joao Da Silva",
       "clientAddress": "Rua 76 km 34.5 Alagoas",
       "clientTaxId": "PJ54482221-l",        // the buyer's own tax id in its own country
       "language": "es",                     // ISO 639-1: es | en | pt
       "paymentTerms": "Contado",
-      "paymentDate": "2026-09-30"           // required for a SERVICES/OTHER invoice
+      "paymentDate": "2026-09-30"           // required unless concept is 1 (goods)
     }
   }
 }
@@ -416,8 +416,8 @@ Many of the authority's own conditional rules are enforced by this service and r
 | a `webService` contradicting `documentTypeCode` | `WEB_SERVICE_DOCUMENT_TYPE_MISMATCH` |
 | neither `clientTaxId` nor `clientCountryTaxId` | a `400` from the request body itself |
 | `currencyRate` other than exactly `1` on a peso voucher | `CURRENCY_RATE_MISMATCH` |
-| no `incoterm` on an invoice for `GOODS` | `MISSING_INCOTERM` |
-| no `paymentDate` on an invoice for `SERVICES`/`OTHER` | `MISSING_PAYMENT_DATE` |
+| no `incoterm` on an invoice for goods (`concept` `1`) | `MISSING_INCOTERM` |
+| no `paymentDate` on an invoice whose `concept` is not goods | `MISSING_PAYMENT_DATE` |
 | `shippingPermits` on a debit or credit note | `SHIPPING_PERMIT_NOT_ALLOWED` |
 | an item whose `unitOfMeasureCode` is a mode carrying a quantity, price or discount; or a discount line whose total is not negative | `INVALID_ITEM_AMOUNT` |
 
@@ -1040,7 +1040,6 @@ where the three translations are the identity — canonical code == ARCA code).
 | `invoice.items[]` | per product line: description, quantity, unit, price | `Items[]` (export) |
 | `invoice.items[].unitOfMeasureCode` | *new catalogue* — see below | `Pro_umed` (identity) |
 | `invoice.export.destinationCode` | *new catalogue* — see below | `Dst_cmp` (identity) |
-| `invoice.export.exportType` | neutral enum | `Tipo_expo` |
 | `invoice.export.language` | ISO 639-1 | `Idioma_cbte` |
 | `invoice.export.incoterm` | ICC Incoterms 2020 | `Incoterms` (identity) |
 | `invoice.webService` | `configuration.webService` (§7) | selects the web service — **not** sent to ARCA |
@@ -1343,20 +1342,55 @@ Each row carries the authority's two columns plus two of ours, which is what a p
 mislabels two of its own catch-alls: `PARA PERSONAS FISICAS DE …` rows also exist under the
 `Persona Jurídica` suffix. The suffix is transcribed as published, because the name is not evidence.
 
-### Export type, language, incoterm: neutral closed sets
+### `concept`: what the voucher bills, and the one catalogue whose valid set narrows
 
-The three export fields where a standard *does* cover the whole domain, so they travel neutral and this
-service maps them. All verified against production 2026-09-04.
+`invoice.concept` → ARCA `Concepto` on a domestic voucher, `Tipo_expo` on an export. **Four codes**, and
+**required on every voucher** — both documents have to say what they bill.
+
+Deliberately *not* numbered among the canonical fiscal codes above, though it is a numeric catalogue. Those
+four carry the *authority's* own codes because no standard could express them; these four are **this
+contract's**, and the fact that both ARCA mappings come out as the identity is a coincidence of its
+numbering rather than something a caller should rely on.
+
+| code | meaning | domestic | export |
+| --- | --- | --- | --- |
+| `1` | goods | ✓ `Concepto` 1 | ✓ `Tipo_expo` 1 |
+| `2` | services | ✓ `Concepto` 2 | ✓ `Tipo_expo` 2 |
+| `3` | goods **and** services | ✓ `Concepto` 3 | ✗ `400` |
+| `4` | other | ✗ `400` | ✓ `Tipo_expo` 4 |
+
+This is the only catalogue in this section whose accepted set depends on the document, and the reason is the
+authorities': ARCA's `Concepto` has no code for "other" and its `Tipo_expo` has none for "goods and
+services" — its numbering skips 3 outright. Sending a code the document cannot express is
+`400 ARCA_VALIDATION`, `details.code: "UNKNOWN_CODE"`, with a message naming which.
+
+> An export that genuinely covers **both** goods and services has no code. That is ARCA's limit, not this
+> service's: issue separate vouchers, or name the dominant one.
+
+**The numbers are ours**, not an authority's, even where they coincide — for ARCA both mappings happen to be
+the identity, which is a fact about its numbering rather than a rule. A future entity maps these four to
+whatever it uses, exactly as it would its own currency codes.
+
+**What it moves.** Worth knowing before choosing, because the code changes which other fields are required:
+
+| | `1` goods | anything else |
+| --- | --- | --- |
+| domestic | `issueDate` within ±5 authority days (§3) | `serviceDateFrom`/`serviceDateTo`/`paymentDueDate` |
+| export | `export.incoterm` required; `export.shippingPermits` allowed | `export.paymentDate` required; permits refused |
+
+On ARCA, `1` additionally requires the issuer to be in the DGA exporter registry (rule 1668) for an export,
+which `2` and `4` skip. This service chooses none of that — the caller states what it is billing and the
+consequences follow.
+
+### Language and incoterm: neutral closed sets
+
+The two export fields where a standard *does* cover the whole domain, so they travel neutral and this
+service maps them. Both verified against production 2026-09-04.
 
 | field | values | ARCA target |
 | --- | --- | --- |
-| `export.exportType` | `GOODS`, `SERVICES`, `OTHER` | `Tipo_expo` 1, 2, 4 — note ARCA skips 3 |
 | `export.language` | `es`, `en`, `pt` (ISO 639-1) | `Idioma_cbte` 1, 2, 3 |
 | `export.incoterm` | the 11 ICC Incoterms 2020 clauses | `Incoterms` (identity) |
-
-`exportType` is deliberately **not** `concept`. `concept` is 1 goods / 2 services / **3 both**;
-`exportType` has an **`OTHER`** and no "both". Each has a member the other lacks, so they are separate
-vocabularies and sending both is a `400`.
 
 The incoterms ARCA publishes are exactly **EXW, FCA, FAS, FOB, CFR, CIF, CPT, CIP, DAP, DPU, DDP** — the
 Incoterms 2020 set, and **none of the legacy clauses** (no DAT, DAF, DES, DEQ or DDU). A clause outside that

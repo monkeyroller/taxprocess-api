@@ -6,6 +6,70 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-07 — One field says what a voucher bills, domestic or export
+
+Branch `feature/export-invoice`. `invoice.concept` now covers both documents and
+`invoice.export.exportType` is gone. **Additive for every existing caller**: `1`/`2`/`3` keep their
+meanings on a domestic voucher and nothing you send today changes.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 20.1 | `invoice.concept` gains a fourth code, `4` (other), and is **required on every voucher** including an export | **Send it on exports.** Domestic bodies are unaffected |
+| 20.2 | ~~`invoice.export.exportType`~~ — **removed**. Say it with `concept` instead | Stop sending it — it is now a `400` as an unknown field |
+| 20.3 | `concept` `3` is refused on an export, `4` on a domestic voucher | Nothing, unless you had planned to send them |
+
+### The catalogue
+
+| code | meaning | domestic | export |
+| --- | --- | --- | --- |
+| `1` | goods | ✓ | ✓ |
+| `2` | services | ✓ | ✓ |
+| `3` | goods **and** services | ✓ | ✗ `400` |
+| `4` | other | ✗ `400` | ✓ |
+
+### Why it unified, having been argued the other way
+
+An earlier draft of entry 18 said the two vocabularies were irreconcilable, because ARCA numbers its export
+"otros" **4** and skips 3. That is true of a three-member set and wrong about a four-member one: the gap at
+3 is exactly the slot the export-only code occupies, so a single four-code catalogue maps to *both*
+authority fields by identity. The facts were right; the conclusion was not.
+
+What made it worth doing rather than merely possible is that the rules line up. Both services split the same
+way, and the split is what the code moves:
+
+| | `1` goods | anything else |
+| --- | --- | --- |
+| domestic | `issueDate` within ±5 authority days | `serviceDateFrom`/`serviceDateTo`/`paymentDueDate` required |
+| export | `export.incoterm` required; permits allowed | `export.paymentDate` required; permits refused |
+
+"Goods are shipped on a date; everything else is rendered over a period and needs payment dating." One
+distinction, so one field for it.
+
+### Two consequences worth reading
+
+**`concept` is required rather than conditional.** It used to be forbidden on an export and mandatory on a
+domestic voucher, which the service checked together with the buyer block. That coupling is gone: both
+documents have to say what they bill, and only which codes are valid narrows.
+
+**The refusal is the provider's, not the request schema's.** A body naming `concept: 3` on document type 19
+is well-formed; the `400` names it as a code that document cannot express. Deciding *which* document a type
+code names is the authority's own numbering, which §9 keeps inside the provider — so the shape check and the
+meaning check land in different places, and only the second can tell you why.
+
+> The numbers are **ours**. Both ARCA mappings being the identity is a fact about its numbering, not a rule:
+> a future entity maps these four to whatever it uses, as it would its own currency codes.
+
+### What did NOT change
+
+- **Every domestic call.** `1`, `2` and `3` mean what they meant and map where they mapped.
+- The `±5-day` `issueDate` window, still keyed on goods; the service-date fields, still required for
+  anything else.
+- `export.language` and `export.incoterm`, the other two neutral export enums.
+- The rules `exportType` used to drive. They all survive, keyed on `concept` instead — including that a
+  shipping permit may only accompany goods, which now reads the invoice rather than the export block.
+
+---
+
 ## 2026-09-06 — The export idempotency key is withdrawn: 18.1 is no longer yours to build
 
 Branch `feature/export-invoice`. **If you have not started on 18.1, stop here — there is nothing to do.**
@@ -100,7 +164,7 @@ endpoint.
 | 18.1 | ~~`invoice.requestId`~~ — **withdrawn by the 2026-09-06 entry above.** This service generates the key | **None.** Do not build the sequence this row asked for |
 | 18.2 | `invoice.export` — the foreign-trade block. Its presence makes the voucher an export and selects the service | **Send it** for document types 19/20/21 |
 | 18.3 | `invoice.items` — per-product detail. **Not** `invoice.lines`, which stays the tax subtotal | **Send it** on an export (`lines: []`); it is also what `WSMTXCA` will need |
-| 18.4 | `invoice.receiver` and `invoice.concept` are now conditional: exactly one of `receiver` / `export`, and `concept` travels only with `receiver` | **None** for domestic vouchers — unchanged. Do not send `concept` with `export` |
+| 18.4 | `invoice.receiver` is now conditional: exactly one of `receiver` / `export`. (`concept` was conditional too — **the 2026-09-07 entry above makes it universal**) | **None** for domestic vouchers — unchanged |
 | 18.5 | `invoice.webService` — the entity's `configuration.webService`. Optional; omitted means WSFEv1 | Send it once you have somewhere to read it from. A value contradicting `documentTypeCode` is a `400` |
 | 18.6 | ~~`reprocessed`~~ — **withdrawn by the 2026-09-06 entry above** | **None** |
 | 18.7 | ~~`POST /invoices/last-request-id`~~ — **withdrawn by the 2026-09-06 entry above**; the route is gone | **None** |
@@ -108,7 +172,7 @@ endpoint.
 | 18.9 | 🟡 `POST /currencies/rates` gains an optional `webService`, and the answer now always carries one | **Send it, and key your rate cache by it** — see below |
 | 18.10 | **`destinationCode`** — a fifth canonical fiscal code (ARCA `Dst_cmp`), 310 values | **Seed it.** `250` is the Tierra del Fuego AAE |
 | 18.11 | **`unitOfMeasureCode`** — a sixth canonical fiscal code (ARCA `Pro_umed`), 49 values, three of which are **not units** | **Seed it**, and read the note on `0`/`97`/`99` |
-| 18.12 | `exportType`, `language`, `incoterm` — neutral, closed sets | **None** beyond using them |
+| 18.12 | `language`, `incoterm` — neutral, closed sets. (`exportType` was one too — **withdrawn by the 2026-09-07 entry above**) | **None** beyond using them |
 | 18.14 | **`clientCountryTaxId`** — a seventh canonical fiscal code (ARCA `Cuit_pais_cliente`), 917 values, each with a country and an entity type | **Seed it.** It is how a buyer with no Argentine id is named |
 | 18.15 | Five of the authority's conditional rules now answer `400` with a named `details.code` instead of a Spanish `502` | **None** — a body that was valid stays valid. Read the codes if you surface errors |
 | 18.13 | `WSMTXCA` answers `501 NOT_IMPLEMENTED` | Do not send it yet. It is in §7's enum, so you *can* — it will not silently fall back |
@@ -175,12 +239,20 @@ amount rules apply:
 name. A neutral `unitOfMeasure: "KG"` cannot say "this line is a global discount", which is why the code
 travels rather than a name.
 
-### 18.4 — why `concept` and `exportType` are not the same field
+### 18.4 — why `concept` and `exportType` are not the same field — ⚠️ SUPERSEDED, and it was wrong
+
+> **Reversed on 2026-09-07 (entry above). They are now one field.** Kept because the reasoning is
+> instructive about how it went wrong.
 
 They look interchangeable and are not. `concept` is 1 goods / 2 services / **3 both**; `exportType` is
 `GOODS` / `SERVICES` / **`OTHER`**. Each has a member the other lacks — ARCA's own `Tipo_expo` numbering
 skips 3 — so unifying them would make two unrelated vocabularies assignable right up until one gained a
 member. Sending both is a `400` rather than a resolution.
+
+> Where that argument failed: it is sound for a *three*-member set and says nothing about a four-member
+> one. Take the union and ARCA's gap at 3 stops being an obstacle — it is precisely the slot the export-only
+> code occupies, and both mappings come out as the identity. The facts above are all correct; only the
+> conclusion was.
 
 ### 18.15 — five rules that used to reach ARCA now answer as a `400`
 
@@ -191,8 +263,8 @@ turning down, in Spanish, without saying which field it meant.
 | refused | `details.code` |
 | --- | --- |
 | `currencyRate` other than exactly `1` on a peso voucher | `CURRENCY_RATE_MISMATCH` |
-| no `incoterm` on an invoice for `GOODS` | `MISSING_INCOTERM` |
-| no `paymentDate` on an invoice for `SERVICES`/`OTHER` | `MISSING_PAYMENT_DATE` |
+| no `incoterm` on an invoice for goods (`concept` `1`) | `MISSING_INCOTERM` |
+| no `paymentDate` on an invoice whose `concept` is not goods | `MISSING_PAYMENT_DATE` |
 | `shippingPermits` on a debit or credit note | `SHIPPING_PERMIT_NOT_ALLOWED` |
 | a mode line (`unitOfMeasureCode` `0`/`97`/`99`) carrying a quantity, price or discount; a `99` line whose total is not negative | `INVALID_ITEM_AMOUNT` |
 
