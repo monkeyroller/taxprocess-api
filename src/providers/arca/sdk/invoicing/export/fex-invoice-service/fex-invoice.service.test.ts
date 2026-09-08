@@ -338,23 +338,6 @@ describe('FexInvoiceService.getLastRequestId (FEXGetLast_ID)', () => {
     });
 });
 
-describe('FexInvoiceService.checkShippingPermit (FEXCheck_Permiso)', () => {
-    it('treats only an explicit OK as verified', async () => {
-        const ok = serviceReturning({FEXCheck_PermisoResult: {FEXResultGet: {Status: 'OK'}}});
-        const no = serviceReturning({FEXCheck_PermisoResult: {FEXResultGet: {Status: 'NO'}}});
-        const silent = serviceReturning({FEXCheck_PermisoResult: {FEXResultGet: {}}});
-
-        expect(await ok.service.checkShippingPermit(AUTH, '09052EC01006154G', 203)).toBe(true);
-        expect(await no.service.checkShippingPermit(AUTH, '09052EC01006154G', 203)).toBe(false);
-        expect(await silent.service.checkShippingPermit(AUTH, '09052EC01006154G', 203)).toBe(false);
-        expect(ok.lastCall.payload).toEqual({
-            Auth: {Token: 'T', Sign: 'S', Cuit: 20111111112},
-            ID_Permiso: '09052EC01006154G',
-            Dst_merc: 203,
-        });
-    });
-});
-
 describe('FexInvoiceService.getCurrencyRatesForDay (FEXGetPARAM_MON_CON_COTIZACION)', () => {
     it('prices the whole table in one call, normalizing the one date ARCA slashes', async () => {
         const {service, lastCall} = serviceReturning({

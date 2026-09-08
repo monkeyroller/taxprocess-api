@@ -285,6 +285,10 @@ export class FexInvoiceService extends InvoiceWebService<FexInvoiceRequest, FexI
      * than a differently-spelled version of something shared. It is how a caller seeds or recovers the
      * sequence after losing track of it — the only way back from a timeout, since a reused `Id` returns the
      * old voucher rather than an error.
+     *
+     * Reached from `scripts/probe-wsfex-smoke.ts`, not from a request path: the id is generated per request
+     * (`nextRequestId`) and never tracked, so this is the *external confirmation* that the generator has not
+     * repeated — which is what the `reprocessed` warning in `ArcaProvider.exportRoute` sends operators to.
      */
     async getLastRequestId(auth: ArcaAuth): Promise<number> {
         const result = await this.invoke('FEXGetLast_ID', {Auth: authElement(auth)});
@@ -298,27 +302,6 @@ export class FexInvoiceService extends InvoiceWebService<FexInvoiceRequest, FexI
             );
         }
         return id;
-    }
-
-    /**
-     * Whether the customs database holds this permit for this destination (`FEXCheck_Permiso`).
-     *
-     * Advisory: it lets a caller reject a bad `Id_permiso`/`Dst_merc` pair before spending a voucher number
-     * on a 1740. ARCA answers `"OK"` or `"NO"`, and anything else is treated as "not verified" rather than
-     * as a pass.
-     */
-    async checkShippingPermit(
-        auth: ArcaAuth,
-        permitId: string,
-        destinationCode: number,
-    ): Promise<boolean> {
-        const result = await this.invoke('FEXCheck_Permiso', {
-            Auth: authElement(auth),
-            ID_Permiso: permitId,
-            Dst_merc: destinationCode,
-        });
-        const info = (result.FEXResultGet ?? {}) as Record<string, unknown>;
-        return text(info.Status)?.toUpperCase() === 'OK';
     }
 
     /**

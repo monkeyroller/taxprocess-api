@@ -1,5 +1,5 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {formatArcaDate, parseArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
+import {formatArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
 import type {
     FexAssociatedVoucher,
     FexInvoiceRequest,
@@ -14,7 +14,7 @@ import {toCountryTaxId, toDstCmp} from '../destination-codes/destination-codes.j
 import {toIdiomaCbte, toIncoterms} from '../export-codes/export-codes.js';
 import {toTipoExpo} from '../concept-codes/concept-codes.js';
 import {UnitMode, isUnitModeCode, toProUmed} from '../unit-of-measure-codes/unit-of-measure-codes.js';
-import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
+import {parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
 import {
     Concept,
@@ -23,10 +23,8 @@ import {
     type NeutralInvoiceExport,
     type NeutralInvoiceItem,
 } from '../../../provider/neutral-invoice.js';
-import type {
-    NeutralAuthorizationResultDto,
-    NeutralAuthorizationStatus,
-} from '../../../../http/dto/authorization-result.dto.js';
+import {toNeutralAuthorizationResult} from '../authority-result.js';
+import type {NeutralAuthorizationResultDto} from '../../../../http/dto/authorization-result.dto.js';
 
 /**
  * Argentina-specific translation from the neutral invoice to the WSFEXv1 request, and back from its result.
@@ -255,7 +253,7 @@ function settlementFlag(
     if (block.settledInInvoiceCurrency === undefined) {
         return undefined;
     }
-    if (voucherType !== INVOICE || currencyId === 'PES') {
+    if (voucherType !== INVOICE || currencyId === LOCAL_CURRENCY) {
         return undefined;
     }
     return block.settledInInvoiceCurrency ? 'S' : 'N';
@@ -348,13 +346,6 @@ function totalOf(invoice: NeutralInvoice): number {
     return roundToTwo(items.reduce((sum, item) => sum + item.totalAmount, 0));
 }
 
-function statusOf(result: FexInvoiceResult['result']): NeutralAuthorizationStatus {
-    if (result === 'A') {
-        return 'AUTHORIZED';
-    }
-    return result === 'P' ? 'PARTIAL' : 'REJECTED';
-}
-
 /**
  * Maps the WSFEX result into the neutral authorization result.
  *
@@ -370,19 +361,6 @@ export function toNeutralExportResult(
     result: FexInvoiceResult,
     providerMetadata: Record<string, unknown> = {},
 ): NeutralAuthorizationResultDto {
-    return {
-        authorizationCode: result.cae ?? '',
-        // Guarded rather than a bare parse, so an expiration ARCA rendered unexpectedly surfaces verbatim
-        // instead of throwing a 500 over an authorization that succeeded.
-        expiration: result.caeExpiration !== undefined ? arcaDateToIso(result.caeExpiration) : '',
-        authorizedNumber: result.voucherNumber,
-        status: statusOf(result.result),
-        observations: result.observations,
-        providerMetadata,
-    };
-}
-
-/** Renders an ARCA `yyyymmdd` date as an ISO-8601 instant, surfacing an unexpected format verbatim. */
-function arcaDateToIso(yyyymmdd: string): string {
-    return isArcaDay(yyyymmdd) ? parseArcaDate(yyyymmdd.trim()).toISOString() : yyyymmdd;
+    // No `qr` argument: `buildArcaQrUrl` implements RG 4892, specified for the domestic voucher only.
+    return toNeutralAuthorizationResult(result, result.voucherNumber, providerMetadata);
 }

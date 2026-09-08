@@ -7,6 +7,7 @@ import {
     NotImplementedError,
 } from '../sdk/core/errors.js';
 import type {ArcaAuth} from '../sdk/core/types.js';
+import type {InvoiceWebService} from '../sdk/invoicing/invoice-web-service.base.js';
 import {formatArcaDate} from '../sdk/invoicing/arca-qr/arca-qr.js';
 import type {
     CommonInvoiceRequest,
@@ -121,6 +122,39 @@ const ENTITY_CODE = 'ARCA';
  * so an `ArcaAuthError` stops the batch after at most this many calls.
  */
 export const CURRENCY_FAN_OUT_LIMIT = 8;
+
+/**
+ * The operations both invoicing services declare identically, which is all a route-dispatched caller needs.
+ *
+ * `Pick`ed off the base class rather than restated, so these stay one declaration: a signature change there
+ * is a type error at {@link ArcaProvider.serviceFor}'s callers rather than a branch that silently keeps
+ * compiling. The authorization and query operations are absent on purpose — their request and result types
+ * are per-service, which is what {@link AuthorizingService} and the route table carry instead.
+ */
+type RoutedInvoiceService = Pick<
+    InvoiceWebService<never, unknown>,
+    'getLastAuthorizedNumber' | 'getPointsOfSale'
+>;
+
+/**
+ * Whether a `FEXGetCMP` answer describes no voucher at all — the export path's "never issued".
+ *
+ * WSFEv1 says that with a `602` error block, which `isVoucherNotFound` reads. **WSFEX has no measured
+ * equivalent**: it renumbers ARCA's codes (600→1000, 601→1001 — see `faults.ts`) and its manual states no
+ * analogue, and inventing one is the mistake `voucher-recovery.ts` refuses to make for the adjacent
+ * sequence codes. So this reads the *answer* instead of a code, by the same authenticity test
+ * `recoverAuthorizedVoucher`'s gate already applies: an answer carrying no CAE and not echoing the number
+ * asked about describes no voucher. An empty `FEXResultGet` parses to exactly that — no `Cae`, and
+ * `Cbte_nro` read through `toIntOrZero` as `0`.
+ *
+ * Deliberately narrow, and the asymmetry is the point: a false `404` is worse than the `502` it replaces,
+ * being the signal core clears an orphan and re-authorizes on. So this refuses to guess from an *error* —
+ * only from an answer ARCA returned that plainly holds nothing. A WSFEX rejection whose code does mean
+ * "no such voucher" still reaches the caller as a `502` until someone measures it.
+ */
+function describesNoVoucher(result: FexInvoiceResult, voucherNumber: number): boolean {
+    return result.cae === undefined && result.voucherNumber !== voucherNumber;
+}
 
 /** A service that can both authorize a voucher and be asked about one afterwards. */
 interface AuthorizingService<Req, Res> extends QueryableService<Res> {
@@ -372,6 +406,22 @@ export class ArcaProvider extends TaxEntityProvider {
     };
 
     /**
+     * The SDK client that owns `route`, typed to the operations both services declare identically on
+     * `InvoiceWebService`.
+     *
+     * The one place a route becomes a client, beside {@link SERVICE_BY_ROUTE}, which says which ticket to
+     * spend on it. Every issuing method had its own `route === 'WSFEXV1' ? … : …`, each repeating the whole
+     * call expression on both branches — so an operation gaining an argument meant editing it twice per
+     * method, and updating only the branch under test still compiled.
+     *
+     * Derived from the base class rather than restated, so a change to either signature there is a type
+     * error here rather than at four call sites.
+     */
+    private static serviceFor(route: InvoiceRoute, environment: ArcaEnvironment): RoutedInvoiceService {
+        return route === 'WSFEXV1' ? fexInvoiceService(environment) : commonInvoiceService(environment);
+    }
+
+    /**
      * Resolves the issuing ticket for one route. Every issuing method needs exactly this, and had a copy of
      * it — including the `credentials`/`delegated` pair, whose omission is what turns a cache miss into a
      * `409` instead of a failure.
@@ -472,18 +522,10 @@ export class ArcaProvider extends TaxEntityProvider {
         const auth = await this.issuerAuth(entity, route);
         const cbteTipo = toCbteTipo(documentTypeCode);
 
+        const service = ArcaProvider.serviceFor(route, toArcaEnvironment(entity.environment));
+
         const number = await this.delegationAware(entity, ArcaProvider.SERVICE_BY_ROUTE[route], () =>
-            route === 'WSFEXV1'
-                ? fexInvoiceService(toArcaEnvironment(entity.environment)).getLastAuthorizedNumber(
-                      auth,
-                      pointOfSaleNumber,
-                      cbteTipo,
-                  )
-                : commonInvoiceService(toArcaEnvironment(entity.environment)).getLastAuthorizedNumber(
-                      auth,
-                      pointOfSaleNumber,
-                      cbteTipo,
-                  ),
+            service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo),
         );
         return {number};
     }
@@ -533,17 +575,11 @@ export class ArcaProvider extends TaxEntityProvider {
                                 entity,
                                 ArcaProvider.SERVICE_BY_ROUTE[route],
                                 () =>
-                                    route === 'WSFEXV1'
-                                        ? fexInvoiceService(environment).getLastAuthorizedNumber(
-                                              auth,
-                                              pointOfSaleNumber,
-                                              cbteTipo,
-                                          )
-                                        : commonInvoiceService(environment).getLastAuthorizedNumber(
-                                              auth,
-                                              pointOfSaleNumber,
-                                              cbteTipo,
-                                          ),
+                                    ArcaProvider.serviceFor(route, environment).getLastAuthorizedNumber(
+                                        auth,
+                                        pointOfSaleNumber,
+                                        cbteTipo,
+                                    ),
                             );
                             // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
                             return {documentTypeCode: code, nextNumber: last + 1};
@@ -565,25 +601,38 @@ export class ArcaProvider extends TaxEntityProvider {
         ArcaProvider.assertRouteImplemented(route);
         const auth = await this.issuerAuth(entity, route);
         const cbteTipo = toCbteTipo(documentTypeCode);
+        const environment = toArcaEnvironment(entity.environment);
+        const serviceId = ArcaProvider.SERVICE_BY_ROUTE[route];
+        const notFound = (): VoucherNotFoundError =>
+            new VoucherNotFoundError(entity.entityCode, pointOfSaleNumber, documentTypeCode, voucherNumber);
+
+        // Not routed through `serviceFor`: the two answers are different types and map through different
+        // neutral readers, which is exactly what that helper cannot carry.
         try {
             if (route === 'WSFEXV1') {
-                const service = fexInvoiceService(toArcaEnvironment(entity.environment));
-                const result = await this.delegationAware(entity, ServiceId.WSFEXV1, () =>
-                    service.queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
+                const result = await this.delegationAware(entity, serviceId, () =>
+                    fexInvoiceService(environment).queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
                 );
+                // The export path reads the answer rather than an error code — see `describesNoVoucher`.
+                if (describesNoVoucher(result, voucherNumber)) {
+                    throw notFound();
+                }
                 return toNeutralExportResult(result);
             }
-            const service = commonInvoiceService(toArcaEnvironment(entity.environment));
-            const result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-                service.queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
+            const result = await this.delegationAware(entity, serviceId, () =>
+                commonInvoiceService(environment).queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
             );
             return toNeutralResult(result);
         } catch (err) {
-            // ARCA surfaces a never-issued voucher as a `602` error block, not an empty `200`. Only that
+            // WSFEv1 surfaces a never-issued voucher as a `602` error block, not an empty `200`. Only that
             // becomes a `404`; every other service error stays a `502`, so core keeps the sale pending and
             // retries rather than clearing an orphan it cannot prove was never issued.
+            //
+            // Scoped to WSFEv1's idiom the way `pointsOfSaleImpl`'s `isNoResults` is, and for the same
+            // reason: `602` is a code WSFEX does not use. The export path's own reading is above, and a
+            // `VoucherNotFoundError` raised there passes through this handler untouched.
             if (isVoucherNotFound(err)) {
-                throw new VoucherNotFoundError(entity.entityCode, pointOfSaleNumber, documentTypeCode, voucherNumber);
+                throw notFound();
             }
             throw err;
         }
@@ -615,9 +664,7 @@ export class ArcaProvider extends TaxEntityProvider {
         const environment = toArcaEnvironment(entity.environment);
         try {
             const points = await this.delegationAware(entity, ArcaProvider.SERVICE_BY_ROUTE[route], () =>
-                route === 'WSFEXV1'
-                    ? fexInvoiceService(environment).getPointsOfSale(auth)
-                    : commonInvoiceService(environment).getPointsOfSale(auth),
+                ArcaProvider.serviceFor(route, environment).getPointsOfSale(auth),
             );
             return {pointsOfSale: points.map(toNeutralPointOfSale)};
         } catch (err) {
@@ -689,7 +736,6 @@ export class ArcaProvider extends TaxEntityProvider {
             return this.exportRates(
                 environment,
                 currencyCodes,
-                arcaDay,
                 answeredDay,
                 referenceDay,
                 validity,
@@ -915,7 +961,6 @@ export class ArcaProvider extends TaxEntityProvider {
     private async exportRates(
         environment: GenericEnvironment,
         currencyCodes: ReadonlyArray<string> | undefined,
-        arcaDay: string | undefined,
         answeredDay: string,
         referenceDay: string,
         validity: RateValidity,
@@ -950,7 +995,7 @@ export class ArcaProvider extends TaxEntityProvider {
         // The walk is a safety net rather than the normal path: the batch already falls back to the most
         // recent close at or before the day asked, so a second candidate is only reached when the authority
         // has nothing at all. The domestic walk exists because `FEParamGetCotizacion` does not fall back.
-        const days = rateDayCandidates(arcaDay ?? answeredDay);
+        const days = rateDayCandidates(answeredDay);
         let priced: Awaited<ReturnType<typeof service.getCurrencyRatesForDay>> = [];
         for (const day of days) {
             priced = await this.delegateCall(environment, ServiceId.WSFEXV1, () =>

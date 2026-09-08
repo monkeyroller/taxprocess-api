@@ -60,12 +60,25 @@ export function assertDecoratorMetadataEmitted(): void {
         // `ParamMetadataArgs.object` is typed `any` by routing-controllers; it is the controller prototype.
         const target = object as object;
         const paramTypes: unknown = Reflect.getMetadata('design:paramtypes', target, method);
-        if (!Array.isArray(paramTypes) || typeof paramTypes[index] !== 'function') {
+        const bodyType: unknown = Array.isArray(paramTypes) ? paramTypes[index] : undefined;
+        // `Object` is rejected as hard as a missing entry, and it is the likelier of the two: `typeof Object`
+        // is `'function'`, so it passes every check that only asks whether *something* was emitted. TypeScript
+        // emits it whenever the DTO reached the signature as a type rather than a value — a `import type
+        // {FooDto}`, the prevailing spelling in this directory. routing-controllers then hands
+        // `plainToInstance` a bare `Object`, which carries no validators, and `whitelist` /
+        // `forbidNonWhitelisted` quietly stop applying to that route. Same outcome the message names, so it
+        // gets the same failure; `esbuild`/`tsx` are unaffected, emitting no metadata at all.
+        if (typeof bodyType !== 'function' || bodyType === Object) {
             const name = target.constructor.name;
+            const cause = bodyType === Object ? 'was emitted as `Object`' : 'was not emitted';
             throw new Error(
-                `Decorator metadata is missing: \`design:paramtypes\` was not emitted for ${name}.${method}. ` +
+                `Decorator metadata is missing: \`design:paramtypes\` ${cause} for ${name}.${method}. ` +
                     'Request-body validation would be silently disabled (unknown fields accepted, required ' +
-                    'blocks unchecked). ' + REMEDY,
+                    'blocks unchecked). ' +
+                    (bodyType === Object
+                        ? 'A body DTO reached the signature as a type rather than a value — import it with ' +
+                          '`import {FooDto}`, not `import type {FooDto}`. '
+                        : REMEDY),
             );
         }
     }
