@@ -18,16 +18,15 @@ import {
     toDocTipo,
 } from '../code-maps/code-maps.js';
 import {toMonId} from '../currency-codes/currency-codes.js';
+import {toConcepto} from '../concept-codes/concept-codes.js';
 // Shared with the cotización path so the two can never disagree about which day a value names. A zoneless
 // datetime is refused rather than passed to `new Date`, which is host-local per the ES spec — that made the
 // voucher's legal date depend on the container's `TZ`.
-import {isArcaDay, parseAuthorityDate} from '../authority-day/authority-day.js';
+import {parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
-import type {NeutralInvoice} from '../../../provider/neutral-invoice.js';
-import type {
-    NeutralAuthorizationResultDto,
-    NeutralAuthorizationStatus,
-} from '../../../../http/dto/authorization-result.dto.js';
+import {Concept, type NeutralInvoice} from '../../../provider/neutral-invoice.js';
+import {arcaDateToIso, toNeutralAuthorizationResult} from '../authority-result.js';
+import type {NeutralAuthorizationResultDto} from '../../../../http/dto/authorization-result.dto.js';
 import type {PointOfSaleDto} from '../../../../http/dto/points-of-sale-result.dto.js';
 
 /**
@@ -80,7 +79,7 @@ function resolveCurrencyId(iso: string): string {
  */
 function invoiceCurrencyId(invoice: NeutralInvoice): string {
     if (invoice.currencyCode != null) {
-        return toMonId(invoice.currencyCode);
+        return toMonId(invoice.currencyCode, 'WSFEV1');
     }
     if (invoice.currencyIso != null) {
         return resolveCurrencyId(invoice.currencyIso);
@@ -110,7 +109,10 @@ function argentinaMidnight(date: Date): number {
  * already-authorized voucher must still get its CAE back.
  */
 export function concept1DateWindowError(invoice: NeutralInvoice, now: Date): ArcaValidationError | undefined {
-    if (invoice.concept !== 1) {
+    // An absent concept means an export voucher, which has its own date rule (WSFEX 1500, a ±5-day window
+    // plus a current-month ceiling for services). ARCA applies that one, so this returns nothing rather
+    // than guessing which of the two it should enforce.
+    if (invoice.concept !== Concept.GOODS) {
         return undefined;
     }
     const date = parseAuthorityDate(invoice.issueDate, 'issueDate');
@@ -198,12 +200,27 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
     // after idempotent recovery has had its chance.
     const issueDate = parseAuthorityDate(invoice.issueDate, 'issueDate');
 
+    // `receiver` became optional on the neutral invoice when the export document joined it, an export
+    // identifying its buyer by free text plus a destination instead. On this path it is still required, and
+    // the DTO already refuses a payload carrying neither `receiver` nor `export` — so reaching this throw
+    // means an internal caller bypassed validation.
+    //
+    // `concept` needs no such guard: it is required on every voucher, both documents having to say what
+    // they bill. What narrows per document is which of its codes are valid, which `toConcepto` enforces.
+    const {concept, receiver} = invoice;
+    if (receiver === undefined) {
+        throw new ArcaValidationError(
+            'invoice names no receiver — required for a domestic voucher',
+            'MISSING_RECEIVER',
+        );
+    }
+
     const request: CommonInvoiceRequest = {
         pointOfSaleNumber: invoice.pointOfSaleNumber,
         voucherType,
-        concept: invoice.concept,
-        docType: toDocTipo(invoice.receiver.identificationTypeCode),
-        docNumber: parseArcaId(invoice.receiver.identificationNumber, 'receiver.identificationNumber'),
+        concept: toConcepto(concept),
+        docType: toDocTipo(receiver.identificationTypeCode),
+        docNumber: parseArcaId(receiver.identificationNumber, 'receiver.identificationNumber'),
         voucherNumberFrom: voucherNumber,
         voucherNumberTo: voucherNumber,
         voucherDate: formatArcaDate(issueDate),
@@ -213,17 +230,18 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
         exempt,
         vatAmount: totals.vat,
         tributesAmount: perceptions,
-        receiverIvaConditionId: toCondicionIvaReceptorId(invoice.receiver.fiscalConditionCode),
+        receiverIvaConditionId: toCondicionIvaReceptorId(receiver.fiscalConditionCode),
         currencyId: invoiceCurrencyId(invoice),
         currencyRate: invoice.currencyRate,
         vatSubtotals: totals.subtotals,
         tributes,
     };
 
-    // Services (concept 2/3) require the FchServ*/FchVtoPago dates. `!= null` for the same reason
-    // `invoiceCurrencyId` uses it: a `null` that slipped past validation would throw a `TypeError` off
-    // `.trim()`, and an omitted element is the honest rendering of a field the caller left blank.
-    if (invoice.concept !== 1) {
+    // Anything but goods requires the FchServ*/FchVtoPago dates, services being rendered over a period
+    // rather than shipped on a day. `!= null` for the same reason `invoiceCurrencyId` uses it: a `null`
+    // that slipped past validation would throw a `TypeError` off `.trim()`, and an omitted element is the
+    // honest rendering of a field the caller left blank.
+    if (concept !== Concept.GOODS) {
         if (invoice.serviceDateFrom != null) {
             request.serviceDateFrom = formatArcaDate(parseAuthorityDate(invoice.serviceDateFrom, 'serviceDateFrom'));
         }
@@ -255,53 +273,18 @@ export function buildQrUrl(issuerTaxId: string, request: CommonInvoiceRequest, c
     });
 }
 
-function statusOf(result: CommonInvoiceResult['result']): NeutralAuthorizationStatus {
-    if (result === 'A') {
-        return 'AUTHORIZED';
-    }
-    return result === 'P' ? 'PARTIAL' : 'REJECTED';
-}
-
 /**
  * Maps the SDK result and optional QR into the neutral authorization result. `providerMetadata` is always
  * returned, empty by default — ARCA derives none today, but the channel is stable for core.
+ *
+ * `voucherNumberFrom` is the authorized number: this is the single-voucher flow, so the range is a point.
  */
 export function toNeutralResult(
     result: CommonInvoiceResult,
     qr?: string,
     providerMetadata: Record<string, unknown> = {},
 ): NeutralAuthorizationResultDto {
-    return {
-        authorizationCode: result.cae ?? '',
-        // Guarded rather than a bare `parseArcaDate(...).toISOString()`, which threw on any `CAEFchVto` the
-        // parser could not read — a `500` on an authorization that succeeded at ARCA, losing the CAE.
-        expiration: result.caeExpiration !== undefined ? arcaDateToIso(result.caeExpiration) : '',
-        authorizedNumber: result.voucherNumberFrom,
-        qr,
-        status: statusOf(result.result),
-        observations: result.observations,
-        providerMetadata,
-    };
-}
-
-/**
- * Renders an ARCA `yyyymmdd` date as an ISO-8601 instant, surfacing an unexpected format verbatim rather
- * than an invalid date.
- *
- * Gated on `isArcaDay` rather than a local `\d{8}` test and a `NaN` probe. The two are not the same
- * question: `20261345` passes eight digits and only fails at the parse, so the old form fell through to the
- * verbatim branch and shipped `"20261345"` in a field the contract calls ISO-8601 — non-empty, so
- * `/invoices/authorize` still read the voucher as approved. `isArcaDay` is the one reading of an authority
- * day, and it is what the cotización path already refuses that value by.
- *
- * The `trim` is load-bearing, not tidying: `isArcaDay` matches the trimmed value while `parseArcaDate`
- * slices the raw one, so ` 20260827` passed the guard and then sliced to `" 202"-"60"-"82"`, an Invalid Date
- * whose `toISOString` throws — a `500` on an authorization ARCA had already granted. Trimming makes the two
- * read the same string, which is also what makes a `NaN` re-check unnecessary rather than merely absent: a
- * value this guard admits is eight digits naming a real day, so the parse cannot fail.
- */
-function arcaDateToIso(yyyymmdd: string): string {
-    return isArcaDay(yyyymmdd) ? parseArcaDate(yyyymmdd.trim()).toISOString() : yyyymmdd;
+    return toNeutralAuthorizationResult(result, result.voucherNumberFrom, providerMetadata, qr);
 }
 
 /** Maps one SDK point of sale to the neutral DTO; `dischargeDate` (ARCA `yyyymmdd`) is rendered ISO-8601. */

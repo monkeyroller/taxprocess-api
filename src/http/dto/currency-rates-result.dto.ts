@@ -4,6 +4,7 @@
  * the batch.
  */
 import type {BandBasis} from '../../providers/provider/rate-band/rate-band.js';
+import type {WebService} from '../../providers/provider/web-service.js';
 
 /** Why a requested currency has no rate in the answer. All three are ordinary outcomes, not errors. */
 export type CurrencyRateUnavailableReason =
@@ -99,6 +100,18 @@ export class CurrencyRatesResultDto {
     entityCode!: string;
 
     environment!: string;
+
+    /**
+     * Which of the entity's web services priced this batch — the resolved value of the request's optional
+     * `webService`, so an omitted one is answered rather than echoed back as absent.
+     *
+     * Present because a rate is only valid against the service that will validate it: each checks a
+     * submitted rate against its own reference. The two agree today (measured, production 2026-09-04), and
+     * this field is what makes a future divergence diagnosable rather than silent — a cached rate that
+     * cannot say which series produced it is one nothing can reconcile months later. Key a rate cache by
+     * `(currencyCode, day, webService)`.
+     */
+    webService!: WebService;
 
     /** One entry per code that had a publication. Empty is a legitimate answer, not a failure. */
     rates!: Array<CurrencyRateDto>;

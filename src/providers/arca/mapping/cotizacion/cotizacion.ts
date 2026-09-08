@@ -1,4 +1,5 @@
 import {formatArcaDate} from '../../sdk/invoicing/arca-qr/arca-qr.js';
+import type {InvoiceRoute} from '../invoice-routing/invoice-routing.js';
 import {
     arcaDayToIsoDate,
     arcaDayToUtcDate,
@@ -81,8 +82,14 @@ export interface CurrencyCodePartition {
  * Codes arrive raw from a JSON body or through a catalogue `Id`, so asking twice for one code would put two
  * entries in a result the caller keys by code. Insertion order is preserved. A blank code is dropped rather
  * than bucketed: there is no code to report it against.
+ *
+ * `webService` decides which catalogue "supported" is measured against, so the rates a caller can cache and
+ * the currencies it can invoice in stay the same set per service.
  */
-export function partitionCurrencyCodes(codes: Iterable<string>): CurrencyCodePartition {
+export function partitionCurrencyCodes(
+    codes: Iterable<string>,
+    webService?: InvoiceRoute,
+): CurrencyCodePartition {
     const toFetch: Array<string> = [];
     const unsupported: Array<string> = [];
     const seen = new Set<string>();
@@ -96,7 +103,7 @@ export function partitionCurrencyCodes(codes: Iterable<string>): CurrencyCodePar
         seen.add(code);
         if (code === REFERENCE_MON_ID) {
             namesReference = true;
-        } else if (isKnownCurrencyCode(code)) {
+        } else if (isKnownCurrencyCode(code, webService)) {
             toFetch.push(code);
         } else {
             unsupported.push(code);

@@ -29,6 +29,35 @@ interface StoredTicket {
     expirationTime: string;
 }
 
+/**
+ * An expiry a ticket can be aged against, falling back to `whenUnreadable` for a value that is missing or
+ * malformed.
+ *
+ * Covering *malformed* and not only missing is the point: an `Invalid Date` survives every comparison,
+ * `NaN` comparing false, so `ExpiringCache.isFresh` would answer "stale" forever and nothing would ever
+ * reseat the entry.
+ *
+ * **The fallback is the caller's because the two readers know different things.** A wire response was just
+ * minted, so the nominal TTL is what ARCA gave us and assuming it is sound. A *persisted* value's age is
+ * unknown — the file may be eleven hours old — so fabricating a future expiry there would pin a possibly
+ * dead token: `deserialize` runs afresh on every `loadOne`, so a recomputed `now + TTL` is unconditionally
+ * fresh at load, and the entry re-poisons itself every time it ages out. The disk path therefore falls back
+ * to a date already past, which makes `peek` skip the entry and re-mint — wrong only until the real ticket
+ * lapses, where the other way round is wrong forever.
+ */
+function readExpiration(value: unknown, whenUnreadable: Date): Date {
+    const parsed = value ? new Date(String(value)) : null;
+    if (parsed === null || Number.isNaN(parsed.getTime())) {
+        return whenUnreadable;
+    }
+    return parsed;
+}
+
+/** The life ARCA gives a ticket it has just issued — the sound fallback for a wire response alone. */
+function nominalExpiry(): Date {
+    return new Date(Date.now() + TICKET_TTL_MINUTES * 60 * 1000);
+}
+
 export class WsaaClient {
     private readonly tickets: ExpiringCache<AccessTicket, StoredTicket>;
 
@@ -58,7 +87,9 @@ export class WsaaClient {
             deserialize: (stored) => ({
                 token: stored.token,
                 sign: stored.sign,
-                expirationTime: new Date(stored.expirationTime),
+                // Epoch, not `nominalExpiry()`: a stored expiry we cannot read leaves the ticket's age
+                // unknown, so the entry is treated as spent rather than granted another 12h.
+                expirationTime: readExpiration(stored.expirationTime, new Date(0)),
             }),
         });
     }
@@ -182,9 +213,10 @@ export class WsaaClient {
             throw new ArcaAuthError('WSAA login response is missing token/sign');
         }
         const rawExpiration = response?.header?.expirationTime;
-        const expirationTime = rawExpiration
-            ? new Date(String(rawExpiration))
-            : new Date(Date.now() + TICKET_TTL_MINUTES * 60 * 1000);
-        return {token: String(token), sign: String(sign), expirationTime};
+        return {
+            token: String(token),
+            sign: String(sign),
+            expirationTime: readExpiration(rawExpiration, nominalExpiry()),
+        };
     }
 }

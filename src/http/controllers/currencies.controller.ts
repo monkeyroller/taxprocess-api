@@ -21,6 +21,7 @@ export class CurrenciesController {
                 body.environment,
                 body.currencyCodes,
                 body.date,
+                body.webService,
             );
             return res.json(result);
         } catch (err) {

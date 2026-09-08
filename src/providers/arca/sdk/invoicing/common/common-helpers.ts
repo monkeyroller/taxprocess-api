@@ -55,9 +55,51 @@ function codeMsgText(value: unknown): string {
 }
 
 /**
- * ARCA's repeated `{Code, Msg}` pairs under `childKey`, as `{code, message}`. One reader for both shapes —
- * non-fatal `Obs` and fatal `Err` — since they are the same wire structure and had drifted into two
- * implementations with different absent-child handling.
+ * How one web service spells a block of code/message pairs. WSFEv1 and WSFEXv1 carry the same three ideas —
+ * a result, a list of errors, a list of events — and disagree only on the names and the arity, so the
+ * reader below is shared and only the spelling is per-service.
+ *
+ * `childKey` absent means the node *is* the pair rather than a wrapper around a repeated child. That is
+ * WSFEX's shape: `FEXErr` and `FEXEvents` are a single `{ErrCode, ErrMsg}` / `{EventCode, EventMsg}` each,
+ * where WSFEv1 wraps a repeated `Err` / `Evt`. `asArray` reads a bare object as a one-element list, so the
+ * two collapse into one code path with no branch.
+ */
+export interface CodeMessageDialect {
+    /** Repeated child holding the pairs. Absent when the node itself is a single pair. */
+    readonly childKey?: string;
+    readonly codeField: string;
+    readonly messageField: string;
+}
+
+/** WSFEv1's fatal block: `Errors/Err[]{Code,Msg}`. */
+export const WSFEV1_ERRORS: CodeMessageDialect = {childKey: 'Err', codeField: 'Code', messageField: 'Msg'};
+
+/** WSFEv1's event block: `Events/Evt[]{Code,Msg}` — informational, never a failure. */
+export const WSFEV1_EVENTS: CodeMessageDialect = {childKey: 'Evt', codeField: 'Code', messageField: 'Msg'};
+
+/** WSFEv1's non-fatal observations: `Observaciones/Obs[]{Code,Msg}`. */
+export const WSFEV1_OBSERVATIONS: CodeMessageDialect = {
+    childKey: 'Obs',
+    codeField: 'Code',
+    messageField: 'Msg',
+};
+
+/**
+ * WSFEXv1's fatal block: a single `FEXErr{ErrCode,ErrMsg}`.
+ *
+ * Note what the caller has to do that WSFEv1 never requires: WSFEX sends this element on success too, with
+ * `ErrCode` `0`. Presence is not failure here, so `assertNoErrors` drops a zero code — see
+ * {@link isNoErrorCode}.
+ */
+export const WSFEX_ERRORS: CodeMessageDialect = {codeField: 'ErrCode', messageField: 'ErrMsg'};
+
+/** WSFEXv1's event block: a single `FEXEvents{EventCode,EventMsg}`. */
+export const WSFEX_EVENTS: CodeMessageDialect = {codeField: 'EventCode', messageField: 'EventMsg'};
+
+/**
+ * ARCA's code/message pairs read through `dialect`, as `{code, message}`. One reader for every shape both
+ * services use — non-fatal `Obs`, fatal `Err`/`FEXErr`, informational `Evt`/`FEXEvents` — since they are the
+ * same wire structure and had drifted into two implementations with different absent-child handling.
  *
  * A pair stating neither a code nor a message is dropped rather than returned blank. An empty element parses
  * to `''`, so it is a value and survives `asArray`, arriving as an entry the authority never wrote. Neither
@@ -68,12 +110,30 @@ function codeMsgText(value: unknown): string {
  * A pair carrying only one of the two is kept: ARCA does send a `Msg` with no `Code`, and half a pair is
  * still something the authority said.
  */
-export function codeMsgPairs(node: unknown, childKey: 'Obs' | 'Err'): Array<ArcaCodeMessage> {
-    const children = (node as Record<string, unknown> | undefined)?.[childKey];
-    return asArray(children)
+export function codeMsgPairs(node: unknown, dialect: CodeMessageDialect): Array<ArcaCodeMessage> {
+    const pairs = dialect.childKey === undefined
+        ? node
+        : (node as Record<string, unknown> | undefined)?.[dialect.childKey];
+    return asArray(pairs)
         .map((child) => ({
-            code: codeMsgText(child.Code),
-            message: codeMsgText(child.Msg),
+            code: codeMsgText(child[dialect.codeField]),
+            message: codeMsgText(child[dialect.messageField]),
         }))
         .filter((pair) => pair.code !== '' || pair.message !== '');
+}
+
+/**
+ * Whether a code means "nothing went wrong". WSFEX sends `FEXErr` on every response and marks success with
+ * `ErrCode` `0`, so a presence check would read every successful call as a failure.
+ *
+ * A **blank** code is deliberately not this. ARCA does send a `Msg` with no `Code`, and that is a real
+ * rejection the caller has to see — `codeMsgPairs` keeps half a pair for exactly that reason, and treating
+ * blank as zero here would throw it away again. So this asks whether the authority said zero, not whether it
+ * said nothing.
+ *
+ * WSFEv1 never sends a zero code — it omits the block entirely — so applying this to both services costs
+ * nothing and keeps one predicate rather than a per-service branch.
+ */
+export function isNoErrorCode(code: string): boolean {
+    return code !== '' && Number(code) === 0;
 }

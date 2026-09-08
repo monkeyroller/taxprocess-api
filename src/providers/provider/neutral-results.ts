@@ -19,6 +19,8 @@ export type TaxAuthorizationResult = NeutralAuthorizationResultDto;
 /** The authority's last authorized voucher number for one (point of sale, document type). */
 export type LastAuthorizedResult = LastAuthorizedResultDto;
 
+/** The highest idempotency key the authority has seen for this issuer, where it keeps one. */
+
 /** Neutral taxpayer-registry lookup result (reuses the country-agnostic result DTO). */
 export type TaxpayerResult = TaxpayerResultDto;
 

@@ -36,7 +36,7 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
 
     protected override parseTaxpayer(result: Record<string, unknown>, taxpayerId: number): TaxpayerData {
         const persona = firstOf(result.personaReturn) ?? {};
-        const errors = asArray(persona.errorConstancia).flatMap((e) => asArray(e.error).map(String));
+        const errors = errorStrings(persona.errorConstancia);
         const general = firstOf(persona.datosGenerales) ?? {};
 
         const regimeGeneral = firstOf(persona.datosRegimenGeneral) ?? {};
@@ -97,6 +97,28 @@ export class ConstanciaInscripcionService extends TaxpayerRegistryService {
 
         return data;
     }
+}
+
+/**
+ * The `<error>` strings of one padrón complaint block.
+ *
+ * Read through `text` rather than `String`, which is the rule `xml-node.ts` states and the reason it states
+ * it. The parser keeps attributes, so `<error codigo="X">no existe persona</error>` is an *object* whose
+ * `String(…)` is the literal `[object Object]`; and an empty `<error/>` is `''`. Both travel: these strings
+ * become the `404`'s authority message and are persisted verbatim under `providerMetadata`. The blank is the
+ * worse of the two and needs no schema change to reach — `ArcaTaxpayerNotFoundError` takes `message ?? …`,
+ * and an empty string is not nullish, so it silently replaces the wording the error would otherwise carry.
+ *
+ * An unreadable node is therefore dropped rather than rendered: a complaint we cannot read is one the
+ * authority did not make, and `registrationUnavailableMessage` falling through to `undefined` restores the
+ * default sentence instead of shipping a placeholder.
+ */
+function errorStrings(block: unknown): Array<string> {
+    return asArray(block).flatMap((entry) =>
+        asArray(entry.error)
+            .map((node) => text(node))
+            .filter((message): message is string => message !== undefined),
+    );
 }
 
 /**
@@ -233,11 +255,11 @@ function buildMetadata(
     if (errors.length > 0) {
         metadata.constanciaErrors = [...errors];
     }
-    const regimeErrors = asArray(persona.errorRegimenGeneral).flatMap((e) => asArray(e.error).map(String));
+    const regimeErrors = errorStrings(persona.errorRegimenGeneral);
     if (regimeErrors.length > 0) {
         metadata.regimenGeneralErrors = regimeErrors;
     }
-    const monotributoErrors = asArray(persona.errorMonotributo).flatMap((e) => asArray(e.error).map(String));
+    const monotributoErrors = errorStrings(persona.errorMonotributo);
     if (monotributoErrors.length > 0) {
         metadata.monotributoErrors = monotributoErrors;
     }

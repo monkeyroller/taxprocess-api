@@ -20,7 +20,7 @@ import {
     type ProviderFaultCategory,
 } from '../../provider/faults.js';
 import type {EntityAuthBlock} from '../../provider/entity-auth.js';
-import type {NeutralInvoice} from '../../provider/neutral-invoice.js';
+import {Concept, type NeutralInvoice} from '../../provider/neutral-invoice.js';
 import type {DelegateCredentialStore} from '../auth/delegate-credentials/delegate-credentials.js';
 import {NeutralInvoiceDto} from '../../../http/dto/invoice.dto.js';
 import {NextNumbersRequestDto} from '../../../http/dto/invoice-request.dto.js';
@@ -28,6 +28,8 @@ import {PointsOfSaleRequestDto} from '../../../http/dto/points-of-sale-request.d
 import {CurrencyRatesRequestDto} from '../../../http/dto/currency.dto.js';
 import {RATE_DAY_RULE} from '../mapping/cotizacion/cotizacion.js';
 import {ARCA_CURRENCY_CODES} from '../mapping/currency-codes/currency-codes.js';
+import type {FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
+import type {FexDayRate} from '../sdk/invoicing/export/fex-invoice-service/fex-invoice.service.js';
 
 /**
  * The provider reaches ARCA through two module-level singletons, the ticket store and the per-environment
@@ -56,6 +58,20 @@ const identityGetTaxpayer = jest.fn<(auth: unknown, id: number) => Promise<Taxpa
 const getIdPersonaList = jest.fn<(auth: unknown, documentNumber: number) => Promise<Array<string>>>();
 const invalidateDelegated = jest.fn<(entityCode: string, environment: string, service: string) => void>();
 
+/**
+ * The WSFEX service's own fakes, kept separate from WSFEv1's rather than shared.
+ *
+ * Sharing them would make the assertions that matter most here unwritable: the point of the routing tests is
+ * that a document type reaches one service and *not* the other, which cannot be observed if both names
+ * resolve to the same mock.
+ */
+const fexRequestAuthorization = jest.fn<(auth: unknown, req: any) => Promise<FexInvoiceResult>>();
+const fexQueryVoucher = jest.fn<(auth: unknown, sp: number, vt: number, n: number) => Promise<FexInvoiceResult>>();
+const fexGetLastAuthorizedNumber = jest.fn<() => Promise<number>>();
+const fexGetLastRequestId = jest.fn<() => Promise<number>>();
+const fexGetPointsOfSale = jest.fn<() => Promise<Array<PointOfSaleInfo>>>();
+const fexGetCurrencyRatesForDay = jest.fn<(auth: unknown, day: string) => Promise<Array<FexDayRate>>>();
+
 jest.unstable_mockModule('../clients.js', () => ({
     commonInvoiceService: () => ({
         getLastAuthorizedNumber,
@@ -64,6 +80,14 @@ jest.unstable_mockModule('../clients.js', () => ({
         getPointsOfSale,
         getCurrencyRate,
         getCurrencyTypes,
+    }),
+    fexInvoiceService: () => ({
+        requestAuthorization: fexRequestAuthorization,
+        queryVoucher: fexQueryVoucher,
+        getLastAuthorizedNumber: fexGetLastAuthorizedNumber,
+        getLastRequestId: fexGetLastRequestId,
+        getPointsOfSale: fexGetPointsOfSale,
+        getCurrencyRatesForDay: fexGetCurrencyRatesForDay,
     }),
     // The padrón factories return concrete services carrying the WSAA service id the provider keys the
     // ticket on, so the fakes must expose `service` as well as the operations.
@@ -2009,5 +2033,409 @@ describe('CurrencyRatesRequestDto validation', () => {
             }),
         );
         expect(errors.map((e) => e.property)).toContain('date');
+    });
+});
+
+/**
+ * The routing decision, observed end to end.
+ *
+ * These are the tests that justify one endpoint serving both services: they assert a document type reaches
+ * one service and *not* the other, and that it authenticates against that service's own WSAA scope. A
+ * shared mock could not show either.
+ */
+describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
+    const fexApproved: FexInvoiceResult = {
+        result: 'A',
+        cae: '69000000000001',
+        caeExpiration: '20261015',
+        voucherNumber: 7,
+        voucherDate: '20260904',
+        requestId: 41,
+        reprocessed: false,
+        observations: [],
+        raw: {},
+    };
+
+    /** UC-2, the shape with the fewest conditional fields switched on. */
+    function exportInvoice(overrides: Partial<NeutralInvoice> = {}): NeutralInvoice {
+        return {
+            documentTypeCode: 19,
+            pointOfSaleNumber: 3,
+            voucherNumberFrom: 7,
+            voucherNumberTo: 7,
+            currencyCode: 'DOL',
+            currencyRate: 1508,
+            issueDate: '2026-08-05',
+            lines: [],
+            items: [{description: 'Consultoría', quantity: 1, unitOfMeasureCode: 7, unitPrice: 500, totalAmount: 500}],
+            export: {
+                destinationCode: '203',
+                clientName: 'Joao Da Silva',
+                clientAddress: 'Rua 76 km 34.5 Alagoas',
+                clientTaxId: 'PJ54482221-l',
+                language: 'es',
+                paymentTerms: 'Contado',
+                paymentDate: '2026-08-31',
+            },
+            ...overrides,
+            // `...overrides` is a Partial, which would widen the now-required `concept` to include
+            // undefined. Only an explicit override replaces it; concepts are 1-4, so `??` never misfires.
+            concept: overrides.concept ?? Concept.SERVICES,
+        };
+    }
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+        requestAuthorization.mockResolvedValue(approved);
+        fexRequestAuthorization.mockResolvedValue(fexApproved);
+        getLastAuthorizedNumber.mockResolvedValue(16);
+        fexGetLastAuthorizedNumber.mockResolvedValue(6);
+    });
+
+    it('authorizes a domestic voucher through WSFEv1, on a wsfe ticket', async () => {
+        await new ArcaProvider().authorizeInvoice(ENTITY, invoice({documentTypeCode: 6}));
+
+        expect(requestAuthorization).toHaveBeenCalledTimes(1);
+        expect(fexRequestAuthorization).not.toHaveBeenCalled();
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfe');
+    });
+
+    it('authorizes an export voucher through WSFEXv1, on a wsfex ticket', async () => {
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexRequestAuthorization).toHaveBeenCalledTimes(1);
+        expect(requestAuthorization).not.toHaveBeenCalled();
+        // A separate WSAA scope, needing its own certificate enrolment -- not the wsfe ticket.
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
+        expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
+    });
+
+    it('resolves its own idempotency key, so the caller never has to track one', async () => {
+        // Withdrawn from the caller deliberately: reusing a Cmp.Id replays a stored voucher under a 200 with
+        // a real CAE, and nothing downstream catches it -- ARCA short-circuits on a stored id without ever
+        // validating the submitted document, so the voucher-number sequence rule never runs.
+        await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        const sent = fexRequestAuthorization.mock.calls[0]?.[1];
+        expect(sent?.requestId).toBeGreaterThan(0);
+        // Long(N15) is the field ARCA declares.
+        expect(sent?.requestId).toBeLessThanOrEqual(999_999_999_999_999);
+    });
+
+    it('warns rather than reports when the authority replays a key we generated', async () => {
+        // A replay is impossible on a key this service produced, so it means the generator repeated and two
+        // sales are about to share a voucher. Nothing downstream can see it -- the flag left the contract
+        // with the key -- so the only place it can surface is the log.
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        fexRequestAuthorization.mockResolvedValue({...fexApproved, reprocessed: true});
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('replayed a stored export voucher'));
+        expect(result).not.toHaveProperty('reprocessed');
+        warn.mockRestore();
+    });
+
+    it('never runs WSFEv1 idempotent recovery on an export voucher', async () => {
+        // The dialects must not cross: an export reconciles through FEXGetCMP or not at all. Asserted on an
+        // approved voucher, where neither service should be queried in the first place.
+        await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexQueryVoucher).not.toHaveBeenCalled();
+        expect(queryVoucher).not.toHaveBeenCalled();
+    });
+
+    it('reconciles a rejected export voucher against the one on file, and returns its CAE', async () => {
+        // The parity that makes an export behave like a domestic voucher: core re-sends a number it lost
+        // the CAE for, and the honest answer is that CAE rather than the rejection.
+        fexRequestAuthorization.mockResolvedValue({...fexApproved, result: 'R', cae: undefined, observations: []});
+        fexQueryVoucher.mockResolvedValue({
+            ...fexApproved,
+            raw: {
+                Id: '41',
+                Imp_total: '500',
+                Moneda_Id: 'DOL',
+                Fecha_cbte: '20260805',
+                Dst_cmp: '203',
+                Tipo_expo: '2',
+            },
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexQueryVoucher).toHaveBeenCalledWith(expect.anything(), 3, 19, 7);
+        expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
+    });
+
+    it('queries on any export rejection, having no code to filter on', async () => {
+        // WSFEX publishes no coded observation channel -- Motivos_Obs is one string, read code-less -- so
+        // unlike WSFEv1 there is nothing to test before deciding a rejection is worth reconciling.
+        fexRequestAuthorization.mockResolvedValue({
+            ...fexApproved,
+            result: 'R',
+            cae: undefined,
+            observations: [{code: '', message: 'un motivo cualquiera'}],
+        });
+        fexQueryVoucher.mockRejectedValue(new ArcaServiceError('[1015] no existe', [{code: '1015', message: 'no existe'}]));
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(fexQueryVoucher).toHaveBeenCalledTimes(1);
+        // Nothing on file, so the original rejection stands rather than being dressed up as a failure.
+        expect(result).toMatchObject({status: 'REJECTED'});
+    });
+
+    it('refuses to return a CAE stored against a different sale', async () => {
+        // The matcher is the arbiter, and its field list is the policy. Here the stored request id belongs
+        // to another submission, so handing back its CAE would file a fiscal document for the wrong invoice.
+        fexRequestAuthorization.mockResolvedValue({...fexApproved, result: 'R', cae: undefined, observations: []});
+        fexQueryVoucher.mockResolvedValue({
+            ...fexApproved,
+            // A different total. Note the stored `Id` is deliberately NOT compared: this service generates a
+            // fresh key per attempt, so it differs on every legitimate retry.
+            raw: {Imp_total: '999', Moneda_Id: 'DOL', Dst_cmp: '203', Tipo_expo: '2'},
+        });
+
+        await expect(new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice())).rejects.toMatchObject(
+            validationFault('VOUCHER_ALREADY_AUTHORIZED_MISMATCH'),
+        );
+    });
+
+    it('reconciles on a thrown conflict too, not only a soft rejection', async () => {
+        fexRequestAuthorization.mockRejectedValue(
+            new ArcaServiceError('[1520] no es el proximo', [{code: '1520', message: 'no es el proximo'}]),
+        );
+        fexQueryVoucher.mockResolvedValue({
+            ...fexApproved,
+            raw: {Id: '41', Imp_total: '500', Moneda_Id: 'DOL', Dst_cmp: '203', Tipo_expo: '2'},
+        });
+
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(result).toMatchObject({authorizationCode: '69000000000001', status: 'AUTHORIZED'});
+    });
+
+    it('emits no QR for an export voucher, RG 4892 being a domestic specification', async () => {
+        const result = await new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice());
+
+        expect(result.qr).toBeUndefined();
+    });
+
+    it('refuses a voucher whose selector and document type disagree, before spending a ticket', async () => {
+        await expect(
+            new ArcaProvider().authorizeInvoice(ENTITY, exportInvoice({webService: 'WSFEv1'})),
+        ).rejects.toMatchObject({code: 'ARCA_VALIDATION'});
+
+        expect(resolve).not.toHaveBeenCalled();
+        expect(fexRequestAuthorization).not.toHaveBeenCalled();
+    });
+
+    it('answers 501 for WSMTXCA rather than falling back to WSFEv1', async () => {
+        // Reachable today: contract section 7 lists it in configuration.webService, so core can name it
+        // before any implementation exists. Falling back would authorize through a service nobody chose.
+        await expect(
+            new ArcaProvider().authorizeInvoice(ENTITY, invoice({documentTypeCode: 6, webService: 'WSMTXCA'})),
+        ).rejects.toMatchObject({code: 'NOT_IMPLEMENTED'});
+
+        expect(requestAuthorization).not.toHaveBeenCalled();
+    });
+
+    it('routes last-authorized and query by document type', async () => {
+        const provider = new ArcaProvider();
+
+        expect(await provider.lastAuthorized(ENTITY, 3, 19)).toEqual({number: 6});
+        expect(fexGetLastAuthorizedNumber).toHaveBeenCalledTimes(1);
+        expect(getLastAuthorizedNumber).not.toHaveBeenCalled();
+
+        fexQueryVoucher.mockResolvedValue(fexApproved);
+        await provider.queryVoucher(ENTITY, 3, 21, 4);
+        expect(fexQueryVoucher).toHaveBeenCalledTimes(1);
+        expect(queryVoucher).not.toHaveBeenCalled();
+    });
+
+    it('answers next-numbers for both services in one request', async () => {
+        // The one method whose request can legitimately span both: separate numbering, separate registers.
+        const result = await new ArcaProvider().nextNumbers(ENTITY, 3, [6, 19]);
+
+        expect(result.numbers).toEqual([
+            {documentTypeCode: 6, nextNumber: 17},
+            {documentTypeCode: 19, nextNumber: 7},
+        ]);
+        // One ticket per distinct scope, not one per code.
+        expect(resolve.mock.calls.map((call) => call[2]).sort()).toEqual(['wsfe', 'wsfex']);
+    });
+
+    it('reads the FEEWS register only when asked for it', async () => {
+        // A point of sale good for WSFEv1 is not usable for a Factura E, so showing the wrong list would let
+        // a caller conclude it can issue one when it cannot.
+        fexGetPointsOfSale.mockResolvedValue([{number: 1, blocked: false}]);
+        getPointsOfSale.mockResolvedValue([{number: 9, blocked: false}]);
+        const provider = new ArcaProvider();
+
+        expect(await provider.pointsOfSale(ENTITY, 'WSFEXv1')).toEqual({
+            pointsOfSale: [{number: 1, blocked: false, issuanceMode: undefined, dischargeDate: undefined}],
+        });
+        expect(await provider.pointsOfSale(ENTITY)).toEqual({
+            pointsOfSale: [{number: 9, blocked: false, issuanceMode: undefined, dischargeDate: undefined}],
+        });
+    });
+
+});
+
+/**
+ * The export rate series.
+ *
+ * Worth its own block because the selector on `/currencies/rates` changes *which* currencies are answered,
+ * not what they cost: measured against production 2026-09-04, the two services publish identical rates for
+ * every currency priced that day. What differs is the set — the export service prices only the subset an
+ * export voucher may name — which is the reason the field exists at all.
+ */
+describe('ArcaProvider export currency rates', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        resolve.mockResolvedValue({token: 'T', sign: 'S', cuit: 20111111112});
+        fexGetCurrencyRatesForDay.mockResolvedValue([
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            {monId: '060', rate: 1756.5184, rateDate: '20260903'},
+        ]);
+    });
+
+    it('prices the requested codes in one call, on a wsfex ticket', async () => {
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-09-04', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay).toHaveBeenCalledTimes(1);
+        // The domestic fan-out is not used at all: one call instead of one per code.
+        expect(getCurrencyRate).not.toHaveBeenCalled();
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfex');
+        expect(result.rates).toEqual([
+            expect.objectContaining({currencyCode: 'DOL', rate: 1508, rateDate: '2026-09-03'}),
+        ]);
+    });
+
+    it('reports a code the day did not price as unavailable rather than failing the batch', async () => {
+        // Which is also the authority's own rule about eligibility: a currency absent from the day's answer
+        // is one an export voucher may not name.
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL', '009'], undefined, 'WSFEXv1');
+
+        expect(result.rates.map((rate) => rate.currencyCode)).toEqual(['DOL']);
+        expect(result.unavailable).toEqual([{currencyCode: '009', reason: 'NO_PUBLICATION'}]);
+    });
+
+    it('answers the peso locally, with no ticket at all', async () => {
+        const result = await new ArcaProvider().currencyRates('testing', ['PES'], '2026-09-04', 'WSFEXv1');
+
+        expect(resolve).not.toHaveBeenCalled();
+        expect(fexGetCurrencyRatesForDay).not.toHaveBeenCalled();
+        expect(result.rates).toEqual([
+            expect.objectContaining({currencyCode: 'PES', rate: 1, lowerLimit: 1, upperLimit: 1}),
+        ]);
+    });
+
+    it('reports a rate it cannot date as an upstream error rather than keying it wrongly', async () => {
+        fexGetCurrencyRatesForDay.mockResolvedValue([{monId: 'DOL', rate: 1508, rateDate: undefined}]);
+
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], undefined, 'WSFEXv1');
+
+        expect(result.rates).toEqual([]);
+        expect(result.unavailable).toEqual([{currencyCode: 'DOL', reason: 'UPSTREAM_ERROR'}]);
+    });
+
+    it('answers the whole table intersected with what this service supports', async () => {
+        fexGetCurrencyRatesForDay.mockResolvedValue([
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            // ARCA catalogues these two and refuses to quote them, so they must not be offered here either
+            // -- the same intersection the domestic whole-table branch applies, so the two endpoints agree
+            // about which currencies can actually be invoiced in.
+            {monId: 'RUB', rate: 18, rateDate: '20260903'},
+        ]);
+
+        const result = await new ArcaProvider().currencyRates('testing', undefined, undefined, 'WSFEXv1');
+
+        expect(result.rates.map((rate) => rate.currencyCode).sort()).toEqual(['DOL', 'PES']);
+    });
+
+    it('asks about the previous WORKING day, exactly as the domestic series does', async () => {
+        // Not a preference -- a measurement. The batch answers "the close of the day asked, or the latest
+        // before it", while FEParamGetCotizacion answers 602 and falls back to nothing. Asking the voucher's
+        // own day here would make the export series jump to that day's close the moment it is published
+        // while the domestic series still answered with the previous one: same request, two days, no
+        // diagnostic. Asking both about the previous working day makes them agree by construction.
+        await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-05', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay.mock.calls[0]?.[1]).toBe('20260804');
+    });
+
+    it('steps over a weekend rather than asking about one', async () => {
+        // Monday resolves to Friday in one read, which is what rateDayCandidates already guarantees for the
+        // domestic series. Sharing the rule means it holds here for free.
+        await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-03', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay.mock.calls[0]?.[1]).toBe('20260731');
+    });
+
+    it('walks back when a day priced nothing at all', async () => {
+        // A safety net rather than the normal path: the authority falls back on its own, so a second
+        // candidate is only reached when it has nothing. An empty answer means "walk", never "every code is
+        // unavailable" -- those two readings differ by a whole day of rates.
+        fexGetCurrencyRatesForDay
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([{monId: 'DOL', rate: 1508, rateDate: '20260803'}]);
+
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-05', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay).toHaveBeenCalledTimes(2);
+        expect(fexGetCurrencyRatesForDay.mock.calls[1]?.[1]).toBe('20260803');
+        // The day that ANSWERED is reported, never the day asked about.
+        expect(result.rates).toEqual([
+            expect.objectContaining({currencyCode: 'DOL', rateDate: '2026-08-03'}),
+        ]);
+    });
+
+    it('gives up after the bounded walk and reports NO_PUBLICATION', async () => {
+        fexGetCurrencyRatesForDay.mockResolvedValue([]);
+
+        const result = await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-08-05', 'WSFEXv1');
+
+        expect(fexGetCurrencyRatesForDay).toHaveBeenCalledTimes(RATE_DAY_RULE.walkBackLimit + 1);
+        expect(result.unavailable).toEqual([{currencyCode: 'DOL', reason: 'NO_PUBLICATION'}]);
+        expect(result.rates).toEqual([]);
+    });
+
+    it('reports a priced code this service does not know as catalogue drift', async () => {
+        // The same signal the domestic whole-table sync gives, and stronger here: the input is what the day
+        // actually priced, so a code we deliberately refuse to quote turning up with a rate is the
+        // reconciliation ARCA_UNQUOTABLE_CODES says to watch for.
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        fexGetCurrencyRatesForDay.mockResolvedValue([
+            {monId: 'DOL', rate: 1508, rateDate: '20260903'},
+            {monId: 'ZZZ', rate: 5, rateDate: '20260903'},
+        ]);
+
+        const result = await new ArcaProvider().currencyRates('testing', undefined, '2026-08-05', 'WSFEXv1');
+
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('ZZZ'));
+        expect(result.rates.map((rate) => rate.currencyCode)).toEqual(['PES', 'DOL']);
+        warn.mockRestore();
+    });
+
+    it('says which service priced the batch, on both series', async () => {
+        // A rate is only valid against the service that will band it. The two agree today, so this field is
+        // what makes a future divergence diagnosable instead of silent -- key a cache by it.
+        const exported = await new ArcaProvider().currencyRates('testing', ['DOL'], undefined, 'WSFEXv1');
+        expect(exported.webService).toBe('WSFEXv1');
+
+        const domestic = await new ArcaProvider().currencyRates('testing', ['PES']);
+        expect(domestic.webService).toBe('WSFEv1');
+    });
+
+    it('leaves the domestic series on the fan-out', async () => {
+        getCurrencyRate.mockResolvedValue({monId: 'DOL', rate: 1508, rateDate: '20260903'});
+
+        await new ArcaProvider().currencyRates('testing', ['DOL'], '2026-09-04');
+
+        expect(getCurrencyRate).toHaveBeenCalledTimes(1);
+        expect(fexGetCurrencyRatesForDay).not.toHaveBeenCalled();
+        expect(resolve.mock.calls[0]?.[2]).toBe('wsfe');
     });
 });

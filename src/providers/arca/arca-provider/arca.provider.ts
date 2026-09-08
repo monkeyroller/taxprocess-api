@@ -1,23 +1,41 @@
-import {ServiceId, type ServiceIdValue} from '../sdk/core/constants.js';
+import {ServiceId, type ArcaEnvironment, type ServiceIdValue} from '../sdk/core/constants.js';
 import {
     ArcaAuthError,
     ArcaServiceError,
     ArcaTaxpayerNotFoundError,
     ArcaValidationError,
+    NotImplementedError,
 } from '../sdk/core/errors.js';
 import type {ArcaAuth} from '../sdk/core/types.js';
+import type {InvoiceWebService} from '../sdk/invoicing/invoice-web-service.base.js';
 import {formatArcaDate} from '../sdk/invoicing/arca-qr/arca-qr.js';
 import type {
     CommonInvoiceRequest,
     CommonInvoiceResult,
 } from '../sdk/invoicing/common/common-invoice.types.js';
 import type {TaxpayerData} from '../sdk/taxpayer-registry/padron.types.js';
-import {commonInvoiceService, constanciaService, taxpayerIdentityService} from '../clients.js';
+import {
+    commonInvoiceService,
+    constanciaService,
+    fexInvoiceService,
+    taxpayerIdentityService,
+} from '../clients.js';
 import {ticketStore} from '../auth/ticket-store/ticket-store.js';
 import {delegateCredentialStore, type DelegateCredentialStore} from '../auth/delegate-credentials/delegate-credentials.js';
 import {toArcaEnvironment} from '../auth/environment/environment.js';
 import {toCbteTipo} from '../mapping/code-maps/code-maps.js';
 import {toPadronService} from '../mapping/padron-routing/padron-routing.js';
+import {
+    invoiceRoute,
+    WEB_SERVICE_BY_ROUTE,
+    type InvoiceRoute,
+} from '../mapping/invoice-routing/invoice-routing.js';
+import {
+    buildFexInvoiceRequest,
+    toNeutralExportResult,
+} from '../mapping/export-invoice-mapper/export-invoice.mapper.js';
+import type {FexInvoiceRequest, FexInvoiceResult} from '../sdk/invoicing/export/fex-invoice.types.js';
+import {nextRequestId} from '../mapping/request-id/request-id.js';
 import {toArcaDay, arcaDayToIsoDate, isArcaDay} from '../mapping/authority-day/authority-day.js';
 import {
     applicabilityRange,
@@ -31,10 +49,11 @@ import {
     vintageOf,
     withValidity,
     REFERENCE_MON_ID,
+    type CurrencyCodePartition,
     type RateValidity,
     type UnscopedRate,
 } from '../mapping/cotizacion/cotizacion.js';
-import {ARCA_UNQUOTABLE_CODES} from '../mapping/currency-codes/currency-codes.js';
+import {ARCA_UNQUOTABLE_CODES, normalizeCurrencyCode} from '../mapping/currency-codes/currency-codes.js';
 import {mapWithConcurrency} from '../../concurrency/concurrency.js';
 import type {CommonInvoiceService} from '../sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
 import type {CurrencyRateUnavailableDto} from '../../../http/dto/currency-rates-result.dto.js';
@@ -48,10 +67,13 @@ import {
     toProviderFault,
 } from '../faults/faults.js';
 import {
-    isAlreadyAuthorizedError,
-    isAlreadyAuthorizedRejection,
     recoverAuthorizedVoucher,
-} from '../voucher-recovery.js';
+    WSFEV1_RECOVERY,
+    WSFEX_RECOVERY,
+    type QueryableService,
+    type RecoverableResult,
+    type RecoveryDialect,
+} from '../voucher-recovery/voucher-recovery.js';
 import {
     buildCommonInvoiceRequest,
     buildQrUrl,
@@ -71,6 +93,7 @@ import {
 import type {GenericEnvironment} from '../../provider/environment.js';
 import type {EntityAuthBlock} from '../../provider/entity-auth.js';
 import type {NeutralInvoice} from '../../provider/neutral-invoice.js';
+import type {WebService} from '../../provider/web-service.js';
 import type {
     AuthorityStatusResult,
     CurrencyRatesResult,
@@ -99,6 +122,65 @@ const ENTITY_CODE = 'ARCA';
  * so an `ArcaAuthError` stops the batch after at most this many calls.
  */
 export const CURRENCY_FAN_OUT_LIMIT = 8;
+
+/**
+ * The operations both invoicing services declare identically, which is all a route-dispatched caller needs.
+ *
+ * `Pick`ed off the base class rather than restated, so these stay one declaration: a signature change there
+ * is a type error at {@link ArcaProvider.serviceFor}'s callers rather than a branch that silently keeps
+ * compiling. The authorization and query operations are absent on purpose — their request and result types
+ * are per-service, which is what {@link AuthorizingService} and the route table carry instead.
+ */
+type RoutedInvoiceService = Pick<
+    InvoiceWebService<never, unknown>,
+    'getLastAuthorizedNumber' | 'getPointsOfSale'
+>;
+
+/**
+ * Whether a `FEXGetCMP` answer describes no voucher at all — the export path's "never issued".
+ *
+ * WSFEv1 says that with a `602` error block, which `isVoucherNotFound` reads. **WSFEX has no measured
+ * equivalent**: it renumbers ARCA's codes (600→1000, 601→1001 — see `faults.ts`) and its manual states no
+ * analogue, and inventing one is the mistake `voucher-recovery.ts` refuses to make for the adjacent
+ * sequence codes. So this reads the *answer* instead of a code, by the same authenticity test
+ * `recoverAuthorizedVoucher`'s gate already applies: an answer carrying no CAE and not echoing the number
+ * asked about describes no voucher. An empty `FEXResultGet` parses to exactly that — no `Cae`, and
+ * `Cbte_nro` read through `toIntOrZero` as `0`.
+ *
+ * Deliberately narrow, and the asymmetry is the point: a false `404` is worse than the `502` it replaces,
+ * being the signal core clears an orphan and re-authorizes on. So this refuses to guess from an *error* —
+ * only from an answer ARCA returned that plainly holds nothing. A WSFEX rejection whose code does mean
+ * "no such voucher" still reaches the caller as a `502` until someone measures it.
+ */
+function describesNoVoucher(result: FexInvoiceResult, voucherNumber: number): boolean {
+    return result.cae === undefined && result.voucherNumber !== voucherNumber;
+}
+
+/** A service that can both authorize a voucher and be asked about one afterwards. */
+interface AuthorizingService<Req, Res> extends QueryableService<Res> {
+    requestAuthorization(auth: ArcaAuth, request: Req): Promise<Res>;
+}
+
+/**
+ * What one of ARCA's invoicing services contributes to the shared authorize flow.
+ *
+ * Everything here is a spelling, a factory or an optional extra step. The order of operations, the
+ * reconciliation and the error handling live in `authorizeThrough`, so adding a third service cannot give it
+ * different semantics by leaving a field out.
+ */
+interface AuthorizationRoute<Req, Res extends RecoverableResult> {
+    readonly route: InvoiceRoute;
+    readonly recovery: RecoveryDialect<Req, Res>;
+    buildRequest(invoice: NeutralInvoice, voucherNumber: number): Req;
+    service(environment: ArcaEnvironment): AuthorizingService<Req, Res>;
+    /** A rule this service refuses locally rather than relaying. WSFEv1 has one; the export document does not. */
+    preflightError?(invoice: NeutralInvoice, now: Date): Error | undefined;
+    /** Maps a fresh authorization. The recovered-voucher path has its own, on the recovery dialect. */
+    toNeutral(result: Res, request: Req, issuerTaxId: string): TaxAuthorizationResult;
+}
+
+/** The route `exportRates` answers for. Named so the two catalogue filters and the echo cannot disagree. */
+const EXPORT_ROUTE: InvoiceRoute = 'WSFEXV1';
 
 /**
  * What one code's rate lookup produced. A discriminated union rather than two object shapes, since
@@ -185,8 +267,11 @@ export class ArcaProvider extends TaxEntityProvider {
         } catch (err) {
             // The CUIT is a thunk: only a delegation verdict needs it, and reading it can cost a certificate
             // load.
-            const translated = translateDelegatedTokenError(err, entity, () =>
-                this.delegateCuit(entity.environment),
+            const translated = translateDelegatedTokenError(
+                err,
+                entity,
+                () => this.delegateCuit(entity.environment),
+                service,
             );
             if (translated instanceof ArcaAuthError) {
                 // Evict our delegate ticket so the next request re-mints, rather than every represented CUIT
@@ -215,9 +300,163 @@ export class ArcaProvider extends TaxEntityProvider {
         return Promise.resolve(validateArcaCredentials(input));
     }
 
+    /**
+     * The WSAA scope a route authenticates against. Separate tickets, not one shared credential: WSAA issues
+     * per service, and the certificate has to be enrolled in each one independently.
+     */
+    /**
+     * Authorizes one voucher through whichever of ARCA's services owns it.
+     *
+     * One flow for both, because the steps are the same steps: build the request before spending a
+     * credential on it, resolve the issuing ticket, call once, reconcile an already-authorized number, map
+     * the answer. Only the spellings and two optional steps differ, and those are the {@link
+     * AuthorizationRoute}. Written twice, the reconciliation is what drifts — it is the part with the
+     * expensive reasoning and the part a second service is most likely to be given by omission.
+     */
+    private async authorizeThrough<Req, Res extends RecoverableResult>(
+        entity: EntityAuthBlock,
+        invoice: NeutralInvoice,
+        route: AuthorizationRoute<Req, Res>,
+    ): Promise<TaxAuthorizationResult> {
+        // Built before the ticket, not after, because building is where every canonical code is translated.
+        // Resolving first made an unmapped code cost a `409 CREDENTIALS_REQUIRED`, a re-send carrying the
+        // issuer's certificate and a full WSAA login before the `400` that was decidable from the body
+        // alone. Both mappers are pure and clock-free, so nothing here needs the ticket.
+        const request = route.buildRequest(invoice, invoice.voucherNumberFrom);
+
+        const auth = await this.issuerAuth(entity, route.route);
+        const service = route.service(toArcaEnvironment(entity.environment));
+        const recover = (): Promise<TaxAuthorizationResult | undefined> =>
+            recoverAuthorizedVoucher({
+                dialect: route.recovery,
+                service,
+                auth,
+                invoice,
+                request,
+                issuerTaxId: entity.issuerTaxId,
+                run: (op) => this.delegationAware(entity, route.recovery.serviceId, op),
+            });
+
+        // A rule this service applies itself would otherwise reach ARCA as its own rejection, so it is
+        // checked here for an actionable code — but only after giving idempotent recovery its chance. A
+        // resend of a voucher ARCA already authorized must still get that CAE back, and recovery reconciles
+        // against the stored voucher, which no pre-flight rule affects.
+        const preflightError = route.preflightError?.(invoice, new Date());
+        if (preflightError !== undefined) {
+            const recovered = await recover();
+            if (recovered !== undefined) {
+                return recovered;
+            }
+            throw preflightError;
+        }
+
+        let result: Res;
+        try {
+            result = await this.delegationAware(entity, route.recovery.serviceId, () =>
+                service.requestAuthorization(auth, request),
+            );
+        } catch (err) {
+            // ARCA may surface an already-authorized number as a thrown error block rather than a soft
+            // rejection. Reconcile only that conflict; any other business rejection is the truthful outcome
+            // and is re-thrown.
+            if (err instanceof ArcaServiceError && route.recovery.isConflictError(err)) {
+                const recovered = await recover();
+                if (recovered !== undefined) {
+                    return recovered;
+                }
+            }
+            throw err;
+        }
+
+        // The number is not the next to authorize, which includes core re-sending one already authorized.
+        // If the voucher is genuinely authorized, return its stored CAE.
+        if (route.recovery.isConflictCandidate(result)) {
+            const recovered = await recover();
+            if (recovered !== undefined) {
+                return recovered;
+            }
+        }
+
+        return route.toNeutral(result, request, entity.issuerTaxId);
+    }
+
+    /** WSFEv1: a QR to rebuild, and the concept-1 date window this service refuses locally. */
+    private static domesticRoute(): AuthorizationRoute<CommonInvoiceRequest, CommonInvoiceResult> {
+        return {
+            route: 'WSFEV1',
+            recovery: WSFEV1_RECOVERY,
+            buildRequest: buildCommonInvoiceRequest,
+            service: commonInvoiceService,
+            preflightError: (invoice, now) => concept1DateWindowError(invoice, now),
+            toNeutral: (result, request, issuerTaxId): TaxAuthorizationResult => {
+                // Build the QR only for an approved voucher; the guard narrows `result.cae` to a string.
+                const qr =
+                    result.result === 'A' && result.cae !== undefined && result.caeExpiration !== undefined
+                        ? buildQrUrl(issuerTaxId, request, result.cae)
+                        : undefined;
+                return toNeutralResult(result, qr);
+            },
+        };
+    }
+
+    private static readonly SERVICE_BY_ROUTE: Readonly<Record<InvoiceRoute, ServiceIdValue>> = {
+        WSFEV1: ServiceId.WSFEV1,
+        WSMTXCA: ServiceId.WSFEV1,
+        WSFEXV1: ServiceId.WSFEXV1,
+    };
+
+    /**
+     * The SDK client that owns `route`, typed to the operations both services declare identically on
+     * `InvoiceWebService`.
+     *
+     * The one place a route becomes a client, beside {@link SERVICE_BY_ROUTE}, which says which ticket to
+     * spend on it. Every issuing method had its own `route === 'WSFEXV1' ? … : …`, each repeating the whole
+     * call expression on both branches — so an operation gaining an argument meant editing it twice per
+     * method, and updating only the branch under test still compiled.
+     *
+     * Derived from the base class rather than restated, so a change to either signature there is a type
+     * error here rather than at four call sites.
+     */
+    private static serviceFor(route: InvoiceRoute, environment: ArcaEnvironment): RoutedInvoiceService {
+        return route === 'WSFEXV1' ? fexInvoiceService(environment) : commonInvoiceService(environment);
+    }
+
+    /**
+     * Resolves the issuing ticket for one route. Every issuing method needs exactly this, and had a copy of
+     * it — including the `credentials`/`delegated` pair, whose omission is what turns a cache miss into a
+     * `409` instead of a failure.
+     */
+    private issuerAuth(entity: EntityAuthBlock, route: InvoiceRoute): Promise<ArcaAuth> {
+        return ticketStore.resolve(
+            entity.entityCode,
+            entity.issuerTaxId,
+            ArcaProvider.SERVICE_BY_ROUTE[route],
+            entity.environment,
+            entity.credentials,
+            entity.delegated,
+        );
+    }
+
+    /**
+     * Refuses a route ARCA has but this provider does not implement, before anything is spent on it.
+     *
+     * `WSMTXCA` is reachable today: contract §7 lists it in the per-entity `configuration.webService` enum,
+     * so core can name it before any implementation exists. It must answer `501`, never fall back to
+     * WSFEv1 — that would authorize a domestic voucher through a service the caller did not choose and
+     * report it as a success.
+     */
+    private static assertRouteImplemented(route: InvoiceRoute): void {
+        if (route === 'WSMTXCA') {
+            throw new NotImplementedError('WSMTXCA (factura electrónica con detalle)');
+        }
+    }
+
     protected async authorizeInvoiceImpl(entity: EntityAuthBlock, invoice: NeutralInvoice): Promise<TaxAuthorizationResult> {
         // Single-voucher flow only: the mapper sets CbteHasta to `voucherNumberFrom`, so a differing
         // `voucherNumberTo` would be silently truncated. Rejected before minting a WSAA ticket.
+        //
+        // WSFEX has no range at all — one `Cbte_nro` per request — so the same guard is what both routes
+        // need, and it stays here rather than being duplicated into each.
         if (invoice.voucherNumberFrom !== invoice.voucherNumberTo) {
             throw new ArcaValidationError(
                 `Single-voucher flow requires voucherNumberFrom === voucherNumberTo ` +
@@ -226,111 +465,67 @@ export class ArcaProvider extends TaxEntityProvider {
             );
         }
 
-        // Core owns the voucher number: authorize exactly the one it sent, never a computed correlative.
-        //
-        // Built before the ticket, not after, because building is where every canonical code is translated —
-        // currency, document type, receiver identification and IVA condition. Resolving first made an
-        // unmapped code cost a `409 CREDENTIALS_REQUIRED`, a re-send carrying the issuer's certificate and a
-        // full WSAA login before the `400` that was decidable from the body alone. The mapper is pure and
-        // clock-free, so nothing here needs the ticket, and this is the same order every other method on
-        // this class states: validate what the body says before spending a credential on it.
-        const request = buildCommonInvoiceRequest(invoice, invoice.voucherNumberFrom);
-
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
-
-        // ARCA would refuse an out-of-window concept-1 `CbteFch` anyway, so refuse it ourselves with an
-        // actionable code — but only after giving idempotent recovery its chance. A resend of a voucher ARCA
-        // already authorized must still get that CAE back, and recovery reconciles against the stored
-        // voucher, which the date never affects.
-        const dateWindowError = concept1DateWindowError(invoice, new Date());
-        if (dateWindowError !== undefined) {
-            const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
-            if (recovered !== undefined) {
-                return recovered;
-            }
-            throw dateWindowError;
+        // Decided from the body alone, before a ticket: the route determines which WSAA scope to spend, so
+        // resolving first could mint a `wsfe` ticket for a voucher only `wsfex` can authorize.
+        const route = invoiceRoute({webService: invoice.webService, documentTypeCode: invoice.documentTypeCode});
+        ArcaProvider.assertRouteImplemented(route);
+        if (route === 'WSFEXV1') {
+            return this.authorizeThrough(entity, invoice, ArcaProvider.exportRoute());
         }
-
-        let result: CommonInvoiceResult;
-        try {
-            result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-                service.requestAuthorization(auth, request),
-            );
-        } catch (err) {
-            // AFIP may surface an already-authorized number as a thrown `10016` `Errors` block rather than a
-            // soft rejection. Reconcile only that conflict; any other business rejection is the truthful
-            // outcome and is re-thrown.
-            if (err instanceof ArcaServiceError && isAlreadyAuthorizedError(err)) {
-                const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
-                if (recovered !== undefined) {
-                    return recovered;
-                }
-            }
-            throw err;
-        }
-
-        // A `10016` rejection means the number is not the next to authorize, which includes core re-sending
-        // one ARCA already authorized. If the voucher is genuinely authorized, return its stored CAE.
-        if (isAlreadyAuthorizedRejection(result)) {
-            const recovered = await this.recoverAuthorizedVoucher(entity, service, auth, invoice, request);
-            if (recovered !== undefined) {
-                return recovered;
-            }
-        }
-
-        // Build the QR only for an approved voucher; the guard narrows `result.cae` to a string.
-        const qr =
-            result.result === 'A' && result.cae !== undefined && result.caeExpiration !== undefined
-                ? buildQrUrl(entity.issuerTaxId, request, result.cae)
-                : undefined;
-        return toNeutralResult(result, qr);
+        return this.authorizeThrough(entity, invoice, ArcaProvider.domesticRoute());
     }
+
 
     /**
-     * Binds `recoverAuthorizedVoucher` to this request: the issuer whose CUIT signs the rebuilt QR, and the
-     * delegation-aware wrapper the query runs under.
+     * WSFEXv1: no QR, and no pre-flight rule of its own.
+     *
+     * The export document's date window (1500) is ARCA's to apply — unlike the domestic concept-1 window,
+     * this service does not second-guess it — and RG 4892's QR payload is specified for the domestic
+     * comprobante, so emitting one here would be inventing a format.
      */
-    private recoverAuthorizedVoucher(
-        entity: EntityAuthBlock,
-        service: ReturnType<typeof commonInvoiceService>,
-        auth: ArcaAuth,
-        invoice: NeutralInvoice,
-        request: CommonInvoiceRequest,
-    ): Promise<TaxAuthorizationResult | undefined> {
-        return recoverAuthorizedVoucher({
-            service,
-            auth,
-            invoice,
-            request,
-            issuerTaxId: entity.issuerTaxId,
-            run: (op) => this.delegationAware(entity, ServiceId.WSFEV1, op),
-        });
+    private static exportRoute(): AuthorizationRoute<FexInvoiceRequest, FexInvoiceResult> {
+        return {
+            route: 'WSFEXV1',
+            recovery: WSFEX_RECOVERY,
+            // The idempotency key is this service's to produce, never the caller's to track: reusing one
+            // replays a stored voucher under a `200` with a real CAE, and nothing downstream catches it.
+            buildRequest: (invoice, voucherNumber) =>
+                buildFexInvoiceRequest(invoice, voucherNumber, nextRequestId(new Date(), Math.random)),
+            service: fexInvoiceService,
+            toNeutral: (result, request): TaxAuthorizationResult => {
+                // On a key this service generated, a replay is impossible — so if the authority reports one,
+                // the generator has repeated and two sales are about to share a voucher. Nothing downstream
+                // can see this, `reprocessed` having left the contract with the key, so it is logged here.
+                if (result.reprocessed) {
+                    console.warn(
+                        `ARCA replayed a stored export voucher for request id ${String(request.requestId)}, ` +
+                            `which this service generated and should never reuse. The voucher described is ` +
+                            `an older one — reconcile it before filing the CAE, and check the generator ` +
+                            `against \`pnpm probe:wsfex-smoke\` (FEXGetLast_ID).`,
+                    );
+                }
+                return toNeutralExportResult(result);
+            },
+        };
     }
+
 
     protected async lastAuthorizedImpl(
         entity: EntityAuthBlock,
         pointOfSaleNumber: number,
         documentTypeCode: number,
     ): Promise<LastAuthorizedResult> {
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
-        const number = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-            service.getLastAuthorizedNumber(auth, pointOfSaleNumber, toCbteTipo(documentTypeCode)),
+        // Routed on the document type alone: the two services keep separate numbering, in separate
+        // point-of-sale registers, so asking the wrong one answers about a different series.
+        const route = invoiceRoute({documentTypeCode});
+        ArcaProvider.assertRouteImplemented(route);
+        const auth = await this.issuerAuth(entity, route);
+        const cbteTipo = toCbteTipo(documentTypeCode);
+
+        const service = ArcaProvider.serviceFor(route, toArcaEnvironment(entity.environment));
+
+        const number = await this.delegationAware(entity, ArcaProvider.SERVICE_BY_ROUTE[route], () =>
+            service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo),
         );
         return {number};
     }
@@ -344,30 +539,55 @@ export class ArcaProvider extends TaxEntityProvider {
         // rather than a silent omission. De-duplicated because a repeated code would spend a SOAP call per
         // copy and put two entries in a `numbers` array core maps back by `documentTypeCode`; insertion order
         // is preserved, and every distinct code still reaches `toCbteTipo`.
-        const mapped = [...new Set(documentTypeCodes)].map((code) => ({code, cbteTipo: toCbteTipo(code)}));
+        //
+        // Each code also carries its own route: this is the one method whose request can legitimately span
+        // both services — `[6, 19]` is a domestic invoice and an export one — and they keep separate
+        // numbering in separate registers. Grouping is what lets one call answer for both instead of forcing
+        // the caller to know it must ask twice.
+        const mapped = [...new Set(documentTypeCodes)].map((code) => {
+            const route = invoiceRoute({documentTypeCode: code});
+            ArcaProvider.assertRouteImplemented(route);
+            return {code, cbteTipo: toCbteTipo(code), route};
+        });
 
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
+        // One ticket per distinct route, since WSAA issues per service; a request naming only domestic types
+        // therefore still mints exactly the one ticket it did before. Each ticket is attached to its codes
+        // rather than kept in a map keyed by route, so no lookup here can be empty.
+        const routes = [...new Set(mapped.map((entry) => entry.route))];
+        const groups = await Promise.all(
+            routes.map(async (route) => ({
+                route,
+                auth: await this.issuerAuth(entity, route),
+                codes: mapped.filter((entry) => entry.route === route),
+            })),
         );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
 
-        // WSFEv1 has no batch operation, so the per-code lookups fan out concurrently on one ticket.
-        // `numbers` follows `mapped` — the distinct codes in the order first named — and is deliberately not
-        // positional against `documentTypeCodes`: `[1, 6, 1, 1]` answers with two entries, keyed by code.
-        const numbers = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-            Promise.all(
-                mapped.map(async ({code, cbteTipo}) => {
-                    const last = await service.getLastAuthorizedNumber(auth, pointOfSaleNumber, cbteTipo);
-                    // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
-                    return {documentTypeCode: code, nextNumber: last + 1};
-                }),
-            ),
-        );
+        // Neither service has a batch numbering operation, so the per-code lookups fan out concurrently on
+        // their route's ticket. `numbers` is keyed by code and deliberately not positional against
+        // `documentTypeCodes`: `[1, 6, 1, 1]` answers with two entries.
+        const environment = toArcaEnvironment(entity.environment);
+        const numbers = (
+            await Promise.all(
+                groups.map(({route, auth, codes}) =>
+                    Promise.all(
+                        codes.map(async ({code, cbteTipo}) => {
+                            const last = await this.delegationAware(
+                                entity,
+                                ArcaProvider.SERVICE_BY_ROUTE[route],
+                                () =>
+                                    ArcaProvider.serviceFor(route, environment).getLastAuthorizedNumber(
+                                        auth,
+                                        pointOfSaleNumber,
+                                        cbteTipo,
+                                    ),
+                            );
+                            // Never-authorized (PtoVta, CbteTipo) → CbteNro 0 → nextNumber 1.
+                            return {documentTypeCode: code, nextNumber: last + 1};
+                        }),
+                    ),
+                ),
+            )
+        ).flat();
         return {numbers};
     }
 
@@ -377,26 +597,42 @@ export class ArcaProvider extends TaxEntityProvider {
         documentTypeCode: number,
         voucherNumber: number,
     ): Promise<TaxAuthorizationResult> {
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
+        const route = invoiceRoute({documentTypeCode});
+        ArcaProvider.assertRouteImplemented(route);
+        const auth = await this.issuerAuth(entity, route);
+        const cbteTipo = toCbteTipo(documentTypeCode);
+        const environment = toArcaEnvironment(entity.environment);
+        const serviceId = ArcaProvider.SERVICE_BY_ROUTE[route];
+        const notFound = (): VoucherNotFoundError =>
+            new VoucherNotFoundError(entity.entityCode, pointOfSaleNumber, documentTypeCode, voucherNumber);
+
+        // Not routed through `serviceFor`: the two answers are different types and map through different
+        // neutral readers, which is exactly what that helper cannot carry.
         try {
-            const result = await this.delegationAware(entity, ServiceId.WSFEV1, () =>
-                service.queryVoucher(auth, pointOfSaleNumber, toCbteTipo(documentTypeCode), voucherNumber),
+            if (route === 'WSFEXV1') {
+                const result = await this.delegationAware(entity, serviceId, () =>
+                    fexInvoiceService(environment).queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
+                );
+                // The export path reads the answer rather than an error code — see `describesNoVoucher`.
+                if (describesNoVoucher(result, voucherNumber)) {
+                    throw notFound();
+                }
+                return toNeutralExportResult(result);
+            }
+            const result = await this.delegationAware(entity, serviceId, () =>
+                commonInvoiceService(environment).queryVoucher(auth, pointOfSaleNumber, cbteTipo, voucherNumber),
             );
             return toNeutralResult(result);
         } catch (err) {
-            // ARCA surfaces a never-issued voucher as a `602` error block, not an empty `200`. Only that
+            // WSFEv1 surfaces a never-issued voucher as a `602` error block, not an empty `200`. Only that
             // becomes a `404`; every other service error stays a `502`, so core keeps the sale pending and
             // retries rather than clearing an orphan it cannot prove was never issued.
+            //
+            // Scoped to WSFEv1's idiom the way `pointsOfSaleImpl`'s `isNoResults` is, and for the same
+            // reason: `602` is a code WSFEX does not use. The export path's own reading is above, and a
+            // `VoucherNotFoundError` raised there passes through this handler untouched.
             if (isVoucherNotFound(err)) {
-                throw new VoucherNotFoundError(entity.entityCode, pointOfSaleNumber, documentTypeCode, voucherNumber);
+                throw notFound();
             }
             throw err;
         }
@@ -410,22 +646,34 @@ export class ArcaProvider extends TaxEntityProvider {
         return {appServer: status.appServer, dbServer: status.dbServer, authServer: status.authServer};
     }
 
-    protected async pointsOfSaleImpl(entity: EntityAuthBlock): Promise<PointsOfSaleResult> {
-        const auth = await ticketStore.resolve(
-            entity.entityCode,
-            entity.issuerTaxId,
-            ServiceId.WSFEV1,
-            entity.environment,
-            entity.credentials,
-            entity.delegated,
-        );
-        const service = commonInvoiceService(toArcaEnvironment(entity.environment));
+    /**
+     * The entity's registered points of sale, from the register the named service keeps.
+     *
+     * There are two, and they do not overlap: WSFEv1's CAE/CAEA register and WSFEX's "Comprobantes de
+     * Exportación – Web Services" (FEEWS). A point of sale good for one is not usable for the other, so
+     * without the selector a caller checking whether it can issue a Factura E would be shown the wrong list
+     * and conclude it can.
+     */
+    protected async pointsOfSaleImpl(
+        entity: EntityAuthBlock,
+        webService?: WebService,
+    ): Promise<PointsOfSaleResult> {
+        const route = invoiceRoute({webService});
+        ArcaProvider.assertRouteImplemented(route);
+        const auth = await this.issuerAuth(entity, route);
+        const environment = toArcaEnvironment(entity.environment);
         try {
-            const points = await this.delegationAware(entity, ServiceId.WSFEV1, () => service.getPointsOfSale(auth));
+            const points = await this.delegationAware(entity, ArcaProvider.SERVICE_BY_ROUTE[route], () =>
+                ArcaProvider.serviceFor(route, environment).getPointsOfSale(auth),
+            );
             return {pointsOfSale: points.map(toNeutralPointOfSale)};
         } catch (err) {
             // ARCA signals "no registered points of sale" with a `602 Sin Resultados` on FEParamGetPtosVenta
             // rather than an empty ResultGet. That is the empty case, not a failure.
+            //
+            // WSFEX answers the same question with an empty `FEXResultGet` instead, which `catalogueRows`
+            // already reads as `[]` — so this branch is the WSFEv1 idiom only, and is left scoped to the
+            // code rather than widened to "any error means empty".
             if (isNoResults(err)) {
                 return {pointsOfSale: []};
             }
@@ -451,6 +699,7 @@ export class ArcaProvider extends TaxEntityProvider {
         environment: GenericEnvironment,
         currencyCodes?: ReadonlyArray<string>,
         date?: string,
+        webService?: WebService,
     ): Promise<CurrencyRatesResult> {
         const now = new Date();
         // Resolved before any I/O so it is present on every outcome, including the all-unavailable one.
@@ -477,81 +726,55 @@ export class ArcaProvider extends TaxEntityProvider {
         // onto the rates in `assembleRates`, once, rather than carried down through the fan-out.
         const validity = applicabilityRange(answeredDay);
 
-        const localRates: Array<UnscopedRate> = [];
-        const localUnavailable: Array<CurrencyRateUnavailableDto> = [];
+        // The export series answers from a different operation, so it branches before any ticket. The rates
+        // it returns are the same numbers (measured identical on every priced currency), but the SET is the
+        // authority's own rule about which currencies an export voucher may name -- which is the reason the
+        // selector exists on this request rather than a difference in price.
+        const route = invoiceRoute({webService});
+        ArcaProvider.assertRouteImplemented(route);
+        if (route === 'WSFEXV1') {
+            return this.exportRates(
+                environment,
+                currencyCodes,
+                answeredDay,
+                referenceDay,
+                validity,
+                refreshAfter,
+            );
+        }
+
+        const local = this.localAnswers(currencyCodes, referenceDay, route);
+        const localRates = local.rates;
+        const localUnavailable = local.unavailable;
         let toFetch: Array<string>;
         let auth: ArcaAuth;
         // One instance for the whole request: the catalogue read and every rate read share it.
         const service = commonInvoiceService(toArcaEnvironment(environment));
 
-        if (currencyCodes == null) {
+        if (local.requested === undefined) {
             // Whole table. Enumerating costs one call on the same ticket the rates then use.
             auth = await this.delegateAuth(environment, ServiceId.WSFEV1);
             const catalogue = await this.delegateCall(environment, ServiceId.WSFEV1, () =>
                 service.getCurrencyTypes(auth),
             );
-            // The one place the whole-table answer is not an intersection with what ARCA returned. The
-            // reference row is our own answer rather than a catalogue entry, and `toMonId` accepts `PES` on
-            // `/invoices/authorize` regardless, so the two endpoints still agree. Conditioning it would let a
-            // short catalogue read silently drop the currency most vouchers are in. The partition below skips
-            // it, so a catalogue that does list it still produces one row.
-            localRates.push(this.referenceRate(referenceDay));
 
             // Fetching only the codes this service can also bill in is what stops the two endpoints
             // disagreeing. Unfiltered, a sync would surface a rate for a code `/invoices/authorize` then
             // refuses with `400 UNKNOWN_CODE` — a currency a caller can offer in a picker but never invoice
             // in. `namesReference` is ignored here alone, since the reference row is pushed above.
-            const catalogued = partitionCurrencyCodes(catalogue.map((entry) => entry.id));
+            const catalogued = partitionCurrencyCodes(catalogue.map((entry) => entry.id), route);
             toFetch = catalogued.toFetch;
 
-            // A catalogue entry we do not know is the only signal that `ARCA_CURRENCY_CODES` has fallen
-            // behind, and it arrives on the daily sync — so it is logged rather than dropped in silence.
-            //
-            // Split first, because the two halves want opposite actions and one of them fires on every
-            // single sync. `ARCA_UNQUOTABLE_CODES` are catalogue entries we left out on purpose, ARCA's own
-            // cotización service having rejected them with a `12000`; telling an operator to "add them to
-            // ARCA_CURRENCY_CODES" every night would be advice that undoes a deliberate measurement, and a
-            // warning nobody can act on is a warning everybody learns to skip. What is worth knowing is the
-            // day that stops being true, so the expected half is logged as the standing note it is.
-            const drifted = catalogued.unsupported.filter((code) => !ARCA_UNQUOTABLE_CODES.has(code));
-            const unquotable = catalogued.unsupported.filter((code) => ARCA_UNQUOTABLE_CODES.has(code));
-
-            if (drifted.length > 0) {
-                console.warn(
-                    `ARCA currency catalogue (${environment}) holds ${drifted.length} code(s) ` +
-                        `this service does not know: ${drifted.join(', ')}. Rates for them ` +
-                        `are not served and invoices naming them are refused — add them to ` +
-                        `ARCA_CURRENCY_CODES.`,
-                );
-            }
-            if (unquotable.length > 0) {
-                console.info(
-                    `ARCA currency catalogue (${environment}) still lists ${unquotable.join(', ')}, which ` +
-                        `FEParamGetCotizacion rejects with a 12000 — not served, by measurement. Re-check ` +
-                        `with \`PROBE_CURRENCY=${unquotable[0] ?? ''} pnpm probe:cotizacion-day\` and see ` +
-                        `ARCA_UNQUOTABLE_CODES.`,
-                );
-            }
+            ArcaProvider.logCatalogueDrift(environment, catalogued.unsupported);
         } else {
-            // An explicit list, split by the same rule the catalogue is. Only the meaning of the two
-            // non-fetchable buckets differs once a caller named them rather than the authority.
-            const requested = partitionCurrencyCodes(currencyCodes);
-            toFetch = requested.toFetch;
-
-            if (requested.namesReference) {
-                localRates.push(this.referenceRate(referenceDay));
-            }
-            // Caught locally rather than relayed as ARCA's `12000`, so an unknown code costs neither a ticket
-            // nor a round trip.
-            for (const code of requested.unsupported) {
-                localUnavailable.push({currencyCode: code, reason: 'UNKNOWN_CODE'});
-            }
+            toFetch = local.requested.toFetch;
 
             // Every code answered without the authority, so resolve no ticket at all: the peso-only till
             // must not be able to fail because ARCA was unreachable.
             if (toFetch.length === 0) {
                 return this.assembleRates(
                     environment,
+                    route,
                     localRates,
                     validity,
                     localUnavailable,
@@ -566,6 +789,7 @@ export class ArcaProvider extends TaxEntityProvider {
         this.rethrowIfSystemic(fetched);
         return this.assembleRates(
             environment,
+            route,
             [...localRates, ...fetched.rates],
             validity,
             [...localUnavailable, ...fetched.unavailable],
@@ -612,8 +836,218 @@ export class ArcaProvider extends TaxEntityProvider {
     }
 
     /** The reference currency's row: `1/1/1`, no authority call. */
+    /**
+     * The part of an answer this service produces without asking the authority: the reference row, and the
+     * codes it will not ask about.
+     *
+     * Shared by both series because the guarantee is: a request every code of which can be answered locally
+     * resolves no ticket at all, so a peso-only till cannot fail because ARCA was unreachable. It was
+     * written twice, and two copies of that guarantee is one too many.
+     *
+     * `requested` is `undefined` for a whole-table request, whose partition comes from the authority's own
+     * catalogue and so cannot be computed before the call.
+     */
+    private localAnswers(
+        currencyCodes: ReadonlyArray<string> | undefined,
+        referenceDay: string,
+        route: InvoiceRoute,
+    ): {
+        rates: Array<UnscopedRate>;
+        unavailable: Array<CurrencyRateUnavailableDto>;
+        requested: CurrencyCodePartition | undefined;
+    } {
+        const rates: Array<UnscopedRate> = [];
+        const unavailable: Array<CurrencyRateUnavailableDto> = [];
+        // `== null` rather than `=== undefined`: `@IsOptional()` skips a property's validators for `null`
+        // too, so an explicit `{"currencyCodes": null}` arrives meaning the omitted case.
+        const requested = currencyCodes == null ? undefined : partitionCurrencyCodes(currencyCodes, route);
+
+        // On a whole-table request the reference row is unconditional, and it is the one place the answer is
+        // not an intersection with what ARCA returned: the row is our own answer rather than a catalogue
+        // entry, and `toMonId` accepts `PES` on `/invoices/authorize` regardless, so the two endpoints still
+        // agree. Conditioning it would let a short catalogue read silently drop the currency most vouchers
+        // are in. Every partition skips the reference code, so a catalogue that does list it still produces
+        // exactly one row.
+        if (requested === undefined || requested.namesReference) {
+            rates.push(this.referenceRate(referenceDay));
+        }
+        // Caught locally rather than relayed as ARCA's `12000`, so an unknown code costs neither a ticket nor
+        // a round trip.
+        for (const code of requested?.unsupported ?? []) {
+            unavailable.push({currencyCode: code, reason: 'UNKNOWN_CODE'});
+        }
+
+        return {rates, unavailable, requested};
+    }
+
+    /**
+     * Reports catalogue codes this service does not know, which is the only signal that
+     * `ARCA_CURRENCY_CODES` has fallen behind — and it arrives on the daily sync, so it is logged rather
+     * than dropped in silence.
+     *
+     * Split first, because the two halves want opposite actions and one of them fires on every single sync.
+     * `ARCA_UNQUOTABLE_CODES` are catalogue entries we left out on purpose, ARCA's own cotización service
+     * having rejected them with a `12000`; telling an operator to "add them to ARCA_CURRENCY_CODES" every
+     * night would be advice that undoes a deliberate measurement, and a warning nobody can act on is a
+     * warning everybody learns to skip. What is worth knowing is the day that stops being true, so the
+     * expected half is logged as the standing note it is.
+     *
+     * Shared by both series. On the export side the input is the codes the day *priced*, which makes the
+     * second half stronger rather than weaker: a code we refuse to quote turning up with a rate is exactly
+     * the reconciliation the note says to watch for.
+     */
+    private static logCatalogueDrift(
+        environment: GenericEnvironment,
+        unsupported: ReadonlyArray<string>,
+    ): void {
+        const drifted = unsupported.filter((code) => !ARCA_UNQUOTABLE_CODES.has(code));
+        const unquotable = unsupported.filter((code) => ARCA_UNQUOTABLE_CODES.has(code));
+
+        if (drifted.length > 0) {
+            console.warn(
+                `ARCA currency catalogue (${environment}) holds ${String(drifted.length)} code(s) ` +
+                    `this service does not know: ${drifted.join(', ')}. Rates for them ` +
+                    `are not served and invoices naming them are refused — add them to ` +
+                    `ARCA_CURRENCY_CODES.`,
+            );
+        }
+        if (unquotable.length > 0) {
+            console.info(
+                `ARCA currency catalogue (${environment}) still lists ${unquotable.join(', ')}, which the ` +
+                    `cotización service rejects with a 12000 — not served, by measurement. Re-check with ` +
+                    `\`PROBE_CURRENCY=${unquotable[0] ?? ''} pnpm probe:cotizacion-day\` and see ` +
+                    `ARCA_UNQUOTABLE_CODES.`,
+            );
+        }
+    }
+
     private referenceRate(rateDate: string): UnscopedRate {
         return toUnscopedRate(REFERENCE_MON_ID, referenceBand(), rateDate);
+    }
+
+    /**
+     * The export series' rates: `FEXGetPARAM_MON_CON_COTIZACION`, which prices the whole table for one day
+     * in a single call.
+     *
+     * A different *fetch*, not a different pipeline. The day rule, the local answers, the band, the vintage
+     * and the assembly are the domestic ones; only the call in the middle differs, because WSFEX prices the
+     * whole day in one request where WSFEv1 has to be asked per code.
+     *
+     * **It asks about the same day the domestic series asks about** — `rateDayCandidates`, the previous
+     * working day — and that is a measurement rather than a preference (production, 2026-09-04):
+     *
+     * - Handed an already-stepped-back day the batch does **not** step again: asked `20260903` it answered
+     *   *for* `20260903`. So the shared rule is safe to apply here.
+     * - The two services fall back **differently**, which is why sharing it matters. The batch answers "the
+     *   close of the day asked, or the latest before it"; `FEParamGetCotizacion` answers `602` and falls
+     *   back to nothing. Asked about the voucher's own day, the export series would therefore start
+     *   answering with *that day's* close the moment it is published, while the domestic series still
+     *   answered with the previous one — the same request, two days, no diagnostic. Asking both about the
+     *   previous working day makes them agree by construction, and it is the day rule 2053 names outright.
+     *
+     * What is still genuinely simpler here:
+     *
+     * - **No straddling.** One call cannot land either side of a publication boundary, which is the risk the
+     *   domestic fan-out is batched to mitigate rather than remove.
+     * - **`unavailable` comes free.** The set returned is narrower than the catalogue — 27 of 49 on the day
+     *   measured — and that narrowing *is* the authority's own rule about which currencies an export voucher
+     *   may name. A requested code absent from the day's answer is unavailable for that day, with no
+     *   per-code call to discover it.
+     *
+     * The rates themselves are the same numbers WSFEv1 publishes: all 27 agreed exactly, and the batch
+     * agreed with WSFEX's own per-currency method. So this is not a different price list — it is the same
+     * one, delivered in one call and filtered to what an export may use.
+     */
+    private async exportRates(
+        environment: GenericEnvironment,
+        currencyCodes: ReadonlyArray<string> | undefined,
+        answeredDay: string,
+        referenceDay: string,
+        validity: RateValidity,
+        refreshAfter: string,
+    ): Promise<CurrencyRatesResult> {
+        const local = this.localAnswers(currencyCodes, referenceDay, EXPORT_ROUTE);
+        const rates = local.rates;
+        const unavailable = local.unavailable;
+        const requested = local.requested;
+
+        // Every code answered without the authority, so resolve no ticket at all — the same guarantee the
+        // domestic path makes: a peso-only till must not be able to fail because ARCA was unreachable.
+        if (requested?.toFetch.length === 0) {
+            return this.assembleRates(
+                environment,
+                EXPORT_ROUTE,
+                rates,
+                validity,
+                unavailable,
+                refreshAfter,
+                undefined,
+            );
+        }
+
+        const auth = await this.delegateAuth(environment, ServiceId.WSFEXV1);
+        const service = fexInvoiceService(toArcaEnvironment(environment));
+
+        // The same candidates the fan-out walks, for the same reason: a row is labelled by the business day
+        // it closed on, so the voucher's own day is one publication too new. `Fecha_CTZ` is mandatory here
+        // (2054), so a request that named no day still resolves one rather than asking for "the latest".
+        //
+        // The walk is a safety net rather than the normal path: the batch already falls back to the most
+        // recent close at or before the day asked, so a second candidate is only reached when the authority
+        // has nothing at all. The domestic walk exists because `FEParamGetCotizacion` does not fall back.
+        const days = rateDayCandidates(answeredDay);
+        let priced: Awaited<ReturnType<typeof service.getCurrencyRatesForDay>> = [];
+        for (const day of days) {
+            priced = await this.delegateCall(environment, ServiceId.WSFEXV1, () =>
+                service.getCurrencyRatesForDay(auth, day),
+            );
+            if (priced.length > 0) {
+                break;
+            }
+        }
+
+        const byCode = new Map(priced.map((row) => [normalizeCurrencyCode(row.monId), row]));
+        const rateDays: Array<string> = [];
+        // Whatever the caller asked for, or everything the day priced intersected with what this service
+        // supports — the same intersection the domestic whole-table branch applies, so the two endpoints
+        // still agree about which currencies can be invoiced in.
+        const catalogued = partitionCurrencyCodes([...byCode.keys()], EXPORT_ROUTE);
+        const wanted = requested?.toFetch ?? catalogued.toFetch;
+        // The same drift signal the domestic whole-table sync reports, and on this series the input is the
+        // codes the day actually priced — so a code we refuse to quote turning up here is worth knowing.
+        ArcaProvider.logCatalogueDrift(environment, catalogued.unsupported);
+
+        for (const code of wanted) {
+            const row = byCode.get(normalizeCurrencyCode(code));
+            // Absent from the day's answer is exactly the existing `NO_PUBLICATION`: the authority has no
+            // rate for this code, which on this series also means an export voucher may not name it. A rate
+            // of `0` is unusable rather than a value — `Number('')` is a finite zero, and a zero rate would
+            // divide a total to nothing.
+            if (row?.rate === undefined || row.rate <= 0) {
+                unavailable.push({currencyCode: code, reason: 'NO_PUBLICATION'});
+                continue;
+            }
+            // A rate with no usable day has nothing to key it by, which is what `UPSTREAM_ERROR` already
+            // names — the same reading the domestic path gives an answer it cannot date.
+            const rateDay = row.rateDate;
+            if (rateDay === undefined || !isArcaDay(rateDay)) {
+                unavailable.push({currencyCode: code, reason: 'UPSTREAM_ERROR'});
+                continue;
+            }
+            rateDays.push(rateDay);
+            rates.push(toUnscopedRate(code, arcaBand(row.rate), arcaDayToIsoDate(rateDay)));
+        }
+
+        const vintage = vintageOf(rateDays);
+        return this.assembleRates(
+            environment,
+            EXPORT_ROUTE,
+            rates,
+            validity,
+            unavailable,
+            refreshAfter,
+            vintage,
+        );
     }
 
     /**
@@ -762,6 +1196,7 @@ export class ArcaProvider extends TaxEntityProvider {
      */
     private assembleRates(
         environment: GenericEnvironment,
+        route: InvoiceRoute,
         rates: Array<UnscopedRate>,
         validity: RateValidity,
         unavailable: Array<CurrencyRateUnavailableDto>,
@@ -771,6 +1206,7 @@ export class ArcaProvider extends TaxEntityProvider {
         return {
             entityCode: ENTITY_CODE,
             environment,
+            webService: WEB_SERVICE_BY_ROUTE[route],
             rates: withValidity(rates, validity),
             // Optional keys are omitted rather than sent empty or `null`.
             ...(unavailable.length > 0 ? {unavailable} : {}),

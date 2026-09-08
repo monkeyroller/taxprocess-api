@@ -158,3 +158,60 @@ describe('toHttpError — TaxpayerNotFoundError', () => {
         expect(result.body.error.message).toContain('No existe persona con ese Id');
     });
 });
+
+describe('toHttpError — a body the parser refused', () => {
+    /**
+     * The shape express's body parser actually throws, captured from a real malformed request: it spells
+     * the status `status`/`statusCode` and carries no `httpCode`, which is why it used to fall through to
+     * the `500` catch-all.
+     */
+    const parseFailure = (overrides: Record<string, unknown> = {}): unknown =>
+        Object.assign(new SyntaxError('Expected double-quoted property name in JSON at position 73'), {
+            type: 'entity.parse.failed',
+            status: 400,
+            statusCode: 400,
+            expose: true,
+            ...overrides,
+        });
+
+    it('answers 400, not the 500 that told core this service had failed', () => {
+        const result = toHttpError(parseFailure());
+        expect(result.status).toBe(400);
+        expect(result.body.error.code).toBe('INVALID_REQUEST_BODY');
+        expect(result.body.error.details).toEqual({reason: 'entity.parse.failed'});
+    });
+
+    it('never relays the parser message, which quotes the body it choked on', () => {
+        // V8 renders the offending fragment into the message, and these bodies carry `entity.credentials`.
+        const {message} = toHttpError(parseFailure({
+            message: 'Unexpected token \'-\', "-----BEGIN PRIVATE KEY-----MIIE" is not valid JSON',
+        })).body.error;
+        expect(message).not.toContain('PRIVATE KEY');
+        expect(message).toBe('Request body could not be read');
+    });
+
+    it('keeps the parser status rather than flattening every refusal to 400', () => {
+        expect(toHttpError(parseFailure({type: 'entity.too.large', status: 413})).status).toBe(413);
+        expect(toHttpError(parseFailure({type: 'charset.unsupported', status: 415})).status).toBe(415);
+    });
+
+    it('refuses to adopt a 5xx from an unrelated error that happens to carry type + status', () => {
+        // Without the 4xx bound, any library error with these two keys would be reported as if this layer
+        // had classified it.
+        const result = toHttpError({type: 'some.library.failure', status: 503, message: 'upstream down'});
+        expect(result.status).toBe(500);
+        expect(result.body.error.code).toBe('INTERNAL');
+    });
+
+    it('still prefers the framework spelling when an error carries both', () => {
+        const both = Object.assign(new Error('no'), {
+            name: 'NotFoundError',
+            httpCode: 404,
+            type: 'entity.parse.failed',
+            status: 400,
+        });
+        const result = toHttpError(both);
+        expect(result.status).toBe(404);
+        expect(result.body.error.code).toBe('NotFoundError');
+    });
+});

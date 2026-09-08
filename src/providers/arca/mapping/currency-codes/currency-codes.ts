@@ -1,4 +1,5 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
+import type {InvoiceRoute} from '../invoice-routing/invoice-routing.js';
 
 /**
  * ARCA's currency catalogue (`MonId`) — the fourth canonical fiscal code. For ARCA the value is already the
@@ -18,7 +19,9 @@ import {ArcaValidationError} from '../../sdk/core/errors.js';
  *
  * This set is the definition of a currency this service supports rather than merely an input filter:
  * `/currencies/rates` intersects the authority's live catalogue with it, so the rates a caller can cache and
- * the currencies it can invoice in are the same set. The whole-table sync logs any catalogue entry missing
+ * the currencies it can invoice in are the same set. That invariant is now held **per service** — see
+ * {@link currencyCodesFor} — which is why both the rates filter and `toMonId` take the same selector. A
+ * split on one side alone would quietly break the property the intersection exists to guarantee. The whole-table sync logs any catalogue entry missing
  * from here, which is the one place the drift becomes visible.
  *
  * Transcribed from ARCA's own publication and verified against a live `FEParamGetTiposMonedas`.
@@ -76,6 +79,37 @@ export const ARCA_CURRENCY_CODES: ReadonlySet<string> = new Set<string>([
 export const ARCA_UNQUOTABLE_CODES: ReadonlySet<string> = new Set<string>(['RUB', 'NZD']);
 
 /**
+ * The catalogue each of the entity's services publishes.
+ *
+ * **One set today, and measured to be one set**: production 2026-09-04, WSFEX's `FEXGetPARAM_MON` is
+ * byte-identical to WSFEv1's `FEParamGetTiposMonedas` — the same 49 rows — and the two price the same 27
+ * codes at the same rates. So the three entries here point at one object rather than repeating it, and no
+ * drift test is needed to keep two transcriptions honest.
+ *
+ * It is a table anyway, rather than the bare set the callers used to read, because *equal today* is not
+ * *the same*. Each service validates a submitted rate against its own reference (10119 for WSFEv1, 1667 for
+ * WSFEX), and if those ever diverge the failure is silent — a voucher judged against a number this service
+ * never read, with nothing in the answer to explain it. With the seam in place a divergence is one entry
+ * pointing somewhere else; without it, it is a change to every call site that asks what a currency is.
+ *
+ * `WSMTXCA` shares WSFEv1's entry as a placeholder, not a measurement: its manual has not been read, and
+ * the route is refused with a `501` before anything asks this.
+ */
+const CURRENCY_CODES_BY_SERVICE: Readonly<Record<InvoiceRoute, ReadonlySet<string>>> = {
+    WSFEV1: ARCA_CURRENCY_CODES,
+    WSMTXCA: ARCA_CURRENCY_CODES,
+    WSFEXV1: ARCA_CURRENCY_CODES,
+};
+
+/**
+ * The currencies `webService` supports. Defaults to WSFEv1, which is what an unspecified service has always
+ * meant on this wire.
+ */
+export function currencyCodesFor(webService: InvoiceRoute = 'WSFEV1'): ReadonlySet<string> {
+    return CURRENCY_CODES_BY_SERVICE[webService];
+}
+
+/**
  * A currency code in the spelling the catalogue is keyed by — trimmed and upper-cased. Every membership test
  * must go through here, and it is a named function because the inlined copies had already drifted: the
  * whole-table sync asked two questions about one catalogue entry on adjacent lines and only the first
@@ -91,9 +125,11 @@ export function normalizeCurrencyCode(currencyCode: string): string {
     return currencyCode.trim().toUpperCase();
 }
 
-/** Whether `currencyCode` names a currency this service supports, in any casing or padding of whitespace. */
-export function isKnownCurrencyCode(currencyCode: string): boolean {
-    return ARCA_CURRENCY_CODES.has(normalizeCurrencyCode(currencyCode));
+/**
+ * Whether `currencyCode` names a currency `webService` supports, in any casing or padding of whitespace.
+ */
+export function isKnownCurrencyCode(currencyCode: string, webService?: InvoiceRoute): boolean {
+    return currencyCodesFor(webService).has(normalizeCurrencyCode(currencyCode));
 }
 
 /**
@@ -101,9 +137,9 @@ export function isKnownCurrencyCode(currencyCode: string): boolean {
  * Case- and whitespace-tolerant on input but returns the catalogue's spelling, so a caller sending `"dol"`
  * gets `DOL` on the wire rather than a `12000` from ARCA.
  */
-export function toMonId(currencyCode: string): string {
+export function toMonId(currencyCode: string, webService?: InvoiceRoute): string {
     const candidate = normalizeCurrencyCode(currencyCode);
-    if (!ARCA_CURRENCY_CODES.has(candidate)) {
+    if (!currencyCodesFor(webService).has(candidate)) {
         throw new ArcaValidationError(
             `No ARCA MonId (currency) mapping for canonical code "${currencyCode}"`,
             'UNKNOWN_CODE',

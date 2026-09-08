@@ -80,24 +80,171 @@ describe('every nested request block is required, not merely validated', () => {
         expect(errors.map((e) => e.property)).toContain(missing);
     });
 
-    it('reports a missing receiver on the invoice body itself', async () => {
-        // Nested one level deeper than the envelopes above, and reached by the same dereference:
-        // `buildCommonInvoiceRequest` reads `invoice.receiver.identificationTypeCode` unconditionally.
+    /**
+     * An invoice body has to name a buyer, and there are now two ways to do it — `receiver` for a domestic
+     * voucher, `export` for a foreign-trade one. Neither can be `@IsDefined` on its own any more, so the
+     * requirement moved to a class-level check reported on `documentTypeCode`, the field that decides which
+     * of the two applies.
+     *
+     * The original hazard is unchanged and is why this is a hard requirement rather than a preference:
+     * nested validation has nothing to validate on a missing object, so it passes, and the mapper then
+     * dereferences `undefined`.
+     */
+    const invoiceBody = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+        documentTypeCode: 1,
+        concept: 1,
+        pointOfSaleNumber: 3,
+        voucherNumberFrom: 17,
+        voucherNumberTo: 17,
+        currencyCode: 'PES',
+        currencyRate: 1,
+        issueDate: '2026-08-05',
+        lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}],
+        ...overrides,
+    });
+
+    const exportBlock = {
+        destinationCode: '203',
+        clientName: 'Joao Da Silva',
+        clientAddress: 'Rua 76 km 34.5 Alagoas',
+        clientTaxId: 'PJ54482221-l',
+        language: 'es',
+    };
+
+    it('reports a body naming neither receiver nor export', async () => {
+        const errors = await validate(plainToInstance(NeutralInvoiceDto, invoiceBody()));
+
+        expect(errors.map((e) => e.property)).toContain('documentTypeCode');
+        expect(JSON.stringify(errors)).toContain('names no buyer');
+    });
+
+    it('reports a body naming both, rather than choosing one', async () => {
         const errors = await validate(
-            plainToInstance(NeutralInvoiceDto, {
-                documentTypeCode: 1,
-                concept: 1,
-                pointOfSaleNumber: 3,
-                voucherNumberFrom: 17,
-                voucherNumberTo: 17,
-                currencyCode: 'PES',
-                currencyRate: 1,
-                issueDate: '2026-08-05',
-                lines: [{netAmount: 100, taxRatePercent: 21, taxAmount: 21}],
-            }),
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
+                    export: exportBlock,
+                }),
+            ),
         );
 
-        expect(errors.map((e) => e.property)).toContain('receiver');
+        expect(errors.map((e) => e.property)).toContain('documentTypeCode');
+    });
+
+    it('accepts a domestic body, and an export body — both carrying a concept', async () => {
+        const domestic = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
+                }),
+            ),
+        );
+        expect(domestic).toEqual([]);
+
+        const foreign = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    documentTypeCode: 19,
+                    // One catalogue serves both documents now. `2` is services, valid on either.
+                    concept: 2,
+                    lines: [],
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    export: exportBlock,
+                }),
+            ),
+        );
+        expect(foreign).toEqual([]);
+    });
+
+    it('requires a concept on an export body too, not only a domestic one', async () => {
+        // The inverse of what this asserted before. `concept` used to be forbidden on an export, its
+        // counterpart being a separate `exportType` field; one catalogue now serves both, so an export
+        // that names nothing is as incomplete as a domestic one that does.
+        const errors = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    documentTypeCode: 19,
+                    concept: undefined,
+                    lines: [],
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    export: exportBlock,
+                }),
+            ),
+        );
+
+        expect(errors.map((e) => e.property)).toContain('concept');
+    });
+
+    it('refuses a concept the document cannot express, at the provider rather than here', async () => {
+        // `4` (other) is export-only and `3` (goods and services) domestic-only, but which document a type
+        // code names is the authority's own numbering -- so the DTO accepts all four and the provider
+        // refuses the one its service has no code for. Pinned so nobody "tightens" it into this layer.
+        const errors = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    documentTypeCode: 19,
+                    concept: 3,
+                    lines: [],
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    export: exportBlock,
+                }),
+            ),
+        );
+
+        expect(errors).toEqual([]);
+    });
+
+    describe('a shipment can only accompany goods', () => {
+        // The rule reads `concept` (on the invoice) and the permits (inside `export`), so it can only live
+        // here -- a class-level validator sees one object, and from `InvoiceExportDto` the concept is
+        // invisible. That is why it moved up when the two vocabularies merged.
+        const shipping = (concept: number, permit: Record<string, unknown>): Record<string, unknown> =>
+            invoiceBody({
+                documentTypeCode: 19,
+                concept,
+                lines: [],
+                items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                export: {...exportBlock, ...permit},
+            });
+
+        it('refuses permits on a voucher that is not for goods', async () => {
+            const errors = await validate(
+                plainToInstance(NeutralInvoiceDto, shipping(2, {shippingPermits: [{permitId: 'X', destinationCode: '203'}]})),
+            );
+            expect(JSON.stringify(errors)).toContain('nothing to ship');
+        });
+
+        it('refuses an asserted permit on a voucher that is not for goods', async () => {
+            const errors = await validate(
+                plainToInstance(NeutralInvoiceDto, shipping(2, {shippingPermitPresent: true})),
+            );
+            expect(JSON.stringify(errors)).toContain('nothing to ship');
+        });
+
+        it('allows an explicit "no permit yet" on a goods voucher', async () => {
+            const errors = await validate(
+                plainToInstance(NeutralInvoiceDto, shipping(1, {shippingPermitPresent: false, incoterm: 'CIF'})),
+            );
+            expect(errors).toEqual([]);
+        });
+
+        it('says nothing about a domestic voucher, which carries no permits to judge', async () => {
+            const errors = await validate(
+                plainToInstance(
+                    NeutralInvoiceDto,
+                    invoiceBody({
+                        concept: 2,
+                        receiver: {identificationTypeCode: 80, identificationNumber: '20111111112', fiscalConditionCode: 1},
+                    }),
+                ),
+            );
+            expect(errors).toEqual([]);
+        });
     });
 
     it('needs no such guard on `lines`, whose @IsArray already rejects an absent one', async () => {

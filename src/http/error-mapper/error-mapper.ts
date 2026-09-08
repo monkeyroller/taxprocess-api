@@ -44,10 +44,18 @@ function make(status: number, code: string, message: string, details?: unknown):
     return {status, body: {error}};
 }
 
+/**
+ * Narrows a thrown value to an object carrying `name`. The one spelling every reader below shares, so a
+ * fourth error shape adds a call rather than a fourth copy of the same three-part check.
+ */
+function hasProperty<K extends string>(err: unknown, name: K): err is Record<K, unknown> {
+    return typeof err === 'object' && err !== null && name in err;
+}
+
 /** Reads a numeric `httpCode` off framework HTTP errors without relying on `instanceof`. */
 function httpCodeOf(err: unknown): number | undefined {
-    if (typeof err === 'object' && err !== null && 'httpCode' in err) {
-        const code: unknown = err.httpCode;
+    if (hasProperty(err, 'httpCode')) {
+        const code = err.httpCode;
         return typeof code === 'number' ? code : undefined;
     }
     return undefined;
@@ -58,10 +66,42 @@ function messageOf(err: unknown, fallback: string): string {
 }
 
 /**
+ * express's body parser rejects a malformed, oversized or unreadable body before any action runs, and
+ * spells the status `status`/`statusCode` where routing-controllers spells it `httpCode`. `httpCodeOf` never
+ * matched one, so a body the caller truncated — an interrupted send, a proxy that cut the stream — came back
+ * `500 INTERNAL`: this service reporting its own failure for a request that was malformed on arrival, and a
+ * status core may retry rather than fix.
+ *
+ * The parser's own `message` is dropped rather than relayed. V8 quotes the fragment it choked on
+ * (`Unexpected token 'n', "{not json" is not valid JSON`), and these bodies carry
+ * `entity.credentials.keyPem` — the same reason `ValidationSummary` drops `value`. `type` is body-parser's
+ * own fixed vocabulary, so it names the reason without echoing anything submitted.
+ */
+function bodyParseErrorOf(err: unknown): HttpErrorResult | undefined {
+    if (!hasProperty(err, 'type') || !hasProperty(err, 'status') || !hasProperty(err, 'expose')) {
+        return undefined;
+    }
+    const {type, status, expose} = err;
+    // `expose` is http-errors' "safe to tell the caller" flag, set on every 4xx body-parser raises. Matching
+    // on it rather than on shape alone is what keeps an unrelated library's `{type, status}` from being
+    // reported as a malformed body, with its `type` echoed verbatim into `details`.
+    if (expose !== true || typeof type !== 'string' || typeof status !== 'number') {
+        return undefined;
+    }
+    // A whole 4xx. `res.status()` throws on a non-integer from inside the error handler, where nothing
+    // catches it and the caller gets no answer at all — the failure `error-envelope.contract.test.ts`
+    // already pins for an undefined status.
+    if (!Number.isInteger(status) || status < 400 || status >= 500) {
+        return undefined;
+    }
+    return make(status, 'INVALID_REQUEST_BODY', 'Request body could not be read', {reason: type});
+}
+
+/**
  * A class-validator `ValidationError` trimmed to the caller-safe fields. Drops `value` and `target`, which
  * hold the submitted data — credentials included — and must never echo back in an error body.
  */
-interface ValidationSummary {
+export interface ValidationSummary {
     readonly property: string;
     readonly constraints?: Record<string, string>;
     readonly children?: ReadonlyArray<ValidationSummary>;
@@ -91,18 +131,16 @@ function summarizeValidationErrors(errors: unknown): ReadonlyArray<ValidationSum
 
 /** The safe validation details off a `BadRequestError`, whose failures live on its `errors` property. */
 function validationDetailsOf(err: unknown): ReadonlyArray<ValidationSummary> | undefined {
-    if (typeof err === 'object' && err !== null && 'errors' in err) {
-        return summarizeValidationErrors(err.errors);
-    }
-    return undefined;
+    return hasProperty(err, 'errors') ? summarizeValidationErrors(err.errors) : undefined;
 }
 
 /**
  * Maps any thrown value to an HTTP status and neutral error body.
  *
- * Three kinds of input and no fourth: the neutral errors, each with a status the contract fixes; a
+ * Four kinds of input and no fifth: the neutral errors, each with a status the contract fixes; a
  * `ProviderFault`, whose category gives the status and whose code, message and details the provider already
- * authored; and framework HTTP errors, matched by their numeric `httpCode`. Anything else is a `500`.
+ * authored; framework HTTP errors, matched by their numeric `httpCode`; and a body the parser refused
+ * before any of those existed. Anything else is a `500`.
  *
  * A provider's own error classes never appear here — `TaxEntityProvider` translates them on the way out of
  * every public method.
@@ -164,6 +202,12 @@ export function toHttpError(err: unknown): HttpErrorResult {
         // Surfaces class-validator field failures so the caller can see which field failed: the framework
         // message promises an `errors` property, which the wire envelope exposes as `details`.
         return make(httpCode, name, messageOf(err, 'Request failed'), validationDetailsOf(err));
+    }
+
+    // After the framework's own spelling, so an error carrying both is classified by `httpCode`.
+    const bodyParseError = bodyParseErrorOf(err);
+    if (bodyParseError !== undefined) {
+        return bodyParseError;
     }
 
     return make(500, 'INTERNAL', 'Internal Server Error');

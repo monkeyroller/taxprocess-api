@@ -7,7 +7,9 @@ import {
     NextNumbersRequestDto,
     QueryVoucherRequestDto,
 } from '../dto/invoice-request.dto.js';
-import type {LastAuthorizedResultDto} from '../dto/authorization-result.dto.js';
+import type {
+    LastAuthorizedResultDto,
+} from '../dto/authorization-result.dto.js';
 import {sendError} from '../error-mapper/error-mapper.js';
 
 /**
