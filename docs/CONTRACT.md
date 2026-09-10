@@ -1253,9 +1253,8 @@ The **document types** row above is the complete set WSFEXv1 authorizes — ARCA
 > partial union of two different sets, so it answers neither "what may I issue" nor "what may I associate".
 
 Sending `88` or `89` as the invoice's own `documentTypeCode` answers `400 ARCA_VALIDATION`,
-`details.code: "UNKNOWN_CODE"` — the refusal happens here rather than at the authority. That is the right
-answer for the voucher being authorized; it is the *wrong* answer inside `associatedVouchers`, which is the
-known gap below.
+`details.code: "UNKNOWN_CODE"` — the refusal happens here rather than at the authority. Inside
+`associatedVouchers` the same codes are **accepted**, that being where they belong.
 
 **`associatedVouchers` on an export.** ARCA's grid for which types may accompany which:
 
@@ -1270,18 +1269,38 @@ A `19` therefore carries associated vouchers **only** in that second row. An ord
 of sale is electronic, which this service cannot check, so a wrong pairing comes back as the authority's own
 rejection (1680, 1749, 2040–2055) rather than a local `400`.
 
-> ⚠️ **Known gap — the second row is not fully reachable today.** Each
-> `associatedVouchers[].documentTypeCode` on an export *is* put through the canonical membership check, and
-> the canonical set currently holds `19`, `20`, `21` and `91` but **not `88`, `89`, `993` or `994`** — so
-> those four answer `400 UNKNOWN_CODE` here even though ARCA accepts them. The tobacco-remito association is
-> therefore unavailable until the set is widened. Say so if you need it; it is a data change, not a design
-> one. **The domestic path does not carry `associatedVouchers` at all** — see the note under
-> `/invoices/authorize`.
+The *type* of each referenced voucher **is** checked, against a wider set than the invoice's own — see
+below. Both documents behave the same way here: an export and a domestic voucher carry `associatedVouchers`
+identically.
 
 `22` (*Facturas — Permiso Exportación Simple*) is **not** an export document type here, and not because
 Exporta Simple is unsupported: that regime is invoiced as a `19` carrying simplified-export `Opcionales`.
 `22` is a separate legacy code in ARCA's master voucher table that WSFEXv1 neither publishes nor validates.
 It routes to the ordinary service and is refused there.
+
+#### `associatedVouchers` admits codes `documentTypeCode` does not
+
+A referenced voucher may be an ordinary document — the invoice a credit note adjusts — **or a remito**,
+which no invoicing service authorizes and which therefore is not a `documentTypeCode` anyone could send.
+`associatedVouchers[].documentTypeCode` accepts both; the invoice's own `documentTypeCode` accepts only the
+first. The additional codes:
+
+| code | | |
+| --- | --- | --- |
+| `88` | Remito Electrónico de Tabaco Acondicionado | |
+| `89` | Resumen de Datos de Exportación de Tabaco Acondicionado | export only |
+| `91` | Remito R | |
+| `993` / `994` | Remito Electrónico Harinero — Automotor / Ferroviario | |
+| `995` | Remito Electrónico Cárnico | |
+| `988`, `990`, `991`, `996`, `997` | ARCA cites these as associable and never says what they are | |
+
+The last row is honest rather than lazy: those five appear in ARCA's validation text (10120/10157) and in
+no catalogue it publishes, so there is nothing to measure them against. They are accepted, because refusing
+a code the authority accepts is the worse failure.
+
+> The association can be **mandatory**, not merely permitted: an issuer declaring a cárnica, harinera or
+> tabaco activity must reference the matching remito (10225–10229). That is why the set is open to these
+> codes at all.
 
 ### Destination: the fifth canonical code
 

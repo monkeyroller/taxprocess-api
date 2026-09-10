@@ -6,6 +6,49 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-10 (later) — Four fixes the catalogue measurement turned up
+
+Branch `develop`. Measuring `FEParamGetTiposCbte` against production to settle what code `91` is turned up
+four defects. All are fixed; two of them close gaps stated in the entry below, which is hours old.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 23.1 | 🔴 The **domestic** path now carries `associatedVouchers` and `optionals` to the authority. It carried neither: both were accepted, validated, and dropped before the SOAP call | **Re-check anything that sent either and appeared to work.** A domestic credit note referencing its original was authorizing with no reference at all |
+| 23.2 | `associatedVouchers[].documentTypeCode` now accepts the remitos — `88`, `89`, `91`, `988`, `990`, `991`, `993`, `994`, `995`, `996`, `997` | You can now send the association 10225–10229 can require |
+| 23.3 | ⚠️ **The used-goods voucher is `49`, not `30`.** `30` is refused now; `49` is accepted | **Change it if you send it.** `30` never worked — it passed our check and ARCA refused it |
+| 23.4 | ⚠️ `91` is no longer a valid `documentTypeCode` (it is a Remito R, valid only in `associatedVouchers`) | Nothing, unless you were sending `91` as a voucher type — which ARCA refused |
+
+### 23.1 is the one that matters
+
+`invoice.associatedVouchers` and `invoice.optionals` were in the DTO, were validated, and were mapped by
+the **export** path — but the domestic mapper never copied them into the request it built. The WSFEv1 SOAP
+builder had handled both all along, so nothing failed and nothing logged: the fields simply did not arrive.
+
+Two consequences worth checking on your side:
+
+- **A domestic credit or debit note that referenced its original invoice sent no reference.** ARCA accepted
+  it, `CbtesAsoc` being optional for an ordinary nota, so those vouchers exist and are valid — they just do
+  not name what they adjust.
+- **FCE MiPyMEs (`201`…`213`) could not work.** It requires `Opcionales` id 2101 (the CBU) and, on its
+  notas, an associated voucher. If you tried the regime and concluded it was unsupported, retry it.
+
+### Why `49` and `91` were wrong, and how we know
+
+`FEParamGetTiposCbte` measured against **production** returns 36 rows. `30` is not among them; row `49`
+reads *"Comprobante de Compra de Bienes Usados a Consumidor Final"*. `91` is not among them either — both
+manuals call it a remito (WSFEX 1754 names it *Remito R*; WSFEv1 lists it with the other remitos in
+10120/10157), so it was in the document-type set under an invented name.
+
+Neither had a working caller: `30` and `91` both passed our check and were refused by ARCA, so the change
+turns an authority rejection into a local `400` for one and unlocks a valid code for the other.
+
+> 🟡 **Still true:** 19 further codes in the canonical document-type set are authorizable by no implemented
+> service and will be refused by ARCA if sent (`14`, `16`, `22`, `36`–`38`, `41`, `55`, `62`, `65`,
+> `80`–`82`, `92`–`95`). Narrowing that set is a separate decision — tell us if you want it, since it would
+> turn those into a local `400`.
+
+---
+
 ## 2026-09-10 — Documentation only: the export document types, and the catalogue that lists more
 
 Branch `develop`. **No behaviour changed.** §5 gained a subsection under the services catalogue recording a
@@ -21,8 +64,8 @@ authority. Neither gap is new; both are newly *known*.
 | 22.2 | `88` and `89` are documented as *associated-only*; sending either as `documentTypeCode` is `400 UNKNOWN_CODE` | None; the behaviour is unchanged and always was this |
 | 22.3 | ARCA's association grid is published — what may accompany a `19` vs a `20`/`21`, and the per-row maximum | Read it before sending `associatedVouchers` on an export |
 | 22.4 | `22` is documented as not-an-export-type, with the correct reason | None |
-| 22.5 | 🟡 **Known gap now stated:** `88`, `89`, `993`, `994` are refused locally inside `associatedVouchers` though ARCA accepts them, so the tobacco-remito association is unreachable | Nothing to do — but **say so if you need it**, it is a one-line data change |
-| 22.6 | 🔴 **Known gap now stated:** the *domestic* path does not carry `associatedVouchers` or `optionals` to the authority at all | **Do not rely on either on a domestic voucher yet.** An FCE (`201`…`213`) needs both, so that regime is not usable until fixed |
+| 22.5 | 🟡 **Known gap now stated** — ✅ FIXED in 23, below: `88`, `89`, `993`, `994` are refused locally inside `associatedVouchers` though ARCA accepts them, so the tobacco-remito association is unreachable | Nothing to do — but **say so if you need it**, it is a one-line data change |
+| 22.6 | 🔴 **Known gap now stated** — ✅ FIXED in 23, below: the *domestic* path does not carry `associatedVouchers` or `optionals` to the authority at all | **Do not rely on either on a domestic voucher yet.** An FCE (`201`…`213`) needs both, so that regime is not usable until fixed |
 
 ### Why this is worth an entry at all
 
