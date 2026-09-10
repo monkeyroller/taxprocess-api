@@ -1252,13 +1252,12 @@ The **document types** row above is the complete set WSFEXv1 authorizes — ARCA
 > catalogue the associable set either: `91`, `993` and `994` are associable and absent from it. It is a
 > partial union of two different sets, so it answers neither "what may I issue" nor "what may I associate".
 
-Sending `88` or `89` as `documentTypeCode` answers `400 ARCA_VALIDATION`, `details.code: "UNKNOWN_CODE"` —
-they are not canonical document types, so the refusal happens here rather than at the authority.
+Sending `88` or `89` as the invoice's own `documentTypeCode` answers `400 ARCA_VALIDATION`,
+`details.code: "UNKNOWN_CODE"` — the refusal happens here rather than at the authority. That is the right
+answer for the voucher being authorized; it is the *wrong* answer inside `associatedVouchers`, which is the
+known gap below.
 
-**`associatedVouchers` on an export is relayed, not validated.** Which types may accompany which is
-conditional on the authorizing type *and* on whether the referenced point of sale is electronic, neither of
-which this service can check, so a wrong combination comes back as the authority's own rejection (1680,
-1749, 2040–2055) rather than a local `400`. ARCA's grid:
+**`associatedVouchers` on an export.** ARCA's grid for which types may accompany which:
 
 | authorizing | may associate | max |
 | --- | --- | --- |
@@ -1266,6 +1265,18 @@ which this service can check, so a wrong combination comes back as the authority
 | `19`, `20` or `21` | `88`, `89`, `91`, `993`, `994` (tobacco / flour remitos) | unbounded |
 
 A `19` therefore carries associated vouchers **only** in that second row. An ordinary Factura E sends none.
+
+*Which* combination is legal is **relayed, not validated here** — it turns on whether the *referenced* point
+of sale is electronic, which this service cannot check, so a wrong pairing comes back as the authority's own
+rejection (1680, 1749, 2040–2055) rather than a local `400`.
+
+> ⚠️ **Known gap — the second row is not fully reachable today.** Each
+> `associatedVouchers[].documentTypeCode` on an export *is* put through the canonical membership check, and
+> the canonical set currently holds `19`, `20`, `21` and `91` but **not `88`, `89`, `993` or `994`** — so
+> those four answer `400 UNKNOWN_CODE` here even though ARCA accepts them. The tobacco-remito association is
+> therefore unavailable until the set is widened. Say so if you need it; it is a data change, not a design
+> one. **The domestic path does not carry `associatedVouchers` at all** — see the note under
+> `/invoices/authorize`.
 
 `22` (*Facturas — Permiso Exportación Simple*) is **not** an export document type here, and not because
 Exporta Simple is unsupported: that regime is invoiced as a `19` carrying simplified-export `Opcionales`.

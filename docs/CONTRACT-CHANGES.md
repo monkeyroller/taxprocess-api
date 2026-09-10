@@ -8,9 +8,12 @@ and **whether core must do anything**.
 
 ## 2026-09-10 — Documentation only: the export document types, and the catalogue that lists more
 
-Branch `develop`. **Nothing changed in behaviour and there is no core action.** §5 gained a subsection under
-the services catalogue recording a trap nobody has hit yet but which is reachable by anyone deriving the
-export document types from ARCA rather than from this contract.
+Branch `develop`. **No behaviour changed.** §5 gained a subsection under the services catalogue recording a
+trap reachable by anyone deriving the export document types from ARCA rather than from this contract.
+
+Checking that trap end to end turned up **two pre-existing gaps**, so this is not purely a no-op for you:
+one of them (22.6) means a field you may already be sending on a domestic voucher never reaches the
+authority. Neither gap is new; both are newly *known*.
 
 | # | What changed | Core action |
 | --- | --- | --- |
@@ -18,6 +21,8 @@ export document types from ARCA rather than from this contract.
 | 22.2 | `88` and `89` are documented as *associated-only*; sending either as `documentTypeCode` is `400 UNKNOWN_CODE` | None; the behaviour is unchanged and always was this |
 | 22.3 | ARCA's association grid is published — what may accompany a `19` vs a `20`/`21`, and the per-row maximum | Read it before sending `associatedVouchers` on an export |
 | 22.4 | `22` is documented as not-an-export-type, with the correct reason | None |
+| 22.5 | 🟡 **Known gap now stated:** `88`, `89`, `993`, `994` are refused locally inside `associatedVouchers` though ARCA accepts them, so the tobacco-remito association is unreachable | Nothing to do — but **say so if you need it**, it is a one-line data change |
+| 22.6 | 🔴 **Known gap now stated:** the *domestic* path does not carry `associatedVouchers` or `optionals` to the authority at all | **Do not rely on either on a domestic voucher yet.** An FCE (`201`…`213`) needs both, so that regime is not usable until fixed |
 
 ### Why this is worth an entry at all
 
@@ -31,9 +36,23 @@ nothing here implements" was wrong on the facts, and is corrected: Exporta Simpl
 this service, as a `19` with simplified-export `Opcionales`. `22` is an unrelated legacy code. The exclusion
 was always right; only the reason was wrong, so no behaviour follows from the correction.
 
-`associatedVouchers` staying relayed rather than locally validated is stated rather than changed. The grid
-is conditional on whether the *referenced* point of sale is electronic, which this service does not know, so
-enforcing half of it locally would refuse valid documents.
+*Which* association is legal stays relayed rather than locally validated, and that is stated rather than
+changed: the grid turns on whether the *referenced* point of sale is electronic, which this service does not
+know, so enforcing half of it locally would refuse valid documents.
+
+### Two gaps this measurement turned up
+
+Publishing the grid meant checking it end to end, which surfaced two defects rather than one trap. Both are
+**pre-existing and unchanged** — documented now so core does not build on a path that does not carry.
+
+`88`/`89`/`993`/`994` are absent from the canonical document-type set, and each
+`associatedVouchers[].documentTypeCode` on an export goes through it. So the second row of the grid is
+refused here before ARCA sees it. Widening the set is the fix.
+
+The domestic mapper builds its request without `associatedVouchers` and without `optionals`. Both are
+accepted by the DTO and both are wired in the WSFEv1 SOAP builder — they are dropped in between, silently.
+The export mapper carries both, which is why the asymmetry went unnoticed. **Nothing sent in either field on
+a domestic voucher reaches the authority today.**
 
 ---
 
