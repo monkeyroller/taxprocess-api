@@ -151,12 +151,48 @@ describe('every nested request block is required, not merely validated', () => {
                     // One catalogue serves both documents now. `2` is services, valid on either.
                     concept: 2,
                     lines: [],
-                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 'C62', totalAmount: 500}],
                     export: exportBlock,
                 }),
             ),
         );
         expect(foreign).toEqual([]);
+    });
+
+    it('counts itemized detail as an amount only on the voucher whose mapper reads items', async () => {
+        // An export is zero-rated, so its money is per item and `lines: []` is its normal shape. A domestic
+        // voucher's total is derived from `lines` and `totals` alone, so the same body there would authorize
+        // an `ImpTotal` of `0` -- which is the case the amount check exists to refuse.
+        const itemsOnly = {
+            lines: [],
+            totals: undefined,
+            items: [{description: 'Consultoría', unitOfMeasureCode: 'C62', totalAmount: 500}],
+        };
+        expect(
+            await validate(
+                plainToInstance(
+                    NeutralInvoiceDto,
+                    invoiceBody({...itemsOnly, documentTypeCode: 19, concept: 2, export: exportBlock}),
+                ),
+            ),
+        ).toEqual([]);
+
+        const domestic = await validate(
+            plainToInstance(
+                NeutralInvoiceDto,
+                invoiceBody({
+                    ...itemsOnly,
+                    receiver: {
+                        identificationTypeCode: 80,
+                        identificationNumber: '20111111112',
+                        fiscalConditionCode: 1,
+                    },
+                }),
+            ),
+        );
+        expect(JSON.stringify(domestic)).toContain('carries no amount');
+        // And the message says why, rather than pointing at a channel that would not have counted.
+        expect(JSON.stringify(domestic)).toContain('only on an export voucher');
     });
 
     it('requires a concept on an export body too, not only a domestic one', async () => {
@@ -170,7 +206,7 @@ describe('every nested request block is required, not merely validated', () => {
                     documentTypeCode: 19,
                     concept: undefined,
                     lines: [],
-                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 'C62', totalAmount: 500}],
                     export: exportBlock,
                 }),
             ),
@@ -190,7 +226,7 @@ describe('every nested request block is required, not merely validated', () => {
                     documentTypeCode: 19,
                     concept: 3,
                     lines: [],
-                    items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                    items: [{description: 'Consultoría', unitOfMeasureCode: 'C62', totalAmount: 500}],
                     export: exportBlock,
                 }),
             ),
@@ -208,7 +244,7 @@ describe('every nested request block is required, not merely validated', () => {
                 documentTypeCode: 19,
                 concept,
                 lines: [],
-                items: [{description: 'Consultoría', unitOfMeasureCode: 7, totalAmount: 500}],
+                items: [{description: 'Consultoría', unitOfMeasureCode: 'C62', totalAmount: 500}],
                 export: {...exportBlock, ...permit},
             });
 

@@ -13,7 +13,12 @@ import {toMonId} from '../currency-codes/currency-codes.js';
 import {toCountryTaxId, toDstCmp} from '../destination-codes/destination-codes.js';
 import {toIdiomaCbte, toIncoterms} from '../export-codes/export-codes.js';
 import {toTipoExpo} from '../concept-codes/concept-codes.js';
-import {UnitMode, isUnitModeCode, toProUmed} from '../unit-of-measure-codes/unit-of-measure-codes.js';
+import {
+    assertUnitOfMeasureScheme,
+    proUmedForLineType,
+    toProUmedFromRec20,
+} from '../unit-of-measure-codes/unit-of-measure-codes.js';
+import {isNonProductLine} from '../../../provider/invoice-line-type/invoice-line-type.js';
 import {parseAuthorityDate} from '../authority-day/authority-day.js';
 import {parseArcaId} from '../identifiers.js';
 import {
@@ -34,11 +39,13 @@ import type {NeutralAuthorizationResultDto} from '../../../../http/dto/authoriza
  * type where every field is optional.
  *
  * **This file owns the conditional rules that need ARCA's own codes**, which is the half of the boundary
- * `invoice-export.dto.ts` cannot enforce: which code is the peso, which voucher type is a Factura and which
- * are notas, and which unit ids mean "discount line" rather than a unit. The DTO owns the other half —
- * shape, membership, and the rules decidable in the neutral vocabulary alone. Neither half is left to ARCA's
- * Spanish rejection when it is decidable here, because a `400` naming the field is worth more than a relayed
- * `502`.
+ * `invoice-export.dto.ts` cannot enforce: which code is the peso, and which voucher type is a Factura and
+ * which are notas. The DTO owns the other half — shape, membership, and the rules decidable in the neutral
+ * vocabulary alone. Neither half is left to ARCA's Spanish rejection when it is decidable here, because a
+ * `400` naming the field is worth more than a relayed `502`.
+ *
+ * The item amount rules used to be on this side of that line, and are no longer: they turned on ARCA's unit
+ * ids only because `lineType` did not exist to name a discount line neutrally. It does now, so they moved.
  *
  * What stays the authority's is what needs its *state* rather than its codes: the rate band, and the
  * cross-checks a nota's referenced voucher must satisfy (2040-2055). Those arrive as its own rejection.
@@ -71,61 +78,36 @@ function toFexItems(invoice: NeutralInvoice): Array<FexItem> {
             'MISSING_ITEMS',
         );
     }
-    return items.map((item, index) => {
-        assertItemAmounts(item, index);
-        return {
-            code: item.code,
-            description: item.description,
-            quantity: item.quantity,
-            unitOfMeasure: toProUmed(item.unitOfMeasureCode),
-            unitPrice: item.unitPrice,
-            discount: item.discount,
-            totalAmount: item.totalAmount,
-        };
-    });
+    return items.map((item, index) => ({
+        code: item.code,
+        description: item.description,
+        quantity: item.quantity,
+        unitOfMeasure: proUmedFor(item, 'items[' + String(index) + '].unitOfMeasureCode'),
+        unitPrice: item.unitPrice,
+        discount: item.discount,
+        totalAmount: item.totalAmount,
+    }));
 }
 
 /**
- * The amount rules that follow from an item's unit id being a *mode* rather than a unit (1775/1815).
+ * ARCA's `Pro_umed`, which says two things through one field: what a line is measured in, and — for three
+ * reserved ids — what the line *is*. Which of the two answers is the whole reason those are separate fields
+ * on the wire.
  *
- * Needs ARCA's own numbering to state at all — `99` is bonificación, `97` seña/anticipo, `0` no unit — which
- * is why it lives here rather than in the DTO, where those ids would be foreign vocabulary. Contract §5
- * publishes the three, so a caller can read the rule it is being held to.
+ * The amount rules that follow from a non-product line (1775/1815) are the DTO's now: with `lineType` naming
+ * the three in neutral terms they no longer need ARCA's numbering to state, which is what kept them here.
  */
-function assertItemAmounts(item: NeutralInvoiceItem, index: number): void {
-    if (!isUnitModeCode(item.unitOfMeasureCode)) {
-        return;
+function proUmedFor(item: NeutralInvoiceItem, at: string): number {
+    if (isNonProductLine(item.lineType)) {
+        return proUmedForLineType(item.lineType);
     }
-    const at = 'items[' + String(index) + ']';
-    // A mode line describes the kind of line, so there is no quantity to price (1775). An explicit zero
-    // passes: the caller sent the field and set it to nothing, which is what the rule asks for.
-    const amounts = [
-        ['quantity', item.quantity],
-        ['unitPrice', item.unitPrice],
-        ['discount', item.discount],
-    ] as const;
-    for (const [field, value] of amounts) {
-        if (value !== undefined && value !== 0) {
-            throw new ArcaValidationError(
-                at +
-                    '.' +
-                    field +
-                    ' must be zero or absent on a line whose unitOfMeasureCode is a mode rather than a ' +
-                    'unit (' +
-                    String(item.unitOfMeasureCode) +
-                    ')',
-                'INVALID_ITEM_AMOUNT',
-            );
-        }
+    if (item.unitOfMeasureCode === undefined) {
+        throw new ArcaValidationError(`${at} is required on a product line`, 'MISSING_UNIT_OF_MEASURE');
     }
-    // A discount subtracts, so its total is negative. A deposit is unrestricted and may be either (1815).
-    if (item.unitOfMeasureCode === UnitMode.DISCOUNT && item.totalAmount >= 0) {
-        throw new ArcaValidationError(
-            at + '.totalAmount must be negative on a discount line (unitOfMeasureCode ' +
-                String(UnitMode.DISCOUNT) + ')',
-            'INVALID_ITEM_AMOUNT',
-        );
-    }
+    // Which catalogue the code came from, before reading it as one from Rec 20 — the check that makes a
+    // second `UnitOfMeasureCodeScheme` member additive rather than a silent reinterpretation.
+    assertUnitOfMeasureScheme(item.unitOfMeasureCodeScheme, at);
+    return toProUmedFromRec20(item.unitOfMeasureCode, at);
 }
 
 /**
@@ -203,7 +185,9 @@ function permitPresence(
 function assertLocalCurrencyRate(currencyId: string, currencyRate: number): void {
     if (currencyId === LOCAL_CURRENCY && currencyRate !== 1) {
         throw new ArcaValidationError(
-            'currencyRate must be exactly 1 for currencyCode "' + LOCAL_CURRENCY + '", not ' +
+            'currencyRate must be exactly 1 for currencyCode "' +
+                LOCAL_CURRENCY +
+                '", not ' +
                 String(currencyRate),
             'CURRENCY_RATE_MISMATCH',
         );

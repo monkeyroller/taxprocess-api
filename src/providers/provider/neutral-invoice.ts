@@ -2,6 +2,8 @@
  * The neutral invoice vocabulary: the provider-agnostic shape core sends, carrying canonical fiscal
  * codes rather than any authority's own. The provider maps these to the entity's real codes.
  */
+import type {InvoiceLineType} from './invoice-line-type/invoice-line-type.js';
+import type {UnitOfMeasureCodeScheme} from './unit-of-measure-scheme/unit-of-measure-scheme.js';
 import type {WebService} from './web-service.js';
 
 /**
@@ -71,11 +73,26 @@ export interface NeutralInvoiceItem {
     readonly description: string;
     readonly quantity?: number;
     /**
-     * The authority's own unit code (AR: `Pro_umed`) — a canonical fiscal code, not a unit name, because
-     * some of its values are not units. AR's `0`, `97` and `99` mark a line with no unit, a deposit and a
-     * discount, and they change which amount rules apply.
+     * What this line is, as distinct from what it is measured in. Absent means an ordinary product line,
+     * which is what a line is when it says nothing.
+     *
+     * An authority may express this through its unit field — AR reserves `Pro_umed` `0`, `97` and `99` for
+     * it — which is why this used to be one field with the unit and why the unit could not be a standard.
      */
-    readonly unitOfMeasureCode: number;
+    readonly lineType?: InvoiceLineType;
+    /**
+     * The unit's UN/ECE Recommendation 20 common code (`"KGM"`, `"C62"`, `"ZZ"`).
+     *
+     * A standard rather than the authority's own numbering: the provider maps it to whatever the entity uses
+     * (AR: `Pro_umed`). Present on a product line and absent on every other, because a discount is not
+     * measured in anything.
+     *
+     * Carrying a code is not the same as an entity being able to express it — ARCA maps 33 of the 208 this
+     * service carries — and the two are refused differently. See `arca-rec20-units.ts`.
+     */
+    readonly unitOfMeasureCode?: string;
+    /** Which catalogue {@link unitOfMeasureCode} was drawn from. Absent means UN/ECE Rec 20. */
+    readonly unitOfMeasureCodeScheme?: UnitOfMeasureCodeScheme;
     readonly unitPrice?: number;
     readonly discount?: number;
     readonly totalAmount: number;

@@ -1,78 +1,49 @@
-import {ArcaValidationError} from '../../sdk/core/errors.js';
 import {UNIT_OF_MEASURE_NAMES} from './unit-of-measure-codes.data.js';
 
 /**
- * ARCA's `Pro_umed` catalogue — the sixth canonical fiscal code, and the one that looks most neutralizable
- * and is least.
+ * ARCA's `Pro_umed` catalogue — no longer a canonical code, and this is the file that stopped it being one.
  *
- * UN/ECE Recommendation 20 exists and ARCA's list does not map onto it, but that is the smaller problem.
- * The real one is that **three of the ids are not units of measure at all**; they are line *modes*, and they
- * change which validations apply:
+ * It used to say two things at once. Most of its 49 ids are units; three are not — `0` no unit, `97`
+ * seña/anticipo, `99` bonificación — and those say what a *line is*, changing which amount rules apply to it.
+ * That is why the code travelled on the wire: a neutral `unitOfMeasure: 'KG'` could not say "this line is a
+ * global discount", so the whole field stayed ARCA's.
  *
- * | id | ARCA's wording | what it means |
- * | --- | --- | --- |
- * | `0` | (none — blank in ARCA's own table) | no unit; quantity, unit price and discount must be zero or absent (1775) |
- * | `97` | `seña/anticipo` | a deposit line. The total is unrestricted and **may be negative** (1815) |
- * | `99` | `bonificación` | a discount line. The total **must** be negative (1815) |
+ * Both halves are now answered, separately, which is the only way either could be:
  *
- * A neutral `unitOfMeasure: 'KG'` cannot say "this line is a global discount", so the code travels on the
- * wire and these three keep their meaning. `98 otras unidades` is *not* one of them: it is an ordinary
- * escape hatch for a unit the catalogue does not name, and carries no special validation.
+ * - **What a line is** is `InvoiceLineType`, a neutral vocabulary. ARCA maps it back onto those same three
+ *   ids through `PRO_UMED_BY_LINE_TYPE`, which is its business and no caller's.
+ * - **What a line is measured in** is a UN/ECE Recommendation 20 common code. The old docblock here claimed
+ *   "Rec 20 exists and ARCA's list does not map onto it". Measured, that is wrong: **33 of the 49 map**, the
+ *   two judgements among them are marked, and the 13 that genuinely have no Rec 20 word are registered with
+ *   the reason in `arca-rec20-units.ts`.
  *
- * This is exactly the class contract §9 warns about — a value a caller could plausibly have invented for
- * itself, and would then have invented differently.
+ * What is left in this file is the authority's own table, which is still needed for one thing: the register
+ * has to be checked against it, so a re-dump that adds a unit fails until someone classifies it.
+ *
+ * `Pro_umed` no longer leaks past this directory, which is what contract §9 has been asking for.
  */
+
+export {
+    PRO_UMED_BY_LINE_TYPE,
+    PRO_UMED_BY_REC20,
+    REC20_BY_PRO_UMED,
+    REC20_CANNOT_NAME,
+    type RefusalKind,
+    assertUnitOfMeasureScheme,
+    proUmedForLineType,
+    toProUmedFromRec20,
+} from './arca-rec20-units.js';
 
 /** Every unit of measure the authority publishes, code → its own wording (`0` has none). */
 export const UNITS_OF_MEASURE: ReadonlyMap<string, string> = new Map(UNIT_OF_MEASURE_NAMES);
 
 /**
- * The three ids that are line *modes* rather than units. A caller sending one of these is describing the
- * kind of line, and the item's amounts are validated by a different rule as a result.
+ * Whether `unitOfMeasureCode` is an id ARCA publishes.
  *
- * A `const` object rather than three loose constants, following `Concept` and `ServiceId`: it gives the
- * three a name as a group, and {@link UnitMode} below is what turns `isUnitModeCode` into a type guard so a
- * caller that has narrowed cannot then compare against an ordinary unit id.
+ * Nothing on the wire reaches this any more — a caller sends a Rec 20 code, and `toProUmedFromRec20` is what
+ * refuses an unknown one. It stays exported because the classification test asks it of every id in the
+ * register, which is the check that keeps the register honest.
  */
-export const UnitMode = {
-    /** No unit: quantity, unit price and discount must be zero or absent (1775). */
-    NONE: 0,
-    /** `seña/anticipo` — a deposit line, whose total may be negative (1815). */
-    DEPOSIT: 97,
-    /** `bonificación` — a discount line, whose total must be negative (1815). */
-    DISCOUNT: 99,
-} as const;
-
-export type UnitMode = (typeof UnitMode)[keyof typeof UnitMode];
-
-/** Derived, so the set cannot fall behind the three named above. */
-export const UNIT_MODE_CODES: ReadonlySet<number> = new Set(Object.values(UnitMode));
-
-/**
- * Whether `unitOfMeasureCode` is one of the three modes rather than a real unit.
- *
- * A type guard rather than a `boolean`, which is what the grouping above buys: inside the branch the value
- * is one of the three, so comparing it against an ordinary unit id stops compiling.
- */
-export function isUnitModeCode(unitOfMeasureCode: number): unitOfMeasureCode is UnitMode {
-    return UNIT_MODE_CODES.has(unitOfMeasureCode);
-}
-
-/** Whether `unitOfMeasureCode` names a unit (or mode) this service supports. */
 export function isKnownUnitOfMeasureCode(unitOfMeasureCode: number): boolean {
     return UNITS_OF_MEASURE.has(String(unitOfMeasureCode));
-}
-
-/**
- * The authority's `Pro_umed` for a canonical `unitOfMeasureCode`, which is the identity. Throws if unknown,
- * so a caller gets a `400` naming the field rather than ARCA's `1790`.
- */
-export function toProUmed(unitOfMeasureCode: number): number {
-    if (!isKnownUnitOfMeasureCode(unitOfMeasureCode)) {
-        throw new ArcaValidationError(
-            `No ARCA unit of measure (Pro_umed) for canonical code "${String(unitOfMeasureCode)}"`,
-            'UNKNOWN_CODE',
-        );
-    }
-    return unitOfMeasureCode;
 }

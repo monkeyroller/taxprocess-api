@@ -68,12 +68,18 @@ export default tseslint.config(
   },
   prettier,
   {
-    // The provider-owned vocabularies `http/dto` imports. `neutral-results.ts` is deliberately NOT here:
-    // importing the result DTOs type-only is its whole job.
+    // The provider-owned neutral vocabularies: the ones `http/dto` imports, plus the catalogues standing
+    // behind them. `rec20-units` is the second kind — the DTO deliberately leaves unit membership to the
+    // provider, so nothing in `http` imports it — and it is listed because the rule is about which way a
+    // vocabulary may depend, not about who happens to read it. `neutral-results.ts` is deliberately NOT
+    // here: importing the result DTOs type-only is its whole job.
     files: [
       'src/providers/provider/rate-band/**/*.ts',
       'src/providers/provider/taxpayer-vocabulary/**/*.ts',
       'src/providers/provider/address-code-scheme/**/*.ts',
+      'src/providers/provider/invoice-line-type/**/*.ts',
+      'src/providers/provider/unit-of-measure-scheme/**/*.ts',
+      'src/providers/provider/rec20-units/**/*.ts',
       'src/providers/provider/environment.ts',
       'src/providers/provider/neutral-invoice.ts',
     ],

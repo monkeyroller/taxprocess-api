@@ -101,10 +101,11 @@ export class InvoiceTotalsDto {
 @ValidatorConstraint({name: 'invoiceCarriesAmount'})
 class InvoiceCarriesAmount implements ValidatorConstraintInterface {
     validate(_value: unknown, args: ValidationArguments): boolean {
-        const {lines, totals, items} = args.object as {
+        const {lines, totals, items, export: exportBlock} = args.object as {
             lines?: Array<InvoiceLineDto>;
             totals?: InvoiceTotalsDto;
             items?: Array<InvoiceItemDto>;
+            export?: InvoiceExportDto;
         };
         const lineAmount = (lines ?? []).some((l) => l.netAmount !== 0 || l.taxAmount !== 0);
         const headerAmount = [totals?.untaxed, totals?.exempt, totals?.perceptions].some(
@@ -113,15 +114,26 @@ class InvoiceCarriesAmount implements ValidatorConstraintInterface {
         // Item detail is the third channel, and the only one an export voucher uses: it is zero-rated, so it
         // declares no tax bases and carries its money per line instead. Without this, every export would
         // fail a check meant to catch an empty domestic one.
-        const itemAmount = (items ?? []).some((item) => item.totalAmount !== 0);
+        //
+        // Counted only on an export voucher, because it is the only one whose mapper reads `items`. A
+        // domestic voucher's `ImpTotal` is derived from `lines` and `totals` alone (`invoice.mapper.ts`),
+        // so accepting item money as its amount would let `{lines: [], items: [...]}` through to exactly
+        // the `ImpTotal` of `0` this check exists to refuse — with the empty channel now harder to see.
+        // `export` is the test rather than `webService` because the buyer block is what a caller sends and
+        // `InvoiceNamesAReceiver` has already made it exactly one of the two.
+        const itemAmount =
+            present(exportBlock) && (items ?? []).some((item) => item.totalAmount !== 0);
         return lineAmount || headerAmount || itemAmount;
     }
 
-    defaultMessage(): string {
-        return (
-            'invoice carries no amount — send at least one line with an amount, a non-zero totals entry, ' +
-            'or itemized detail'
-        );
+    defaultMessage(args: ValidationArguments): string {
+        const {export: exportBlock} = args.object as {export?: InvoiceExportDto};
+        return present(exportBlock)
+            ? 'invoice carries no amount — send at least one line with an amount, a non-zero totals entry, ' +
+                  'or itemized detail'
+            : 'invoice carries no amount — send at least one line with an amount, or a non-zero totals ' +
+                  'entry. Itemized detail counts as an amount only on an export voucher, which is the one ' +
+                  'this service reads items for';
     }
 }
 

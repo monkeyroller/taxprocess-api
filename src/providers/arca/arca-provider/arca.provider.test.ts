@@ -2067,7 +2067,7 @@ describe('ArcaProvider routing between WSFEv1 and WSFEXv1', () => {
             currencyRate: 1508,
             issueDate: '2026-08-05',
             lines: [],
-            items: [{description: 'Consultoría', quantity: 1, unitOfMeasureCode: 7, unitPrice: 500, totalAmount: 500}],
+            items: [{description: 'Consultoría', quantity: 1, unitOfMeasureCode: 'C62', unitPrice: 500, totalAmount: 500}],
             export: {
                 destinationCode: '203',
                 clientName: 'Joao Da Silva',

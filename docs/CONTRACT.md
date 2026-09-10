@@ -346,9 +346,14 @@ Request:
       {
         "description": "Consultoría",       // required
         "quantity": 2,
-        "unitOfMeasureCode": 7,             // canonical code (§5) — NOT a unit name
+        "unitOfMeasureCode": "C62",         // UN/ECE Rec 20 common code (§5) — a standard, not ARCA's own
         "unitPrice": 250,
         "totalAmount": 500                  // the voucher total is the sum of these
+      },
+      {
+        "description": "Bonificación",      // a line that is not selling anything says so (§5)
+        "lineType": "DISCOUNT",             // and then takes no unit and no quantity
+        "totalAmount": -50
       }
     ],
     "export": {
@@ -410,7 +415,8 @@ Many of the authority's own conditional rules are enforced by this service and r
 
 | what is refused | `details.code` |
 | --- | --- |
-| an unknown destination, unit, incoterm or per-country tax id | `UNKNOWN_CODE` |
+| an unknown destination, incoterm or per-country tax id, or a `unitOfMeasureCode` this service does not carry | `UNKNOWN_CODE` |
+| a real UN/ECE Rec 20 unit the entity has no equivalent for — see §5 | `UNSUPPORTED_UNIT_OF_MEASURE` |
 | no `items`, `currencyCode` or `export` block | `MISSING_ITEMS`, `UNMAPPED_CURRENCY`, `MISSING_EXPORT` |
 | a voucher number already authorized for a *different* sale | `VOUCHER_ALREADY_AUTHORIZED_MISMATCH` |
 | a `webService` contradicting `documentTypeCode` | `WEB_SERVICE_DOCUMENT_TYPE_MISMATCH` |
@@ -419,7 +425,7 @@ Many of the authority's own conditional rules are enforced by this service and r
 | no `incoterm` on an invoice for goods (`concept` `1`) | `MISSING_INCOTERM` |
 | no `paymentDate` on an invoice whose `concept` is not goods | `MISSING_PAYMENT_DATE` |
 | `shippingPermits` on a debit or credit note | `SHIPPING_PERMIT_NOT_ALLOWED` |
-| an item whose `unitOfMeasureCode` is a mode carrying a quantity, price or discount; or a discount line whose total is not negative | `INVALID_ITEM_AMOUNT` |
+| an item whose shape contradicts its `lineType` — a discount carrying a quantity or a non-negative total | a `400` from the request body itself |
 
 Three more are enforced by **omitting** the field rather than by refusing the request, because for them an
 empty element is itself what the authority rejects: `settledInInvoiceCurrency` on a peso invoice or any
@@ -1038,7 +1044,9 @@ where the three translations are the identity — canonical code == ARCA code).
 | `invoice.lines[]` | per taxed line: `netAmount`, `taxAmount`, `taxRatePercent` | `Iva[]` subtotals |
 | `invoice.totals.untaxed/exempt/perceptions` | `sale.totalNotTaxed / totalExempt / totalPerceptions` | `ImpTotConc`/`ImpOpEx`/`Tributos` |
 | `invoice.items[]` | per product line: description, quantity, unit, price | `Items[]` (export) |
-| `invoice.items[].unitOfMeasureCode` | *new catalogue* — see below | `Pro_umed` (identity) |
+| `invoice.items[].unitOfMeasureCode` | UN/ECE Recommendation 20 — see below | `Pro_umed` (**mapped**, not identity) |
+| `invoice.items[].unitOfMeasureCodeScheme` | the closed vocabulary below; absent means Rec 20 | — |
+| `invoice.items[].lineType` | this contract's own catalogue — see below | `Pro_umed` `0`/`97`/`99` |
 | `invoice.export.destinationCode` | *new catalogue* — see below | `Dst_cmp` (identity) |
 | `invoice.export.language` | ISO 639-1 | `Idioma_cbte` |
 | `invoice.export.incoterm` | ICC Incoterms 2020 | `Incoterms` (identity) |
@@ -1216,11 +1224,11 @@ Per-entity, for the same reason the other catalogues are: a future entity regist
 | **status** | implemented | ⛔ declared, **not implemented** → `501` | implemented |
 | **purpose** | retail | retail | **customs** |
 | document types | the domestic set | the same domestic set | **19, 20, 21** |
-| `items` | not supported | required | **required** |
+| `items` | accepted, ignored | required | **required** |
 | tax subtotals (`lines`) | required | required | **none** — zero-rated |
 | buyer | `receiver` | `receiver` | **`export`** |
 | `destinationCode` | — | — | **required** |
-| `unitOfMeasureCode` | — | required | **required** |
+| `unitOfMeasureCode` | validated, ignored | required on a product line | **required on a product line** |
 | currency catalogue | the 47 codes below | not determined | **the same 47**, resolved per service |
 | rate source | one call per currency | not determined | **one call for the whole day** |
 | points of sale | CAE/CAEA register | not determined | **FEEWS — a separate register** |
@@ -1344,26 +1352,91 @@ liability that drifts. Take it as JSON with:
 PROBE_ENVIRONMENT=production DUMP_JSON=destinations.json pnpm dump:wsfex-table pais
 ```
 
-### Unit of measure: the sixth canonical code
+### Unit of measure: a standard, not a canonical code
 
-`invoice.items[].unitOfMeasureCode` → ARCA `Pro_umed` (identity). **49 values**, committed at
-`src/providers/arca/mapping/unit-of-measure-codes/unit-of-measure-codes.data.ts`
-(`… pnpm dump:wsfex-table umed`).
+`invoice.items[].unitOfMeasureCode` is a **UN/ECE Recommendation 20 common code** — `"KGM"`, `"C62"`,
+`"ZZ"` — which the provider maps to the entity's own field (AR: `Pro_umed`). It is the one coded field on
+this wire that is not this contract's invention or an authority's: the recommendation is the catalogue, and
+the mapping is ours.
 
-A code rather than a unit name because **three of its values are not units.** They are line *modes*, and
-they change which amount rules the authority applies to that line:
+Two things follow, and they are the whole of what a caller needs to know.
 
-| code | ARCA's wording | meaning |
+#### 1. The catalogue is service-wide; support is per-entity
+
+This service carries **208** of Rec 20 Rev 17's 2136 codes, committed at
+`src/providers/provider/rec20-units/rec20-units.data.ts` and regenerated with
+`node scripts/build-rec20-units.mjs <workbook>`. The subset is not a taste — Rec 20's own columns do not
+separate trade units from physics ones — so the rule is stated at the top of that file, applied by the
+generator and re-asserted by test. In one line: every active row that is a *unit of count*, or an
+SI-prefixed metric mass/length/area/volume/time/energy/radioactivity unit, plus six named additions.
+
+**ARCA maps 33 of those 208.** So there are two different refusals and they are answered differently:
+
+| what you sent | `details.code` |
+| --- | --- |
+| a code this service does not carry — a typo, or one the curation rule dropped | `UNKNOWN_CODE` |
+| a real Rec 20 unit **this entity has no equivalent for** | `UNSUPPORTED_UNIT_OF_MEASURE` |
+
+The second names the unit and the entity, because your code is not wrong — it would be fine against another
+entity. **Neither is ever substituted for `ZZ`**: a wrong unit on a fiscal document under a `200` is worse
+than a `400`.
+
+The 33 ARCA accepts:
+
+| Rec 20 | unit | Rec 20 | unit | Rec 20 | unit |
+| --- | --- | --- | --- | --- | --- |
+| `KGM` | kilogram | `MTR` | metre | `MTK` | square metre |
+| `MTQ` | cubic metre | `LTR` | litre | `MWH` | megawatt hour (1000 kW·h) |
+| `C62` | one ⚠️ | `PR` | pair | `DZN` | dozen |
+| `CTM` | metric carat | `MIL` | thousand | `GRM` | gram |
+| `MMT` | millimetre | `MMQ` | cubic millimetre | `KMT` | kilometre |
+| `HLT` | hectolitre | `CMT` | centimetre | `SET` | set ⚠️ |
+| `CMQ` | cubic centimetre | `TNE` | tonne | `DMA` | cubic decametre |
+| `H19` | cubic hectometre | `H20` | cubic kilometre | `MC` | microgram |
+| `MGM` | milligram | `MLT` | millilitre | `CUR` | curie |
+| `MCU` | millicurie | `M5` | microcurie | `GRO` | gross (144) |
+| `E4` | gross kilogram | `NMP` | number of packs | `ZZ` | mutually defined |
+
+> ⚠️ **Two are judgements rather than readings.** `C62 one` is ARCA's `unidades` — chosen over `H87 piece`
+> and `EA each` because its published synonym is literally "unit" and the other two mean a physical article,
+> which a services line is not. `SET` is ARCA's `jgo. pqt. mazo naipes`, a single id lumping juego, paquete,
+> mazo and naipes; `SET` is the broadest of them and the least wrong, not exact. If you mean *paquete*
+> specifically, `NMP` is the honest code and ARCA cannot express it.
+
+**13 of ARCA's units have no Rec 20 code at all and are therefore unreachable.** This is a real capability
+limit, not an omission — Rec 20 publishes nothing that means them:
+
+| ARCA | | why Rec 20 cannot say it |
 | --- | --- | --- |
-| `0` | *(blank in ARCA's own table)* | no unit — quantity, unit price and discount must be zero or absent |
-| `97` | `seña/anticipo` | a deposit line — the total is unrestricted and **may be negative** |
-| `99` | `bonificación` | a discount line — the total **must** be negative |
+| `34`, `35` | nanogramos, picogramos | Rec 20 carries nano-/pico- for the ampere, farad, metre, second, watt — but not for the gram |
+| `51`, `62`, `64` | uiacthor, uiactant, uiactig | only undifferentiated `NIU`; hormonal / antibiotic / immunoglobulin appear nowhere |
+| `52`, `63`, `65` | the *mil UI* variants | `HIU` is a hundred and `MIU` a million, with nothing between |
+| `53`, `68` | kg base, gramo base | Rec 20 qualifies mass by water content and packaging, never by base substance |
+| `66`, `67` | kg activo, gramo activo | no active-substance *mass*; `E25 active unit` is a count |
+| `95` | anulación/devolución | never a unit — and not one of the three ARCA documents amount rules for |
 
-`98 otras unidades` is **not** one of them: it is an ordinary escape hatch for a unit the catalogue does not
-name, with no special validation. The common units are `1` kilogramos, `2` metros, `5` litros, `7` unidades.
+> 🔴 **An export priced in `kg activo` (agroquímicos) or `muiacthor` (pharma) cannot be invoiced through
+> this service.** Tell us if you have one and we will look again.
 
-A neutral `unitOfMeasure: "KG"` could not express "this line is a global discount", which is the whole
-reason this is a fiscal code and not a name.
+#### 2. What a line *is* is a different field
+
+`invoice.items[].lineType` says what the line is, as distinct from what it is measured in. Absent means an
+ordinary product line:
+
+| `lineType` | meaning | AR `Pro_umed` |
+| --- | --- | --- |
+| *(absent)* / `PRODUCT` | an ordinary product or service line. **Carries a `unitOfMeasureCode`** | from the unit |
+| `LUMP_SUM` | priced as a whole: no unit, no quantity, no unit price | `0` |
+| `DISCOUNT` | a discount. **Its total must be negative** | `99` |
+| `DEPOSIT` | a deposit or advance. Unrestricted in sign | `97` |
+
+A non-product line takes **no** `unitOfMeasureCode`, and its `quantity`, `unitPrice` and `discount` must be
+zero or absent. All of that is refused by the request body itself, so it costs no round trip.
+
+These three used to be values of `unitOfMeasureCode`, because a neutral `unitOfMeasure: "KG"` could not
+express "this line is a global discount" — which was the whole reason that field was a fiscal code rather
+than a standard. Splitting them is what let it become one. A discount is not a unit of measure; that Rec 20
+has no code for one is not a gap in Rec 20.
 
 ### The per-country tax id: the seventh canonical code
 
@@ -1540,6 +1613,29 @@ the 24 AR subdivisions are a fixed table whose last change was Tierra del Fuego 
 it is the wrong shape — it makes a tax service a geography server. A caller carrying its own catalog is fine
 as long as it can date a mismatch, which is what the version is.
 
+### Unit code schemes (a second closed vocabulary, on the way in)
+
+`invoice.items[].unitOfMeasureCodeScheme` names the catalogue `unitOfMeasureCode` was drawn from. One value
+today, and the field is optional with that value as the default, so nothing you send has to spell it:
+
+| `unitOfMeasureCodeScheme` | what the paired code is | example |
+| --- | --- | --- |
+| `UN-ECE-REC20` | UN/ECE Recommendation 20 common code — a curated subset of Rev 17 (2021), §5 | `"KGM"` |
+
+It carries the same three guarantees as the address schemes above — **stable**, **unique**, **key-safe** —
+and for the same reason: a code means nothing without the catalogue naming it. Two differences worth stating,
+since they are the reason this is a separate vocabulary rather than a row added to that table:
+
+- **These arrive on a request; those leave on a response.** A scheme you send is one we validate; a scheme we
+  return is one you resolve.
+- **There is deliberately no member for an authority's own numbering.** No `AR-ARCA-UMED`, because the point
+  of the field is that units are standard. What ARCA cannot express in Rec 20 is refused
+  (`UNSUPPORTED_UNIT_OF_MEASURE`, §5), never smuggled through under its own name.
+
+The revision this service vendors is published in §5 and in `REC20_SNAPSHOT`, not on the wire. A version on
+an *inbound* field would mean "which revision did you author against", which we would have to either ignore
+or hold you to; neither is worth the field.
+
 ---
 
 ## 6. Core-side: providing credentials on the handshake (internal to webprocess-api)
@@ -1666,11 +1762,16 @@ check never runs. A key whose only failure mode is silent is one no caller shoul
 service generates it per request, and recovery works off the voucher number instead, exactly as it does for
 a domestic voucher.
 
-Two more of the same kind arrived with the export document, and each is why its neutral field is a *code*
-rather than a name: ARCA's **`Dst_cmp`** customs-destination list, which ISO 3166-1 cannot express, and
-**`Pro_umed`**, three of whose values are line modes rather than units (§5). A caller inventing either — a
-country code for a free zone, or a unit name for a discount line — is exactly the class this list exists to
-prevent.
+One more of the same kind arrived with the export document, and it is why its neutral field is a *code*
+rather than a name: ARCA's **`Dst_cmp`** customs-destination list, which ISO 3166-1 cannot express. A caller
+inventing a country code for a free zone is exactly the class this list exists to prevent.
+
+**`Pro_umed` used to be the second, and no longer is.** Three of its values were line modes rather than
+units, so the field could not be a standard and ARCA's numbering travelled on the wire under a neutral name —
+the one item on this list that was here by defeat rather than by necessity. Splitting *what a line is*
+(`lineType`) from *what it is measured in* (a UN/ECE Rec 20 code) removed the reason, and `Pro_umed` is now
+translated inside the provider like any other authority field. It is worth reading as a template: a code that
+looks unavoidable here is sometimes two vocabularies that have not been separated yet.
 
 Registry lookups add three of the same kind, and each one is why the corresponding neutral field exists:
 ARCA's **`idProvincia`** province catalog (resolved here to ISO 3166-2, `mapping/geography/geography.ts`), the **free-text

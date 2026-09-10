@@ -1,7 +1,9 @@
 import {describe, expect, it} from '@jest/globals';
 import {buildFexInvoiceRequest, toNeutralExportResult} from './export-invoice.mapper.js';
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {Concept, type NeutralInvoice} from '../../../provider/neutral-invoice.js';
+import {codeOf, messageOf} from '../validation-error.test-support.js';
+import {Concept, type NeutralInvoice, type NeutralInvoiceItem} from '../../../provider/neutral-invoice.js';
+import {InvoiceLineType} from '../../../provider/invoice-line-type/invoice-line-type.js';
 import type {FexInvoiceResult} from '../../sdk/invoicing/export/fex-invoice.types.js';
 
 /** UC-2: an export of services, which is the shape with the fewest conditional fields switched on. */
@@ -16,7 +18,7 @@ const SERVICES: NeutralInvoice = {
     concept: Concept.SERVICES,
     lines: [],
     items: [
-        {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
+        {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 'C62', unitPrice: 250, totalAmount: 500},
     ],
     export: {
         destinationCode: '203',
@@ -86,8 +88,8 @@ describe('buildFexInvoiceRequest', () => {
             {
                 ...SERVICES,
                 items: [
-                    {description: 'a', unitOfMeasureCode: 7, totalAmount: 100.01},
-                    {description: 'b', unitOfMeasureCode: 7, totalAmount: 50.1},
+                    {description: 'a', unitOfMeasureCode: 'C62', totalAmount: 100.01},
+                    {description: 'b', unitOfMeasureCode: 'C62', totalAmount: 50.1},
                 ],
             },
             7,
@@ -103,8 +105,8 @@ describe('buildFexInvoiceRequest', () => {
             {
                 ...SERVICES,
                 items: [
-                    {description: 'a', unitOfMeasureCode: 7, totalAmount: 0.1},
-                    {description: 'b', unitOfMeasureCode: 7, totalAmount: 0.2},
+                    {description: 'a', unitOfMeasureCode: 'C62', totalAmount: 0.1},
+                    {description: 'b', unitOfMeasureCode: 'C62', totalAmount: 0.2},
                 ],
             },
             7,
@@ -257,19 +259,25 @@ describe('buildFexInvoiceRequest', () => {
 
         it('refuses a currencyIso-only voucher rather than reaching the deprecated bridge', () => {
             const {currencyCode: _dropped, ...rest} = SERVICES;
-            expect(() => buildFexInvoiceRequest({...rest, currencyIso: 'USD'}, 7, 41)).toThrow(/currencyCode/);
+            expect(() => buildFexInvoiceRequest({...rest, currencyIso: 'USD'}, 7, 41)).toThrow(
+                /currencyCode/,
+            );
         });
 
         it('refuses an unknown destination, incoterm or unit with UNKNOWN_CODE', () => {
             expect(() =>
-                buildFexInvoiceRequest({...SERVICES, export: {...SERVICES.export!, destinationCode: '999'}}, 7, 41),
+                buildFexInvoiceRequest(
+                    {...SERVICES, export: {...SERVICES.export!, destinationCode: '999'}},
+                    7,
+                    41,
+                ),
             ).toThrow(ArcaValidationError);
             expect(() =>
                 buildFexInvoiceRequest({...SERVICES, export: {...SERVICES.export!, incoterm: 'DDU'}}, 7, 41),
             ).toThrow(ArcaValidationError);
             expect(() =>
                 buildFexInvoiceRequest(
-                    {...SERVICES, items: [{description: 'a', unitOfMeasureCode: 12, totalAmount: 1}]},
+                    {...SERVICES, items: [{description: 'a', unitOfMeasureCode: 'KGX', totalAmount: 1}]},
                     7,
                     41,
                 ),
@@ -344,18 +352,8 @@ describe('toNeutralExportResult', () => {
     });
 });
 
-describe('the rules that need ARCA\'s own codes', () => {
-    /** Every one of these is a 400 naming the field instead of a 502 relaying ARCA's Spanish rejection. */
-    const codeOf = (build: () => unknown): string | undefined => {
-        try {
-            build();
-        } catch (err) {
-            expect(err).toBeInstanceOf(ArcaValidationError);
-            return (err as ArcaValidationError).code;
-        }
-        throw new Error('expected a validation error');
-    };
-
+/** Every one of these is a 400 naming the field instead of a 502 relaying ARCA's Spanish rejection. */
+describe("the rules that need ARCA's own codes", () => {
     it('requires the rate to be exactly 1 in pesos (1601)', () => {
         // Which code is the local currency is ARCA's, which is why the neutral DTO cannot state this.
         expect(codeOf(() => buildFexInvoiceRequest({...TIERRA_DEL_FUEGO, currencyRate: 1508}, 7, 41))).toBe(
@@ -393,9 +391,7 @@ describe('the rules that need ARCA\'s own codes', () => {
         };
         expect(codeOf(() => buildFexInvoiceRequest(noIncoterm, 7, 41))).toBe('MISSING_INCOTERM');
         // A nota for the same goods needs none.
-        expect(() =>
-            buildFexInvoiceRequest({...noIncoterm, documentTypeCode: 21}, 7, 41),
-        ).not.toThrow();
+        expect(() => buildFexInvoiceRequest({...noIncoterm, documentTypeCode: 21}, 7, 41)).not.toThrow();
         // Neither does a services invoice.
         expect(() => buildFexInvoiceRequest(SERVICES, 7, 41)).not.toThrow();
     });
@@ -403,15 +399,9 @@ describe('the rules that need ARCA\'s own codes', () => {
     it('requires a payment date on an invoice for services or other (1673)', () => {
         const unpaid = {...SERVICES, export: {...SERVICES.export!, paymentDate: undefined}};
         expect(codeOf(() => buildFexInvoiceRequest(unpaid, 7, 41))).toBe('MISSING_PAYMENT_DATE');
-        expect(
-            codeOf(() =>
-                buildFexInvoiceRequest(
-                    {...unpaid, concept: Concept.OTHER},
-                    7,
-                    41,
-                ),
-            ),
-        ).toBe('MISSING_PAYMENT_DATE');
+        expect(codeOf(() => buildFexInvoiceRequest({...unpaid, concept: Concept.OTHER}, 7, 41))).toBe(
+            'MISSING_PAYMENT_DATE',
+        );
         // Goods are dated by the shipment instead, and a nota is forbidden from carrying one at all.
         expect(() => buildFexInvoiceRequest({...unpaid, documentTypeCode: 20}, 7, 41)).not.toThrow();
     });
@@ -432,56 +422,89 @@ describe('the rules that need ARCA\'s own codes', () => {
         );
         // Refused, not silently discarded: authorizing a different document than the caller described
         // would be worse than the rejection.
-        expect(() =>
-            buildFexInvoiceRequest({...notaWithPermit, documentTypeCode: 19}, 7, 41),
-        ).not.toThrow();
+        expect(() => buildFexInvoiceRequest({...notaWithPermit, documentTypeCode: 19}, 7, 41)).not.toThrow();
     });
 
-    it('holds a mode line to zero quantity, price and discount (1775)', () => {
-        const withMode = (overrides: Record<string, unknown>): NeutralInvoice => ({
+    it('says what a line is through the three Pro_umed ids ARCA reserves for it', () => {
+        // The amount rules that used to live here (1775/1815) are the DTO's now -- with `lineType` naming a
+        // discount neutrally they no longer need ARCA's numbering to state. What is left on this side is the
+        // translation, and it is the half that would put a wrong number on the voucher if it were wrong.
+        const withLine = (item: NeutralInvoiceItem): NeutralInvoice => ({
             ...SERVICES,
             items: [
-                {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
-                {description: 'Bonificación', unitOfMeasureCode: 99, totalAmount: -50, ...overrides},
+                {
+                    description: 'Consultoría',
+                    quantity: 2,
+                    unitOfMeasureCode: 'C62',
+                    unitPrice: 250,
+                    totalAmount: 500,
+                },
+                item,
             ],
         });
-        expect(codeOf(() => buildFexInvoiceRequest(withMode({quantity: 1}), 7, 41))).toBe(
-            'INVALID_ITEM_AMOUNT',
+        const proUmedOf = (item: NeutralInvoiceItem): number | undefined =>
+            buildFexInvoiceRequest(withLine(item), 7, 41).items[1]?.unitOfMeasure;
+
+        expect(
+            proUmedOf({description: 'Bonificación', lineType: InvoiceLineType.DISCOUNT, totalAmount: -50}),
+        ).toBe(99);
+        expect(
+            proUmedOf({description: 'Anticipo', lineType: InvoiceLineType.DEPOSIT, totalAmount: 200}),
+        ).toBe(97);
+        expect(proUmedOf({description: 'Global', lineType: InvoiceLineType.LUMP_SUM, totalAmount: 300})).toBe(
+            0,
         );
-        expect(codeOf(() => buildFexInvoiceRequest(withMode({unitPrice: 50}), 7, 41))).toBe(
-            'INVALID_ITEM_AMOUNT',
-        );
-        expect(codeOf(() => buildFexInvoiceRequest(withMode({discount: 5}), 7, 41))).toBe(
-            'INVALID_ITEM_AMOUNT',
-        );
-        // An explicit zero is what the rule asks for, not an omission -- both pass.
-        expect(() => buildFexInvoiceRequest(withMode({quantity: 0, unitPrice: 0}), 7, 41)).not.toThrow();
-        expect(() => buildFexInvoiceRequest(withMode({}), 7, 41)).not.toThrow();
     });
 
-    it('requires a discount line to subtract, and lets a deposit go either way (1815)', () => {
-        const line = (unitOfMeasureCode: number, totalAmount: number): NeutralInvoice => ({
+    it('measures an ordinary line by its unit, whether or not it says it is one', () => {
+        const item = (extra: Partial<NeutralInvoiceItem>): NeutralInvoiceItem => ({
+            description: 'Servicio',
+            quantity: 3,
+            unitPrice: 100,
+            totalAmount: 300,
+            ...extra,
+        });
+        const proUmedOf = (one: NeutralInvoiceItem): number | undefined =>
+            buildFexInvoiceRequest({...SERVICES, items: [one]}, 7, 41).items[0]?.unitOfMeasure;
+
+        expect(proUmedOf(item({unitOfMeasureCode: 'KGM'}))).toBe(1);
+        // Saying PRODUCT explicitly means what saying nothing means.
+        expect(proUmedOf(item({unitOfMeasureCode: 'KGM', lineType: InvoiceLineType.PRODUCT}))).toBe(1);
+        // `ZZ mutually defined` is otras unidades -- an ordinary unit, not a way of saying "no unit".
+        expect(proUmedOf(item({unitOfMeasureCode: 'ZZ'}))).toBe(98);
+    });
+
+    it('tells a unit it does not carry apart from one ARCA cannot express', () => {
+        // A caller sending HUR has a valid Rec 20 code that this authority has no Pro_umed for -- answering
+        // UNKNOWN_CODE would tell them their code is wrong when it is fine against another entity.
+        const priced = (unitOfMeasureCode: string): NeutralInvoice => ({
+            ...SERVICES,
+            items: [{description: 'a', unitOfMeasureCode, totalAmount: 1}],
+        });
+        expect(codeOf(() => buildFexInvoiceRequest(priced('KGX'), 7, 41))).toBe('UNKNOWN_CODE');
+        expect(codeOf(() => buildFexInvoiceRequest(priced('HUR'), 7, 41))).toBe(
+            'UNSUPPORTED_UNIT_OF_MEASURE',
+        );
+    });
+
+    it('names the item a bad unit is on, so a voucher of forty lines says which one', () => {
+        const invoice: NeutralInvoice = {
             ...SERVICES,
             items: [
-                {description: 'Consultoría', quantity: 2, unitOfMeasureCode: 7, unitPrice: 250, totalAmount: 500},
-                {description: 'Ajuste', unitOfMeasureCode, totalAmount},
+                {description: 'a', unitOfMeasureCode: 'KGM', totalAmount: 1},
+                {description: 'b', unitOfMeasureCode: 'HUR', totalAmount: 1},
             ],
-        });
-        expect(codeOf(() => buildFexInvoiceRequest(line(99, 50), 7, 41))).toBe('INVALID_ITEM_AMOUNT');
-        expect(codeOf(() => buildFexInvoiceRequest(line(99, 0), 7, 41))).toBe('INVALID_ITEM_AMOUNT');
-        expect(() => buildFexInvoiceRequest(line(99, -50), 7, 41)).not.toThrow();
-        // 97 is a seña/anticipo, which ARCA leaves unrestricted.
-        expect(() => buildFexInvoiceRequest(line(97, 50), 7, 41)).not.toThrow();
-        expect(() => buildFexInvoiceRequest(line(97, -50), 7, 41)).not.toThrow();
-    });
-
-    it('says nothing about an ordinary unit, including the escape hatch', () => {
-        // 98 "otras unidades" looks like a mode and is not one -- it is an ordinary unit with no extra rule.
-        const ordinary: NeutralInvoice = {
-            ...SERVICES,
-            items: [{description: 'Servicio', quantity: 3, unitOfMeasureCode: 98, unitPrice: 100, totalAmount: 300}],
         };
-        expect(() => buildFexInvoiceRequest(ordinary, 7, 41)).not.toThrow();
+        expect(messageOf(() => buildFexInvoiceRequest(invoice, 7, 41))).toContain(
+            'items[1].unitOfMeasureCode',
+        );
+    });
+
+    it('refuses a product line with no unit rather than choosing one for it', () => {
+        // The DTO refuses this first; the mapper keeps its own check because the neutral type is reachable
+        // from anywhere, and defaulting to a unit here would be the silent wrong Pro_umed.
+        const noUnit: NeutralInvoice = {...SERVICES, items: [{description: 'a', totalAmount: 1}]};
+        expect(codeOf(() => buildFexInvoiceRequest(noUnit, 7, 41))).toBe('MISSING_UNIT_OF_MEASURE');
     });
 
     it('still leaves the authority its own rules', () => {

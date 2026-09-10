@@ -6,6 +6,93 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-10 (later still) — Units are a standard now, and a discount stopped pretending to be one
+
+Branch `develop`. 🔴 **Breaking, and it needs a coordinated release.** `invoice.items[].unitOfMeasureCode`
+was ARCA's `Pro_umed` integer under a neutral name. It is now a **UN/ECE Recommendation 20 common code**, and
+the three of ARCA's ids that were never units at all have moved to a field of their own.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 24.1 | 🔴 `items[].unitOfMeasureCode` is a **Rec 20 common code** (`"KGM"`, `"C62"`, `"ZZ"`), not an integer. A number is a `400` | **Migrate every caller.** The 33 ARCA accepts are tabulated in §5 |
+| 24.2 | 🔴 Discount, deposit and no-unit lines move to **`items[].lineType`** — `DISCOUNT`, `DEPOSIT`, `LUMP_SUM`. `unitOfMeasureCode` `0`/`97`/`99` no longer exist | **Change anything that sends `99` or `97`.** The capability is unchanged — only how you say it |
+| 24.3 | ⚠️ **13 ARCA units are now unreachable** — the six IU-activity variants, the *base*/*activo* masses, nanogramos, picogramos, and `95` | **Read the table in §5 if you invoice agroquímicos or pharma.** Tell us if one is in use |
+| 24.4 | `98 otras unidades` survives as Rec 20 `ZZ` *mutually defined* | Send `"ZZ"` |
+| 24.5 | 🔴 A real Rec 20 unit ARCA cannot express answers a new `details.code: "UNSUPPORTED_UNIT_OF_MEASURE"`, distinct from `UNKNOWN_CODE` | **Handle the new code**, and do not treat it as "bad code" |
+| 24.6 | ⚠️ The item amount rules answer as an ordinary body `400` instead of `ARCA_VALIDATION` / `INVALID_ITEM_AMOUNT`, which no longer exists | Update anything matching on that `details.code` |
+| 24.7 | `items[].unitOfMeasureCodeScheme` is a new optional field, one value (`UN-ECE-REC20`) and the default | None. It is the envelope for a second standard later |
+
+### Why a discount stopped being a unit
+
+The old §5 argued that `unitOfMeasureCode` had to be a fiscal code rather than a name, because *"a neutral
+`unitOfMeasure: "KG"` could not express 'this line is a global discount'"*. That was true, and it is why
+ARCA's numbering was on this wire at all — the one place the contract lost that argument on purpose.
+
+It was the wrong conclusion from a correct observation. A discount is not a unit of measure; the problem was
+never that units resist standardizing, it was that two vocabularies were sharing one field. Separating them
+made both expressible: `lineType` says what a line is, `unitOfMeasureCode` says what it is measured in, and
+the second can now be a standard because it no longer has to carry the first.
+
+Concretely, of ARCA's 49 `Pro_umed` ids: **33** map to Rec 20, **3** are line types, **13** have no Rec 20
+code. A test asserts those three groups classify all 49 with nothing counted twice, so a future ARCA
+re-dump that adds a unit fails until someone has read it.
+
+### Two refusals, and why they are not one
+
+This service carries 208 of Rec 20's 2136 codes; **ARCA maps 33 of them.** So most valid Rec 20 codes will
+not work against ARCA, and saying `UNKNOWN_CODE` to all of them would tell you your code was wrong when it
+was fine:
+
+- `UNKNOWN_CODE` — not a unit this service carries. A typo, or one our curation rule dropped. **Ask us**; if
+  it is a real Rec 20 unit, adding it is a one-line data change.
+- `UNSUPPORTED_UNIT_OF_MEASURE` — a real Rec 20 unit *this entity* has no equivalent for. The message names
+  the unit and the entity. Your code is fine and would be fine elsewhere.
+
+Neither is ever quietly resolved to `ZZ otras unidades`. A wrong unit on an authorized voucher under a `200`
+is worse than any `400`.
+
+### 🔴 One thing to check before you deploy
+
+**Does anything you run send `unitOfMeasureCode: 99` or `97`?** Those lines authorize today. After this they
+are a `400` until they are re-sent as `lineType`. The mapping is mechanical — `99` → `{"lineType":
+"DISCOUNT"}`, `97` → `{"lineType": "DEPOSIT"}`, `0` → `{"lineType": "LUMP_SUM"}`, dropping the unit field —
+but it is not automatic, and a discount line that silently stops being sent is not something the authority
+will complain about.
+
+### What did NOT change
+
+- Every rule about what a discount or deposit line may carry. A `DISCOUNT` total must still be negative; a
+  non-product line still takes no quantity, unit price or discount. They are enforced earlier now (by the
+  request body rather than by the ARCA mapper), which is why their error shape moved.
+- What the domestic path *does* with an item. No domestic mapper reads `unitOfMeasureCode`, so nothing about
+  a domestic voucher's authorization changes.
+- `Pro_umed` itself. ARCA still receives exactly the integers it always did — it is only that no caller has
+  to know them any more, which is the §9 goal this closes.
+
+### ⚠️ The validation applies to `items` on *any* voucher, even where the items are ignored
+
+`items` is declared on the invoice, not inside `export`, and it is validated wherever it appears. So the
+changes above apply to any request carrying an `items` array, whichever buyer block it names — a domestic
+voucher sending `items[].unitOfMeasureCode: 7` validates today and is a `400` after this, exactly as an
+export one is.
+
+That is a validation fact, not a capability one. **Sending items on a domestic voucher is still not
+supported**: only the export mapper reads them (§5's per-service table now says *accepted, ignored* rather
+than *not supported*, which is what the code has always done). So a domestic `items` array is checked and
+then discarded.
+
+Two consequences, and they pull in opposite directions:
+
+- **Migrate itemized domestic payloads too**, or they start failing on a field whose contents were never
+  read. The cheaper fix is usually to stop sending the array.
+- ⚠️ **A domestic voucher can no longer use item money as its amount.** `items` used to satisfy the
+  "carries an amount" check for any voucher, which let `{lines: [], items: [...]}` past validation and then
+  authorize with an `ImpTotal` of `0`, since a domestic total is derived from `lines` and `totals` alone.
+  That combination is now a `400`. If anything you run bills a domestic voucher through `items`, it was
+  already producing zero-total vouchers — send `lines` or `totals`.
+
+---
+
 ## 2026-09-10 (later) — Four fixes the catalogue measurement turned up
 
 Branch `develop`. Measuring `FEParamGetTiposCbte` against production to settle what code `91` is turned up
