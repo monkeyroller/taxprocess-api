@@ -39,11 +39,21 @@ const ROUTE_BY_WEB_SERVICE: Readonly<Record<WebService, InvoiceRoute>> = {
 };
 
 /**
- * The voucher types only WSFEXv1 can authorize — a Factura E and its notas.
+ * The voucher types only WSFEXv1 can authorize — a Factura E and its notas. Validation 1530 states the set
+ * and it is exactly these three.
  *
- * `22` (Factura de exportación simplificada) is deliberately absent: it is a WSFEX document, but Exporta
- * Simple carries its own `Opcionales` regime that nothing here implements, so it must not resolve to a
- * service that would then reject it for a reason the caller cannot read.
+ * **Not what `FEXGetPARAM_Cbte_Tipo` returns.** That catalogue publishes five (measured in production):
+ * `88` Remito Electrónico and `89` Resumen de Datos join the three above. Neither can be authorized — they
+ * appear only in `Cmps_asoc.Cbte_tipo`, the tobacco remito a Factura E references, which is what validation
+ * 1680 lists them under. Nor is the catalogue the associable set either: `91`, `993` and `994` are
+ * associable and absent from it. It is a partial union of two different sets, so it cannot be read as
+ * "what may I issue".
+ *
+ * `22` (Facturas — Permiso Exportación Simple) is deliberately absent, and **not because Exporta Simple is
+ * unimplemented**: that regime is invoiced as a `19` carrying simplified-export `Opcionales`, per the
+ * manual's own wording — "para '19 – Facturas' el documento de exportación simplificada". `22` is a separate
+ * legacy code in ARCA's master voucher table that WSFEXv1's catalogue does not publish and its validations
+ * never name. Routing it here would only produce a rejection the caller cannot read.
  */
 const EXPORT_DOCUMENT_TYPES: ReadonlySet<number> = new Set<number>([
     TaxProcessDocumentTypeCode.FACTURA_EXPORTACION,

@@ -11,9 +11,17 @@ describe('isExportDocumentType', () => {
         expect([1, 6, 11, 51, 201, 211].some(isExportDocumentType)).toBe(false);
     });
 
-    it('excludes 22, whose Exporta Simple regime is not implemented', () => {
-        // A WSFEX document, but routing it there would only produce a rejection the caller cannot read.
+    it('excludes 22, which WSFEXv1 neither publishes nor validates', () => {
+        // A legacy code in ARCA's master table, not the Exporta Simple document type — that regime is
+        // invoiced as a `19` carrying simplified-export `Opcionales`. Routing 22 to WSFEXv1 would only
+        // produce a rejection the caller cannot read.
         expect(isExportDocumentType(22)).toBe(false);
+    });
+
+    it('excludes 88 and 89, which the service catalogue publishes but cannot authorize', () => {
+        // `FEXGetPARAM_Cbte_Tipo` returns them alongside 19/20/21, so a set derived from that catalogue
+        // would route two codes ARCA only accepts inside `Cmps_asoc`.
+        expect([88, 89].some(isExportDocumentType)).toBe(false);
     });
 });
 
