@@ -6,6 +6,37 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-10 — Documentation only: the export document types, and the catalogue that lists more
+
+Branch `develop`. **Nothing changed in behaviour and there is no core action.** §5 gained a subsection under
+the services catalogue recording a trap nobody has hit yet but which is reachable by anyone deriving the
+export document types from ARCA rather than from this contract.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 22.1 | §5 states the WSFEXv1 set as exactly `19`/`20`/`21` (validation 1530), and warns that `FEXGetPARAM_Cbte_Tipo` returns **five** | None — unless you were planning to read that catalogue |
+| 22.2 | `88` and `89` are documented as *associated-only*; sending either as `documentTypeCode` is `400 UNKNOWN_CODE` | None; the behaviour is unchanged and always was this |
+| 22.3 | ARCA's association grid is published — what may accompany a `19` vs a `20`/`21`, and the per-row maximum | Read it before sending `associatedVouchers` on an export |
+| 22.4 | `22` is documented as not-an-export-type, with the correct reason | None |
+
+### Why this is worth an entry at all
+
+The catalogue endpoint is a **partial union of two sets**. It publishes `88` and `89`, which can only appear
+as associated vouchers, and omits `91`, `993` and `994`, which are also associable. So it answers neither
+"what may I issue" nor "what may I associate", while looking exactly like the former. A set rebuilt from it
+carries two codes ARCA refuses.
+
+The earlier note that `22` was excluded because "Exporta Simple carries its own `Opcionales` regime that
+nothing here implements" was wrong on the facts, and is corrected: Exporta Simple **is** invoiced through
+this service, as a `19` with simplified-export `Opcionales`. `22` is an unrelated legacy code. The exclusion
+was always right; only the reason was wrong, so no behaviour follows from the correction.
+
+`associatedVouchers` staying relayed rather than locally validated is stated rather than changed. The grid
+is conditional on whether the *referenced* point of sale is electronic, which this service does not know, so
+enforcing half of it locally would refuse valid documents.
+
+---
+
 ## 2026-09-07 — A body that never parsed is a `400`, not a `500`
 
 Branch `feature/export-invoice`. A request whose body the parser refused — malformed JSON, a truncated

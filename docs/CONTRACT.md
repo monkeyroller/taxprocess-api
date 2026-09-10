@@ -1235,6 +1235,43 @@ decomposition differs.
 Rows left *not determined* are honest gaps: `WSMTXCA` has its own manual that has not been read, and
 guessing its rules would be inventing authority behaviour.
 
+#### The export document types, and why ARCA's own catalogue lists more than you may send
+
+The **document types** row above is the complete set WSFEXv1 authorizes — ARCA states it as validation 1530:
+
+| `documentTypeCode` | | |
+| --- | --- | --- |
+| **19** | Factura de Exportación "E" | |
+| **20** | Nota de Débito por operaciones con el Exterior | |
+| **21** | Nota de Crédito por operaciones con el Exterior | |
+
+> ⚠️ **Do not rebuild that set from ARCA's own catalogue.** `FEXGetPARAM_Cbte_Tipo` returns **five** codes,
+> not three (measured in production): `88` *Remito Electrónico* and `89` *Resumen de Datos* join the three
+> above. **Neither is authorizable.** They exist only as *associated* vouchers — the tobacco remito a Factura
+> E may reference — which is the field validation 1680 lists them under, not `Cbte_Tipo`. Nor is that
+> catalogue the associable set either: `91`, `993` and `994` are associable and absent from it. It is a
+> partial union of two different sets, so it answers neither "what may I issue" nor "what may I associate".
+
+Sending `88` or `89` as `documentTypeCode` answers `400 ARCA_VALIDATION`, `details.code: "UNKNOWN_CODE"` —
+they are not canonical document types, so the refusal happens here rather than at the authority.
+
+**`associatedVouchers` on an export is relayed, not validated.** Which types may accompany which is
+conditional on the authorizing type *and* on whether the referenced point of sale is electronic, neither of
+which this service can check, so a wrong combination comes back as the authority's own rejection (1680,
+1749, 2040–2055) rather than a local `400`. ARCA's grid:
+
+| authorizing | may associate | max |
+| --- | --- | --- |
+| `20` or `21` | `19`, `20`, `21` | **1** |
+| `19`, `20` or `21` | `88`, `89`, `91`, `993`, `994` (tobacco / flour remitos) | unbounded |
+
+A `19` therefore carries associated vouchers **only** in that second row. An ordinary Factura E sends none.
+
+`22` (*Facturas — Permiso Exportación Simple*) is **not** an export document type here, and not because
+Exporta Simple is unsupported: that regime is invoiced as a `19` carrying simplified-export `Opcionales`.
+`22` is a separate legacy code in ARCA's master voucher table that WSFEXv1 neither publishes nor validates.
+It routes to the ordinary service and is refused there.
+
 ### Destination: the fifth canonical code
 
 `invoice.export.destinationCode` → ARCA `Dst_cmp` / `Dst_merc` (identity). **310 values.**
