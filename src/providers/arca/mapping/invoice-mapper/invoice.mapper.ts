@@ -13,6 +13,7 @@ import {
 } from '../../sdk/invoicing/invoice-totals/invoice-totals.js';
 import {
     isNonVatDiscriminating,
+    toAssociatedCbteTipo,
     toCbteTipo,
     toCondicionIvaReceptorId,
     toDocTipo,
@@ -152,6 +153,36 @@ function collapsedTotals(
 }
 
 /**
+ * `CbtesAsoc` — the vouchers this one references, e.g. the invoice a credit note adjusts.
+ *
+ * The referenced type goes through `toAssociatedCbteTipo` rather than `toCbteTipo`: a remito is a legal
+ * thing to reference (10120/10157) and not a legal thing to authorize, so the narrow check would refuse
+ * the association ARCA can actually *require* of a carnica or harinera issuer (10225–10229).
+ */
+function toCbtesAsoc(invoice: NeutralInvoice): CommonInvoiceRequest['associatedVouchers'] {
+    if (invoice.associatedVouchers === undefined || invoice.associatedVouchers.length === 0) {
+        return undefined;
+    }
+    return invoice.associatedVouchers.map((voucher) => ({
+        voucherType: toAssociatedCbteTipo(voucher.documentTypeCode),
+        pointOfSaleNumber: voucher.pointOfSaleNumber,
+        number: voucher.number,
+        cuit:
+            voucher.issuerTaxId === undefined
+                ? undefined
+                : parseArcaId(voucher.issuerTaxId, 'associatedVouchers[].issuerTaxId'),
+    }));
+}
+
+/** `Opcionales` — fields ARCA defines by regulation, e.g. FCE MiPyMEs CBU (id 2101). Relayed as sent. */
+function toOpcionales(invoice: NeutralInvoice): CommonInvoiceRequest['optionals'] {
+    if (invoice.optionals === undefined || invoice.optionals.length === 0) {
+        return undefined;
+    }
+    return invoice.optionals.map((optional) => ({id: optional.id, value: optional.value}));
+}
+
+/**
  * Builds the WSFEv1 authorization request for `voucherNumber`. Pure and clock-free: the one time-dependent
  * rule, the concept-1 `CbteFch` window, is `concept1DateWindowError`'s and the caller applies it separately.
  */
@@ -235,6 +266,8 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
         currencyRate: invoice.currencyRate,
         vatSubtotals: totals.subtotals,
         tributes,
+        associatedVouchers: toCbtesAsoc(invoice),
+        optionals: toOpcionales(invoice),
     };
 
     // Anything but goods requires the FchServ*/FchVtoPago dates, services being rendered over a period

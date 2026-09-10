@@ -127,6 +127,75 @@ describe('buildCommonInvoiceRequest', () => {
     });
 });
 
+describe('buildCommonInvoiceRequest — the blocks a domestic voucher carries beyond its totals', () => {
+    // These two were accepted by the DTO, wired end to end in the WSFEv1 SOAP builder, and never set by
+    // this mapper -- so everything a caller sent in either field was dropped in between with no error. The
+    // export mapper carried both, which is how the asymmetry survived. An FCE needs both to work at all.
+
+    it('carries associatedVouchers, which used to be dropped in silence', () => {
+        const req = buildCommonInvoiceRequest(
+            invoice({
+                documentTypeCode: 3,
+                associatedVouchers: [{documentTypeCode: 1, pointOfSaleNumber: 2, number: 7}],
+            }),
+            10,
+        );
+        expect(req.associatedVouchers).toEqual([{voucherType: 1, pointOfSaleNumber: 2, number: 7, cuit: undefined}]);
+    });
+
+    it("carries the associated voucher's own issuer when it is not ours", () => {
+        const req = buildCommonInvoiceRequest(
+            invoice({
+                associatedVouchers: [
+                    {documentTypeCode: 1, pointOfSaleNumber: 2, number: 7, issuerTaxId: '20111111112'},
+                ],
+            }),
+            10,
+        );
+        expect(req.associatedVouchers?.[0]?.cuit).toBe(20111111112);
+    });
+
+    it('accepts a remito as an associated voucher, which the narrow check refused', () => {
+        // 10227 can *require* this association of a tobacco issuer, and 88 is not a document type anyone
+        // can authorize -- so validating it with `toCbteTipo` refused a document ARCA demands.
+        const req = buildCommonInvoiceRequest(
+            invoice({associatedVouchers: [{documentTypeCode: 88, pointOfSaleNumber: 2, number: 7}]}),
+            10,
+        );
+        expect(req.associatedVouchers?.[0]?.voucherType).toBe(88);
+    });
+
+    it('still refuses an associated code that is neither a document nor a remito', () => {
+        expect(() =>
+            buildCommonInvoiceRequest(
+                invoice({associatedVouchers: [{documentTypeCode: 99999, pointOfSaleNumber: 2, number: 7}]}),
+                10,
+            ),
+        ).toThrow(ArcaValidationError);
+    });
+
+    it('carries optionals, which an FCE cannot be issued without', () => {
+        // Id 2101 is the CBU a Factura de Crédito MiPyMEs has to declare.
+        const req = buildCommonInvoiceRequest(
+            invoice({documentTypeCode: 201, optionals: [{id: '2101', value: '0170099220000067797'}]}),
+            10,
+        );
+        expect(req.optionals).toEqual([{id: '2101', value: '0170099220000067797'}]);
+    });
+
+    it('omits both when the caller sends neither, rather than sending empty elements', () => {
+        const req = buildCommonInvoiceRequest(invoice(), 10);
+        expect(req.associatedVouchers).toBeUndefined();
+        expect(req.optionals).toBeUndefined();
+    });
+
+    it('treats an empty array as absent, which is what the SOAP builder expects', () => {
+        const req = buildCommonInvoiceRequest(invoice({associatedVouchers: [], optionals: []}), 10);
+        expect(req.associatedVouchers).toBeUndefined();
+        expect(req.optionals).toBeUndefined();
+    });
+});
+
 describe('the concepts a domestic voucher can express', () => {
     it('sends goods, services and both straight through as Concepto', () => {
         expect(buildCommonInvoiceRequest(invoice({concept: 1}), 1).concept).toBe(1);
