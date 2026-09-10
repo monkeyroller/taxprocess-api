@@ -1,5 +1,10 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {TaxProcessDocumentTypeCode, TaxProcessFiscalConditionCode, TaxProcessIdentificationTypeCode} from '../canonical-codes.js';
+import {
+    ASSOCIABLE_ONLY_DOCUMENT_TYPES,
+    TaxProcessDocumentTypeCode,
+    TaxProcessFiscalConditionCode,
+    TaxProcessIdentificationTypeCode,
+} from '../canonical-codes.js';
 
 /**
  * Canonical taxprocess codes → real ARCA codes. For ARCA every translation is the identity, so each function
@@ -19,9 +24,41 @@ function assertKnownCode(values: Record<string, string | number>, code: number, 
     return code;
 }
 
-/** Maps a canonical `documentTypeCode` to the ARCA `CbteTipo` (identity). Throws if the code is unknown. */
+/**
+ * Maps a canonical `documentTypeCode` to the ARCA `CbteTipo` (identity). Throws if the code is unknown.
+ *
+ * **The voucher being authorized**, which is why it does not accept the associable-only remitos: `88` as a
+ * `documentTypeCode` is a caller mistake worth a `400`, and letting it through here to be refused by the
+ * authority is exactly what the canonical membership check exists to prevent.
+ */
 export function toCbteTipo(documentTypeCode: number): number {
     return assertKnownCode(TaxProcessDocumentTypeCode, documentTypeCode, 'CbteTipo (documentType)');
+}
+
+/**
+ * The same translation for a code appearing in `associatedVouchers`, which admits a **wider** set.
+ *
+ * A referenced voucher may be an ordinary document — the invoice a credit note adjusts — or one of the
+ * remitos of {@link ASSOCIABLE_ONLY_DOCUMENT_TYPES}, which no invoicing service authorizes and which
+ * therefore are not document types a caller could ever send as the voucher's own.
+ *
+ * Separate from `toCbteTipo` rather than a widened version of it: collapsing the two would make `88` a
+ * valid thing to authorize, and keeping only the narrow one is the bug this replaces — a tobacco remito,
+ * which ARCA accepts and 10227 can *require*, was refused here before the request was ever built.
+ *
+ * **Which** remito may accompany **which** voucher is not checked. That grid turns on the referenced point
+ * of sale being electronic and on the issuer's declared activities (10225–10229), neither of which this
+ * service knows, so the pairing stays the authority's to reject.
+ */
+export function toAssociatedCbteTipo(documentTypeCode: number): number {
+    if (ASSOCIABLE_ONLY_DOCUMENT_TYPES.has(documentTypeCode)) {
+        return documentTypeCode;
+    }
+    return assertKnownCode(
+        TaxProcessDocumentTypeCode,
+        documentTypeCode,
+        'CbteTipo (associatedVouchers[].documentType)',
+    );
 }
 
 /** Maps a canonical `fiscalConditionCode` to the ARCA `CondicionIVAReceptorId` (identity). Throws if unknown. */

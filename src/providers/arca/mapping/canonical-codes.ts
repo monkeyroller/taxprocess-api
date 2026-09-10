@@ -37,7 +37,7 @@ export enum TaxProcessDocumentTypeCode {
     NOTA_DEBITO_EXTERIOR = 20,
     NOTA_CREDITO_EXTERIOR = 21,
     FACTURA_PERMISO_EXPORTACION_SIMPLIFICADO = 22,
-    COMPRA_BIENES_USADOS = 30,
+    COMPRA_BIENES_USADOS_CONSUMIDOR_FINAL = 49,
     COMPROBANTE_A_3419 = 34,
     COMPROBANTE_B_3419 = 35,
     COMPROBANTE_C_3419 = 36,
@@ -55,7 +55,6 @@ export enum TaxProcessDocumentTypeCode {
     CIERRE_ZETA = 80,
     TIQUE_FACTURA_A = 81,
     TIQUE_FACTURA_B = 82,
-    FACTURA_SERVICIOS_PUBLICOS = 91,
     AJUSTE_INCREMENTA_DEBITO = 92,
     AJUSTE_DISMINUYE_DEBITO = 93,
     AJUSTE_INCREMENTA_CREDITO = 94,
@@ -75,6 +74,34 @@ export enum TaxProcessDocumentTypeCode {
     FCE_NOTA_DEBITO_C = 212,
     FCE_NOTA_CREDITO_C = 213,
 }
+
+/**
+ * Codes valid **only inside `associatedVouchers`** — the remitos a voucher references, issued by other
+ * regimes and never authorized through an invoicing service.
+ *
+ * A set of numbers rather than an enum, unlike the three vocabularies above, because this is a membership
+ * list and not a vocabulary: core does not choose one of these by name, it forwards a code that came from
+ * the remito. Naming is also not fully available — ARCA cites five of these as associable without ever
+ * saying what they are, and inventing names for them is how `91` came to be called
+ * `FACTURA_SERVICIOS_PUBLICOS` when it is a Remito R.
+ *
+ * | code | | source |
+ * | --- | --- | --- |
+ * | `88` | Remito Electrónico de Tabaco Acondicionado | WSFEv1 10227, WSFEX 1749 |
+ * | `89` | Resumen de Datos de Exportación de Tabaco Acondicionado | WSFEX 1749 |
+ * | `91` | Remito R | WSFEX 1754 |
+ * | `993` | Remito Electrónico Harinero — Automotor | WSFEv1 10226 |
+ * | `994` | Remito Electrónico Harinero — Ferroviario | WSFEv1 10226 |
+ * | `995` | Remito Electrónico Cárnico | WSFEv1 10225 |
+ * | `988`, `990`, `991`, `996`, `997` | **cited, never named** | WSFEv1 10120/10157 |
+ *
+ * The five unnamed ones are included rather than left out: ARCA states them as associable, and refusing a
+ * code the authority accepts is the failure this set exists to stop. They are deliberately absent from
+ * every catalogue ARCA publishes, so there is nothing to measure them against.
+ */
+export const ASSOCIABLE_ONLY_DOCUMENT_TYPES: ReadonlySet<number> = new Set([
+    88, 89, 91, 988, 990, 991, 993, 994, 995, 996, 997,
+]);
 
 /** Canonical identification-type codes. For ARCA the value is already the `DocTipo`. */
 export enum TaxProcessIdentificationTypeCode {

@@ -1,5 +1,5 @@
 import {ArcaValidationError} from '../../sdk/core/errors.js';
-import {toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
+import {toAssociatedCbteTipo, toCbteTipo, toCondicionIvaReceptorId, toDocTipo} from './code-maps.js';
 
 describe('code-maps (canonical code → ARCA code)', () => {
     describe('toCbteTipo (documentTypeCode → CbteTipo)', () => {
@@ -15,9 +15,26 @@ describe('code-maps (canonical code → ARCA code)', () => {
             expect(toCbteTipo(211)).toBe(211);
             // Codes that used to diverge from core's PK are now the canonical code itself (identity).
             expect(toCbteTipo(19)).toBe(19); // FACTURA DE EXPORTACIÓN
-            expect(toCbteTipo(30)).toBe(30); // COMPROBANTE DE COMPRA DE BIENES USADOS
+            expect(toCbteTipo(49)).toBe(49); // COMPRA DE BIENES USADOS A CONSUMIDOR FINAL
             expect(toCbteTipo(80)).toBe(80); // COMPROBANTE DIARIO DE CIERRE (ZETA)
             expect(toCbteTipo(95)).toBe(95); // AJUSTE CONTABLE DISMINUYE CRÉDITO FISCAL
+        });
+
+        it('numbers the used-goods voucher 49, which is what the authority publishes', () => {
+            // It was 30 here, a code `FEParamGetTiposCbte` does not return — measured against production,
+            // where the row reads `49 Comprobante de Compra de Bienes Usados a Consumidor Final`. Wrong in
+            // both directions: 30 passed this check and ARCA refused it, 49 was refused before ARCA saw it.
+            expect(toCbteTipo(49)).toBe(49);
+            expect(() => toCbteTipo(30)).toThrow(ArcaValidationError);
+        });
+
+        it('refuses a remito, which is referenced and never authorized', () => {
+            // `91` sat in the document-type enum as `FACTURA_SERVICIOS_PUBLICOS`, which it is not: WSFEX
+            // 1754 names it Remito R. Authorizing one is not a thing, so the narrow check refuses all of
+            // them and `toAssociatedCbteTipo` is where they belong.
+            for (const remito of [88, 89, 91, 993, 994, 995]) {
+                expect(() => toCbteTipo(remito)).toThrow(ArcaValidationError);
+            }
         });
 
         it('rejects retired core PKs that are not canonical codes', () => {
@@ -27,6 +44,35 @@ describe('code-maps (canonical code → ARCA code)', () => {
             expect(() => toCbteTipo(43)).toThrow(ArcaValidationError);
             expect(() => toCbteTipo(1001)).toThrow(ArcaValidationError);
             expect(() => toCbteTipo(1201)).toThrow(ArcaValidationError);
+        });
+    });
+
+    describe('toAssociatedCbteTipo (associatedVouchers[].documentTypeCode → CbteTipo)', () => {
+        it('accepts the remitos a voucher may reference', () => {
+            // The bug this replaces: each of these is associable per WSFEv1 10120/10157 and WSFEX 1749, and
+            // every one of them was refused locally with UNKNOWN_CODE before the request was built — so the
+            // tobacco association 10227 can *require* could not be sent at all.
+            for (const remito of [88, 89, 91, 988, 990, 991, 993, 994, 995, 996, 997]) {
+                expect(toAssociatedCbteTipo(remito)).toBe(remito);
+            }
+        });
+
+        it('still accepts an ordinary document, which is the common case', () => {
+            // A credit note references the invoice it adjusts; that is a document type like any other.
+            expect(toAssociatedCbteTipo(1)).toBe(1);
+            expect(toAssociatedCbteTipo(19)).toBe(19);
+            expect(toAssociatedCbteTipo(201)).toBe(201);
+        });
+
+        it('is wider than toCbteTipo, not a replacement for it', () => {
+            // If these two ever agree on 88, authorizing a remito has become expressible.
+            expect(toAssociatedCbteTipo(88)).toBe(88);
+            expect(() => toCbteTipo(88)).toThrow(ArcaValidationError);
+        });
+
+        it('rejects a code that is neither', () => {
+            expect(() => toAssociatedCbteTipo(30)).toThrow(ArcaValidationError);
+            expect(() => toAssociatedCbteTipo(99999)).toThrow(ArcaValidationError);
         });
     });
 

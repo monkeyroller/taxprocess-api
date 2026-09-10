@@ -8,7 +8,7 @@ import type {
     FexShippingPermit,
 } from '../../sdk/invoicing/export/fex-invoice.types.js';
 import {roundToTwo} from '../../sdk/invoicing/invoice-totals/invoice-totals.js';
-import {toCbteTipo} from '../code-maps/code-maps.js';
+import {toAssociatedCbteTipo, toCbteTipo} from '../code-maps/code-maps.js';
 import {toMonId} from '../currency-codes/currency-codes.js';
 import {toCountryTaxId, toDstCmp} from '../destination-codes/destination-codes.js';
 import {toIdiomaCbte, toIncoterms} from '../export-codes/export-codes.js';
@@ -160,7 +160,7 @@ function toFexAssociated(invoice: NeutralInvoice): Array<FexAssociatedVoucher> |
         return undefined;
     }
     return invoice.associatedVouchers.map((voucher) => ({
-        voucherType: toCbteTipo(voucher.documentTypeCode),
+        voucherType: toAssociatedCbteTipo(voucher.documentTypeCode),
         pointOfSaleNumber: voucher.pointOfSaleNumber,
         number: voucher.number,
         cuit:

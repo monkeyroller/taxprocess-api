@@ -197,6 +197,31 @@ describe('buildFexInvoiceRequest', () => {
         ]);
     });
 
+    it('accepts a tobacco remito as an associated voucher', () => {
+        // The second row of ARCA's association grid: a Factura E may reference 88/89/91/993/994 without
+        // limit. Each went through the narrow document-type check and was refused with UNKNOWN_CODE, so
+        // the row could not be used at all -- while 1749 lists it and 10227 can require it.
+        const request = buildFexInvoiceRequest(
+            {...SERVICES, associatedVouchers: [{documentTypeCode: 88, pointOfSaleNumber: 3, number: 6}]},
+            8,
+            41,
+        );
+
+        expect(request.associatedVouchers).toEqual([
+            {voucherType: 88, pointOfSaleNumber: 3, number: 6, cuit: undefined},
+        ]);
+    });
+
+    it('still refuses an associated code the authority knows nothing about', () => {
+        expect(() =>
+            buildFexInvoiceRequest(
+                {...SERVICES, associatedVouchers: [{documentTypeCode: 30, pointOfSaleNumber: 3, number: 6}]},
+                8,
+                41,
+            ),
+        ).toThrow(ArcaValidationError);
+    });
+
     it('maps shipping permits through the same destination catalogue', () => {
         const request = buildFexInvoiceRequest(
             {
