@@ -114,7 +114,7 @@ describe('cachedAuthorityObligation', () => {
         // blip would otherwise become a TTL-long degradation the next reader sees as a cache hit rather
         // than as a failure, and nothing else in the suite would notice.
         const ask = jest.fn<() => Promise<ObligationAnswer>>(async () =>
-            answer({source: 'LOCAL_REGISTRY', registrySnapshot: {publishedAt: '2026-04-14', fetchedAt: '2026-09-01'}}),
+            answer({source: 'LOCAL_REGISTRY', registrySnapshot: {fetchedAt: '2026-09-01', thresholdEffectiveFrom: '2026-04-14'}}),
         );
 
         await expect(cachedAuthorityObligation('testing', RECEIVER, DAY, ask)).rejects.toThrow(

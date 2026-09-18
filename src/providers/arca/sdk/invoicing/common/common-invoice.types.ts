@@ -87,7 +87,7 @@ export interface CommonInvoiceRequest {
     serviceDateFrom?: string;
     /** `FchServHasta` (yyyymmdd) — required when concept is 2 or 3. */
     serviceDateTo?: string;
-    /** `FchVtoPago` (yyyymmdd) — required when concept is 2 or 3. */
+    /** `FchVtoPago` (yyyymmdd) — required when concept is 2 or 3, and on an FCE whatever its concept. */
     paymentDueDate?: string;
     associatedVouchers?: Array<AssociatedVoucher>;
     optionals?: Array<InvoiceOptional>;

@@ -103,11 +103,17 @@ curl -X POST http://localhost:4101/api/authority/status \
 | `pnpm lint` | ESLint strict-type-checked (new code only; the copied SDK is ignored) |
 | `pnpm format` | Prettier |
 | `pnpm probe:band` | measure the exchange-rate band ARCA enforces. **Homologación only**; `PROBE_MODE=full` authorizes real vouchers and burns voucher numbers — read-only by default |
+| `node scripts/build-fce-registry.mjs` | re-vendor ARCA's "empresas grandes" listing + the general FCE threshold into `obligated-receivers.generated.ts`. Run a day after each May/July/September milestone; throws rather than emitting suspect data |
+| `pnpm probe:fecred` | settle what the WSFECRED WSDL cannot: whether our certificate is enrolled, and whether the register answers about an arbitrary receiver under our own identity |
 | `pnpm probe:cotizacion-day` | measure which DAY a cotización is for. Read-only in every mode; `PROBE_ENVIRONMENT=production` is required for a meaningful answer (homologación's series is generated) |
 
-The two probes exist because their answers are measurements with a shelf life, not readings of ARCA's
-manual — re-run the probe rather than re-reading the PDF. Both are configured through `PROBE_*` env vars;
-see [.env.example](.env.example) and the header comment in each script.
+The probes exist because their answers are measurements with a shelf life, not readings of ARCA's manual —
+re-run the probe rather than re-reading the PDF. They are configured through `PROBE_*` env vars; see
+[.env.example](.env.example) and the header comment in each script.
+
+`build-fce-registry.mjs` is not a probe but a vendoring step, and it reads two sources: the listing's own
+JSON endpoint (the page paginates ten rows at a time, so its HTML is not the data) and the régimen landing
+page for the threshold. It refuses to write rather than emit a partial or undated snapshot.
 
 ## HTTP contract (routePrefix `/api`)
 
@@ -127,7 +133,7 @@ see the **Neutral field glossary** in [docs/CONTRACT.md](docs/CONTRACT.md) for w
 | `POST /invoices/query` | ✅ wired | idempotency backstop |
 | `POST /points-of-sale` | ✅ wired | the issuer's registered points of sale; identity-only body |
 | `POST /taxpayers/lookup` | ✅ wired | registry lookup by identification type; uses this service's own delegated identity (no `entity` block) |
-| `POST /taxpayers/credit-invoice-obligation` | ⚠️ wired, unenrolled | whether a buyer must be sent a Factura de Crédito Electrónica, and from what amount. Reads under this service's own delegated identity (no `entity` block), like its neighbour — our certificate must be enrolled in the credit-invoice service separately from `wsfe`. Wire read from the live WSDL (2026-09-17); **our certificate still needs enrolling in `wsfecred`** before it answers — `pnpm probe:fecred` |
+| `POST /taxpayers/credit-invoice-obligation` | ⚠️ wired, unenrolled | whether a buyer must be sent a Factura de Crédito Electrónica, and from what amount. Reads under this service's own delegated identity (no `entity` block), like its neighbour — our certificate must be enrolled in the credit-invoice service separately from `wsfe`. Wire read from the live WSDL (2026-09-17) and the offline fallback vendored (1,180 companies, 2026-09-18); **our certificate still needs enrolling in `wsfecred`** before it answers — `pnpm probe:fecred` |
 | `POST /currencies/rates` | ✅ wired | published exchange rates + the band the authority accepts; delegated identity, no `entity` block |
 
 Authenticated endpoints reply `409 CREDENTIALS_REQUIRED` on a ticket-cache miss; core re-sends with

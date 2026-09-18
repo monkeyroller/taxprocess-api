@@ -29,7 +29,7 @@ describe('decideReceptionObligation', () => {
         threshold: {amount: 4000000, currencyCode: 'PES'},
         source: 'LOCAL_REGISTRY',
         asOf: '2026-04-14T03:00:00Z',
-        registrySnapshot: {publishedAt: '2026-04-14', fetchedAt: '2026-09-01'},
+        registrySnapshot: {fetchedAt: '2026-09-01', thresholdEffectiveFrom: '2026-04-14'},
         providerMetadata: {rowCount: 12},
     };
 

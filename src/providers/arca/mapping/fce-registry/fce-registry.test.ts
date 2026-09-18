@@ -6,17 +6,16 @@ import {fileURLToPath} from 'node:url';
 /**
  * Reading the vendored "empresas grandes" snapshot.
  *
- * The generated module is mocked rather than used, for two reasons: the committed one is a placeholder with
- * no rows, and a test asserting against real data would have to be rewritten every refresh — which is how a
- * test quietly stops asserting anything.
+ * The generated module is mocked rather than used: a test asserting against the real ~1,180 rows would have
+ * to be rewritten every refresh, which is how a test quietly stops asserting anything. The one case that
+ * *does* read the committed file is the figure guard at the bottom, and it says why.
  */
 
+/** Read 2026-09-18. `fetchedAt` is the floor, and there is deliberately no publication date — see the reader. */
 const SNAPSHOT = {
-    publishedAt: '2026-04-14',
-    publishedAtRaw: 'Listado vigente desde el 14/04/2026',
     fetchedAt: '2026-09-01',
     sourceUrl: 'https://servicioscf.afip.gob.ar/facturadecreditoelectronica/Listado-RFCE-Mi-PyMe.asp',
-    rowCount: 2,
+    rowCount: 3,
     generalThreshold: {
         amount: 5549862,
         currencyCode: 'PES',
@@ -25,16 +24,24 @@ const SNAPSHOT = {
     },
 };
 
+/** Obligated since well before the snapshot; obligated only from a later alta; and a future alta. */
+const OBLIGATED = '30711111119';
+const RECENT = '30722222228';
+const FUTURE_ALTA = '30733333337';
+const NOT_LISTED = '20333333339';
+
 jest.unstable_mockModule('./obligated-receivers.generated.js', () => ({
     FCE_REGISTRY_SNAPSHOT: SNAPSHOT,
-    FCE_OBLIGATED_RECEIVER_ROWS: '30711111119\n30722222228',
+    FCE_OBLIGATED_RECEIVERS: {
+        [OBLIGATED]: {since: '2019-10-01', name: 'ACME SA'},
+        [RECENT]: {since: '2026-09-01', name: 'RECIENTE SRL'},
+        [FUTURE_ALTA]: {since: '2026-12-01', name: 'FUTURA SA'},
+    },
 }));
 
 const {lookupObligatedReceiver, canAnswerFor} = await import('./fce-registry.js');
 
-const OBLIGATED = '30711111119';
-const NOT_LISTED = '20333333339';
-/** An ARCA day after the listing took effect. */
+/** An ARCA day after the snapshot was read. */
 const IN_RANGE = '20260917';
 
 describe('lookupObligatedReceiver', () => {
@@ -45,14 +52,13 @@ describe('lookupObligatedReceiver', () => {
             obligated: true,
             source: 'LOCAL_REGISTRY',
             threshold: {amount: 5549862, currencyCode: 'PES'},
-            registrySnapshot: {publishedAt: '2026-04-14', fetchedAt: '2026-09-01'},
+            registrySnapshot: {fetchedAt: '2026-09-01', thresholdEffectiveFrom: '2026-04-14'},
         });
     });
 
-    it('dates the answer to when the listing took effect, not to now and not to when it was fetched', () => {
-        // `now` would claim a currency the answer does not have; `fetchedAt` is when we copied the page,
-        // which is not when the fact became true. Argentine midnight on `publishedAt`, rendered UTC.
-        expect(lookupObligatedReceiver(OBLIGATED, IN_RANGE)?.asOf).toBe('2026-04-14T03:00:00Z');
+    it('dates the answer to when the snapshot was read, not to now', () => {
+        // `now` would claim a currency the answer does not have. Argentine midnight on `fetchedAt`, UTC.
+        expect(lookupObligatedReceiver(OBLIGATED, IN_RANGE)?.asOf).toBe('2026-09-01T03:00:00Z');
     });
 
     it('omits the threshold for a receiver that is not obligated', () => {
@@ -63,20 +69,49 @@ describe('lookupObligatedReceiver', () => {
         expect(answer?.threshold).toBeUndefined();
     });
 
-    it('declines to speak about a day before the listing took effect', () => {
-        // A list published in April says nothing about February, when both the membership and the threshold
-        // were different. Applying it backwards is the same mixing failure the live/cached split causes,
-        // moved from "live obligado + stale threshold" to "current list + past day", and it is what stops
-        // the dated observation quietly becoming a constant.
+    it('does not report a listed company as obligated before its own alta takes effect', () => {
+        // The rule the per-row day exists for, and the expensive direction to get wrong. ARCA notifies the
+        // year's universe in May but its altas take effect in September, so the listing legitimately holds
+        // companies that owe nothing yet — answering `true` issues a credit invoice months early.
+        expect(lookupObligatedReceiver(FUTURE_ALTA, IN_RANGE)?.obligated).toBe(false);
+        expect(lookupObligatedReceiver(FUTURE_ALTA, '20261201')?.obligated).toBe(true);
+    });
+
+    it('reports a company obligated from the day its alta takes effect, not the day after', () => {
+        expect(lookupObligatedReceiver(RECENT, '20260901')?.obligated).toBe(true);
+    });
+
+    it('names the listed company, so "why was this an FCE" has an answer in words', () => {
+        // Nothing reads the name to decide anything. It is here so an operator reading a stored verdict
+        // months later is not left holding an eleven-digit number.
+        expect(lookupObligatedReceiver(OBLIGATED, IN_RANGE)?.providerMetadata).toMatchObject({
+            receiverName: 'ACME SA',
+            obligatedSince: '2019-10-01',
+        });
+    });
+
+    it('says nothing about a receiver it does not hold, rather than naming an empty one', () => {
+        // `obligated: false` covers both "not listed" and "listed but not yet". Only the second can say
+        // since when, so the absence of these keys is itself the distinction.
+        const metadata = lookupObligatedReceiver(NOT_LISTED, IN_RANGE)?.providerMetadata ?? {};
+
+        expect(metadata).not.toHaveProperty('receiverName');
+        expect(metadata).not.toHaveProperty('obligatedSince');
+    });
+
+    it('declines to speak about a day before the snapshot was read', () => {
+        // Bajas take effect in July and a removed company is simply gone from the listing, so for an
+        // earlier voucher this cannot tell "never obligated" from "no longer obligated". The floor is the
+        // read date because ARCA publishes no date of its own.
         expect(lookupObligatedReceiver(OBLIGATED, '20260213')).toBeUndefined();
         expect(canAnswerFor('20260213')).toBe(false);
     });
 
-    it('answers on the day the listing takes effect', () => {
-        expect(canAnswerFor('20260414')).toBe(true);
+    it('answers on the day the snapshot was read', () => {
+        expect(canAnswerFor('20260901')).toBe(true);
     });
 
-    it('has no staleness expiry, so a long-unrefreshed list still answers', () => {
+    it('has no staleness expiry, so a long-unrefreshed snapshot still answers', () => {
         // Deliberate: "older than N days, decline" converts a working fallback into a 502 on a schedule
         // nobody is watching. The dates go out on the wire; judging them is the caller's business.
         expect(canAnswerFor('20301231')).toBe(true);
@@ -91,10 +126,9 @@ describe('the general threshold figure', () => {
         // real if it is checked. This fails loudly the first time somebody inlines the number into a
         // validator, a default or a test fixture.
         //
-        // The needle comes from the COMMITTED snapshot, not from this file's mock. Greping for a figure only
-        // the test holds can never match anything, so the guard would pass forever while the real number was
-        // being copied around — which is exactly the way a check quietly stops checking. `0` is the
-        // placeholder's value: there is no figure to leak yet, and searching for it would match everything.
+        // The needle comes from the COMMITTED snapshot, not from this file's mock. Grepping for a figure
+        // only the test holds can never match anything, so the guard would pass forever while the real
+        // number was being copied around — exactly the way a check quietly stops checking.
         const amount = committedThresholdAmount();
         const offenders =
             amount === 0

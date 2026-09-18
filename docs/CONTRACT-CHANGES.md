@@ -6,6 +6,30 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-18 — An FCE states when it falls due, whatever it bills
+
+Branch `develop`. **Breaking for one régimen only:** a credit-invoice factura or nota de débito now requires
+`paymentDueDate`. Nothing else changes.
+
+`paymentDueDate` was gated on the concept alone, on both halves of the path: the mapper copied it only for
+concept 2/3, and the SOAP builder emitted `FchVtoPago` in the same block as the service dates. A domestic
+FCE is concept 1 — goods — so the field was dropped in between, and ARCA rejected every one of them with
+10163, naming a field the payload had no room for.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 26.1 | `invoice.paymentDueDate` is now carried on a **credit-invoice voucher of any concept**, not only on concept 2/3. `FchVtoPago` is emitted on its own; the service dates stay the concept's | **Send it on every FCE.** The authority's own field, an authority calendar day |
+| 26.2 | An FCE **factura or nota de débito** (201, 202, 206, 207, 211, 212) with no `paymentDueDate` is `400`, `details.code: "CREDIT_INVOICE_PAYMENT_DUE_DATE_REQUIRED"`. The notas de crédito are exempt — one cancels an FCE rather than extending it | **Handle the code**, or simply always send the date. Refused before a voucher number is taken |
+
+An ordinary goods voucher is unaffected: a `paymentDueDate` stated on one is still dropped, the authority
+having no field for it there. Only the FCE half is refused rather than relayed — a services voucher missing
+its dates stays the authority's to reject, since a caller may be relaying them some other way. And only the
+half of the FCE half that falls due: 10163 is measured against a factura, so the unmeasured types are
+refused where they plausibly fall due (a `400` you clear by sending a date) and let through where they
+plausibly do not (a nota de crédito), the two mistakes not costing the same.
+
+---
+
 ## 2026-09-17 — The credit-invoice régimen: we answer who is obligated, you stop assembling `Opcionales`
 
 Branch `develop`. **Additive — nothing you send today changes meaning.** Answers the three asks in core's
@@ -23,6 +47,7 @@ an FCE needs without core touching ARCA's field ids.
 | 25.6 | ⚠️ `threshold.currencyCode` is **`PES`**, the entity's own code — never ISO `ARS` | **Assert against `PES`.** §5 deleted the ISO mapping deliberately |
 | 25.7 | `issueDate` is **required**, and is the voucher's own day | None, if you were already sending it |
 | 25.8 | An authority outage alone is a **`200` labelled `LOCAL_REGISTRY`**; only a double failure is a `502` | None. Store `source` and `registrySnapshot` as you planned |
+| 25.12 | ⚠️ `registrySnapshot` is `{fetchedAt, thresholdEffectiveFrom}` — **not** the `{publishedAt, fetchedAt}` we promised. ARCA publishes no date for the listing | **Store both fields.** `fetchedAt` is the honest version of `publishedAt`; see below |
 | 25.9 | **New** `invoice.creditInvoice` = `{issuerCbu, issuerCbuAlias?, transmissionMode?}` on the domestic branch | **Send the block instead of `optionals[]` ids** once you start issuing FCEs |
 | 25.10 | `transmissionMode` is **derivable here** — omitted means `SCA` | **Do not carry the field** until someone wants `ADC` |
 | 25.11 | Sending the same authority field id via **both** `creditInvoice` and `optionals[]` is a `400`, `details.code: "CREDIT_INVOICE_OPTIONAL_CONFLICT"` | **Handle the new code**, or simply never do both |
@@ -142,6 +167,30 @@ Two of those were wrong on our side and are now corrected; none of them is visib
 Worth one line on its own: **the authority itself declares `obligado` and `montoDesde` optional.** Our
 refusal to read an absent one as "not obligated" was a judgement call when we wrote it, and the schema
 turns out to agree that absence is a real possibility rather than a defensive hypothetical.
+
+### The listing is vendored now — and it does not publish a date
+
+The snapshot is populated: **1,180 companies, read 2026-09-18**, alongside the general threshold
+(`5549862` from `2026-04-14`, Resolución 1/2026) taken from the régimen's landing page. The endpoint is
+`502`-free for an ARCA outage from here on.
+
+Two things about that listing are worth passing on, because both changed the design:
+
+**It publishes no date.** The page shows "Fecha de actualización: <today>", and that value is generated
+client-side from the reader's own clock — it always reads as the day you look, whatever ARCA last did. So
+`registrySnapshot` carries `fetchedAt` (when we read it) and `thresholdEffectiveFrom` (when the figure took
+effect, which *is* published) rather than the `publishedAt` we promised in §23. That is 25.12, and it is
+the one field on this endpoint that moved after you started building.
+
+It also relocates the floor. An answer is refused for any `issueDate` before `fetchedAt`, because bajas
+take effect in July and a removed company is simply absent — for an earlier voucher the snapshot cannot
+tell "never obligated" from "no longer obligated".
+
+**Each row carries its own start date, and it is load-bearing.** Your §23.1 quoted ARCA's calendar at us:
+altas from September, notification by May. The listing reflects that literally — it holds companies whose
+obligation has not begun. Without the per-row day, every one of them would come back `obligated: true` for
+up to four months before the buyer owed anything, which is the expensive direction. A listed company is now
+reported obligated only from its own start date.
 
 ### 🔴 Still unmeasured
 

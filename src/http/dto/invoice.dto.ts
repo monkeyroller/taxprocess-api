@@ -438,7 +438,13 @@ export class NeutralInvoiceDto {
     @IsAuthorityDate()
     serviceDateTo?: string;
 
-    /** Authority calendar day — required by the entity when concept is 2 or 3 (AR: `FchVtoPago`). */
+    /**
+     * Authority calendar day — required by the entity when concept is 2 or 3, and on a credit-invoice
+     * voucher whatever its concept (AR: `FchVtoPago`).
+     *
+     * Optional here because the second condition turns on the document type, which the mapper decides;
+     * an FCE sent without it is refused there.
+     */
     @IsOptional()
     @IsAuthorityDate()
     paymentDueDate?: string;

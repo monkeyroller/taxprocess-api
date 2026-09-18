@@ -134,3 +134,46 @@ export const FCE_CBTE_TIPOS: ReadonlySet<number> = new Set<number>([
 export function isFceDocumentType(cbteTipo: number): boolean {
     return FCE_CBTE_TIPOS.has(cbteTipo);
 }
+
+/**
+ * The FCE types exempt from stating a payment due date: the notas de crédito, across all three letters.
+ *
+ * The split the régimen draws is between **what falls due and what cancels**, not between facturas and
+ * notas. A factura is the instrument being financed and has to say when it falls due. A nota de débito adds
+ * to the same financed amount — interest, a charge — so it falls due too, and a tenant issuing one can
+ * always state when. Only a nota de crédito cancels an FCE rather than extending it, so there may be
+ * nothing of its own to fall due, and refusing one would cost a tenant the ability to undo a voucher.
+ *
+ * 10163 has been measured against a factura only. The two directions are not symmetric, which is what
+ * settles the unmeasured middle: refusing wrongly is a `400` the caller clears by sending a date, while
+ * letting a voucher through wrongly spends a voucher number on a relayed Spanish rejection. So an
+ * unmeasured type that plausibly falls due is refused, and only the case with a real argument against it is
+ * exempt. Empty this the day `pnpm probe:fecred` measures 10163 against a nota de crédito.
+ */
+const FCE_PAYMENT_DUE_DATE_EXEMPT_CBTE_TIPOS: ReadonlySet<number> = new Set<number>([
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_A,
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_B,
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_C,
+]);
+
+/**
+ * The régimen's types that must state a payment due date, and the one set ARCA's `FchVtoPago` rule (10163)
+ * is enforced against on our side.
+ *
+ * **Derived** from {@link FCE_CBTE_TIPOS} rather than listed again, so it is a subset by construction. The
+ * two are read together in `invoice.mapper`, which *carries* the date for anything in `FCE_CBTE_TIPOS` and
+ * *demands* it for anything in here: a type that reached this set without being in that one would have its
+ * date dropped before the demand could read it, and every such voucher would be refused for a field the
+ * caller did send. A hand-copied list could be walked into that; this cannot.
+ *
+ * It also means a future FCE code joins by being added to {@link FCE_CBTE_TIPOS} alone — and joins the
+ * demanding side, which is the safe default per the exempt set's docblock.
+ */
+export const FCE_PAYMENT_DUE_DATE_CBTE_TIPOS: ReadonlySet<number> = new Set<number>(
+    [...FCE_CBTE_TIPOS].filter((cbteTipo) => !FCE_PAYMENT_DUE_DATE_EXEMPT_CBTE_TIPOS.has(cbteTipo)),
+);
+
+/** Whether `cbteTipo` is a credit-invoice voucher ARCA requires `FchVtoPago` on (10163). */
+export function requiresFcePaymentDueDate(cbteTipo: number): boolean {
+    return FCE_PAYMENT_DUE_DATE_CBTE_TIPOS.has(cbteTipo);
+}

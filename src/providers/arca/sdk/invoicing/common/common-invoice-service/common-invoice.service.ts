@@ -73,9 +73,24 @@ export class CommonInvoiceService extends InvoiceWebService<CommonInvoiceRequest
             ImpIVA: money(request.vatAmount),
         };
 
+        // All three are guarded on being *defined*, not merely on the concept. A key holding `undefined`
+        // is not the same as an absent key once this reaches the serializer, and an empty `<FchServHasta/>`
+        // draws a date-format rejection from ARCA rather than the missing-field one the mapper means to let
+        // through — it leaves a service date out precisely when the caller did, on the reasoning that a
+        // services voucher missing its dates is the authority's to reject in its own words.
         if (request.concept !== 1) {
-            detail.FchServDesde = request.serviceDateFrom;
-            detail.FchServHasta = request.serviceDateTo;
+            if (request.serviceDateFrom !== undefined) {
+                detail.FchServDesde = request.serviceDateFrom;
+            }
+            if (request.serviceDateTo !== undefined) {
+                detail.FchServHasta = request.serviceDateTo;
+            }
+        }
+
+        // An FCE must carry FchVtoPago whatever it bills (10163), so the payment date is emitted on its
+        // own rather than with the service dates. It sits after both in the XSD sequence, so a goods FCE
+        // carrying only this one is still ordered.
+        if (request.paymentDueDate !== undefined) {
             detail.FchVtoPago = request.paymentDueDate;
         }
 

@@ -33,16 +33,22 @@ export class ObligationThresholdDto {
 }
 
 /**
- * When the offline list this answer came from was published, and when this service last read it.
+ * When the offline list this answer came from was read, and when its threshold took effect.
  *
  * Present **exactly** when `source` is `LOCAL_REGISTRY`, which is what makes such an answer
- * self-identifying: a caller storing it can date it months later without asking us. `publishedAt` is the
- * day the listing itself states it takes effect; `fetchedAt` is the day we copied the page. Both are plain
- * calendar days, deliberately — they are days in the authority's calendar, not instants.
+ * self-identifying: a caller storing it can date it months later without asking us. Both are plain calendar
+ * days, deliberately — they are days in the authority's calendar, not instants.
+ *
+ * **There is no `publishedAt`, because ARCA does not publish one.** The listing page appears to carry a
+ * "Fecha de actualización", but that value is generated client-side from the reader's own clock and always
+ * shows the day you looked — so reporting it would be reporting your own date back to you dressed as an
+ * authority fact. `fetchedAt` is the day this service read the listing, which is the honest version of the
+ * same information and the day answers are floored at.
  */
 export class RegistrySnapshotDto {
-    publishedAt!: string;
     fetchedAt!: string;
+    /** The day the general threshold took effect, per the resolución that set it. This one is published. */
+    thresholdEffectiveFrom!: string;
 }
 
 /**
@@ -69,8 +75,9 @@ export interface ObligationAnswer {
      * An instant on both branches, at the same granularity, because mixed granularity is what a caller
      * writes one parser for and gets wrong on the other. For an authority answer it is the moment the
      * authority replied — stored alongside a cached one, so a cached answer reports when it was *true*
-     * rather than when it was read. For the offline registry it is the instant its `publishedAt` day began
-     * in Argentina, since that is when the fact it states became true.
+     * rather than when it was read. For the offline registry it is the instant its `fetchedAt` day began in
+     * Argentina — when this service read the listing, which is the most the snapshot can honestly claim:
+     * ARCA publishes no date of its own, so there is no "when the fact became true" to report.
      */
     readonly asOf: string;
     readonly registrySnapshot?: RegistrySnapshotDto;
@@ -89,7 +96,8 @@ export class CreditInvoiceObligationResultDto implements ObligationAnswer {
     entityCode!: string;
 
     /**
-     * The `issuerTaxId` the caller asked with, echoed back.
+     * The `issuerTaxId` the caller asked about, echoed back in its canonical bare-digit form — so
+     * `20-11111111-2` comes back as `20111111112` and an audit trail carries one spelling.
      *
      * Nothing authenticates as this taxpayer and the answer does not depend on it — the régimen is a
      * property of the receiver. It is here because the régimen is a relationship between two parties, and a

@@ -26,7 +26,7 @@ import type {ObligationAnswer} from '../../../http/dto/credit-invoice-obligation
 export interface ObligationSources {
     /** Asks the authority. Resolves a whole answer or rejects; never resolves a partial one. */
     readonly authority: () => Promise<ObligationAnswer>;
-    /** The offline snapshot. Pure, synchronous, never throws. `undefined` means "cannot speak". */
+    /** The offline snapshot. Synchronous, clock-free, never throws. `undefined` means "cannot speak". */
     readonly registry: () => ObligationAnswer | undefined;
     /** Whether an authority failure is eligible for fallback. Defaults to {@link isAuthorityUnavailable}. */
     readonly eligibleForFallback?: (err: unknown) => boolean;

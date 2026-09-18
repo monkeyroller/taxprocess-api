@@ -47,11 +47,19 @@ import {toArcaEnvironment} from '../src/providers/arca/auth/environment/environm
 import {arcaDayToIsoDate, toArcaDay} from '../src/providers/arca/mapping/authority-day/authority-day.js';
 import type {GenericEnvironment} from '../src/providers/provider/environment.js';
 import type {ArcaAuth} from '../src/providers/arca/sdk/core/types.js';
+import {
+    FECRED_HOMOLOGACION_RECEIVERS,
+    FECRED_HOMOLOGACION_THRESHOLDS,
+    FECRED_HOMOLOGACION_THRESHOLD_RECEIVER,
+} from '../src/providers/arca/sdk/fecred/fecred-homologacion-ids.js';
 
 const ENVIRONMENT: GenericEnvironment =
     process.env.PROBE_ENVIRONMENT === 'production' ? 'production' : 'testing';
 const RECEIVER = process.env.PROBE_RECEIVER ?? '30711111119';
 const ISSUE_DATE = process.env.PROBE_ISSUE_DATE ?? new Date().toISOString().slice(0, 10);
+
+/** The day the recorded cast was measured; the replay asks about that day, not today. */
+const RECORDED_AT = '2026-09-18';
 
 /**
  * The production service, reporting the envelope it built.
@@ -101,6 +109,60 @@ async function attempt(auth: ArcaAuth): Promise<boolean> {
     }
 }
 
+/**
+ * Re-asks the register about every value recorded in `fecred-homologacion-ids.ts` and reports drift.
+ *
+ * That file's numbers are measurements with a shelf life, not a promise — a testing register is entitled to
+ * change underneath them. What is not acceptable is for them to go quietly wrong, so this replays them and
+ * names every row that moved. A drifted row is something to re-record, not a regression to debug.
+ */
+async function replayRecordedCast(auth: ArcaAuth): Promise<void> {
+    // The plain service, not the logging subclass: a fourteen-row replay does not need fourteen envelopes.
+    const service = new FeCredService(soap, toArcaEnvironment(ENVIRONMENT));
+    const drift: Array<string> = [];
+
+    console.log('');
+    console.log('-- replaying the recorded homologación cast --');
+
+    const check = async (taxId: string, day: string, want: {obligated: boolean; amount?: number}) => {
+        try {
+            const info = await service.receptionObligation(auth, {
+                receiverTaxId: Number(taxId),
+                issueDate: day,
+            });
+            const same = info.obligated === want.obligated && info.thresholdAmount === want.amount;
+            const got = `${String(info.obligated)}/${String(info.thresholdAmount ?? '-')}`;
+            const expected = `${String(want.obligated)}/${String(want.amount ?? '-')}`;
+            console.log(`  ${taxId}  ${day}  ${same ? 'ok  ' : 'DRIFT'}  recorded ${expected}  got ${got}`);
+            if (!same) drift.push(`${taxId} @ ${day}: recorded ${expected}, got ${got}`);
+        } catch (err) {
+            console.log(`  ${taxId}  ${day}  ERROR ${String(err).slice(0, 60)}`);
+            drift.push(`${taxId} @ ${day}: ${String(err).slice(0, 60)}`);
+        }
+    };
+
+    for (const row of FECRED_HOMOLOGACION_RECEIVERS) {
+        await check(row.taxId, RECORDED_AT, {obligated: row.obligated, amount: row.thresholdAmount});
+    }
+    for (const row of FECRED_HOMOLOGACION_THRESHOLDS) {
+        await check(FECRED_HOMOLOGACION_THRESHOLD_RECEIVER, row.issueDate, {
+            obligated: row.obligated,
+            amount: row.thresholdAmount,
+        });
+    }
+
+    console.log('');
+    if (drift.length === 0) {
+        console.log('  Every recorded value still holds.');
+        return;
+    }
+    console.log(`  ${String(drift.length)} recorded value(s) drifted:`);
+    drift.forEach((line) => { console.log('    ' + line); });
+    console.log('');
+    console.log('  Re-record them in src/providers/arca/sdk/fecred/fecred-homologacion-ids.ts, with the');
+    console.log('  date you measured. Do not adjust production behaviour to match a testing register.');
+}
+
 async function main(): Promise<void> {
     const arcaEnvironment = toArcaEnvironment(ENVIRONMENT);
 
@@ -145,6 +207,12 @@ async function main(): Promise<void> {
     console.log('');
 
     if (await attempt(auth)) {
+        // Only when nothing was asked for specifically, and only against the register the recorded values
+        // came from — replaying them against production would compare two different datasets and report
+        // every row as drift.
+        if (process.env.PROBE_RECEIVER === undefined && ENVIRONMENT === 'testing') {
+            await replayRecordedCast(auth);
+        }
         return;
     }
 

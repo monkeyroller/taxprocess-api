@@ -235,7 +235,7 @@ Request:
     "totals": { "untaxed": 0, "exempt": 0, "perceptions": 0 },  // optional
     "serviceDateFrom": "2026-08-01",  // optional; required for concept 2/3
     "serviceDateTo":   "2026-08-31",  // optional
-    "paymentDueDate":  "2026-09-10"   // optional
+    "paymentDueDate":  "2026-09-10"   // optional; required for concept 2/3, and on an FCE whatever its concept
   }
 }
 ```
@@ -740,8 +740,8 @@ be enrolled in the credit-invoice register is therefore **ours**, once, for ever
   "threshold": { "amount": 5549862.00, "currencyCode": "PES" },
   "source": "AUTHORITY",                  // AUTHORITY | LOCAL_REGISTRY
   "asOf": "2026-09-17T09:00:00Z",
-  "registrySnapshot": { "publishedAt": "2026-04-14",     // only when source = LOCAL_REGISTRY
-                        "fetchedAt":   "2026-09-01" },
+  "registrySnapshot": { "fetchedAt": "2026-09-18",                  // only when source = LOCAL_REGISTRY
+                        "thresholdEffectiveFrom": "2026-04-14" },
   "providerMetadata": {} }
 ```
 
@@ -772,8 +772,8 @@ absence into a verdict at the call site is where that goes wrong. `TAXPAYER_NOT_
 
 **`source` says which of two independent answers this is, and they are never blended.** The authority is
 always asked first. When it cannot be reached, this service answers from a locally-held snapshot of ARCA's
-published "empresas grandes" listing and says so, with the dates it was published and fetched — so a voucher
-issued off a stale list is identifiable afterwards rather than indistinguishable from a live answer. Every
+published "empresas grandes" listing and says so, with the day it read that listing — so a voucher issued
+off a stale list is identifiable afterwards rather than indistinguishable from a live answer. Every
 field of an answer comes from the one source that produced it: a live `obligado` beside a snapshot's
 threshold would disagree precisely when the régimen changes, which is the only moment the answer matters.
 
@@ -784,14 +784,25 @@ stops a tenant invoicing is worse than a day-old list, and the universe of empre
 year rather than hourly.
 
 The snapshot declines to answer in two cases, and then the authority's own failure surfaces: when it has
-never been generated, and when `issueDate` falls **before** the day the listing took effect. A list
-published in April says nothing about February, when both the membership and the threshold were different.
-There is deliberately no staleness expiry beyond that — a snapshot is always allowed to answer, its dates
-always travel with the answer, and judging them is the caller's business.
+never been generated, and when `issueDate` falls **before** `registrySnapshot.fetchedAt`. Bajas take effect
+in July and a removed company is simply absent from the listing, so for an earlier voucher the snapshot
+cannot tell "never obligated" from "no longer obligated" — it declines rather than guess. There is
+deliberately no staleness expiry beyond that: a snapshot is always allowed to answer, its dates always
+travel with the answer, and judging them is the caller's business.
 
-**The answer does not depend on the voucher's amount**, and is memoized per (issuer, receiver, issueDate),
-so re-asking as an invoice total is edited costs nothing. Only authority answers are cached; a fallback
-never is, since caching one would extend a brief outage for the life of the entry.
+> **Why the floor is a read date and not a publication date.** The listing appears to carry a "Fecha de
+> actualización", and it is not one — the page generates that value from the reader's own clock, so it
+> always shows the day you looked. There is no publication date to report, which is why `registrySnapshot`
+> carries `fetchedAt` (when this service read the listing) and `thresholdEffectiveFrom` (when the figure
+> took effect, which *is* published) rather than the `publishedAt` an earlier draft of this section promised.
+
+A listed company is **not** reported as obligated before its own alta takes effect. ARCA notifies the year's
+universe by May but its altas apply from September, so between those months the listing legitimately holds
+companies that owe nothing yet.
+
+**The answer does not depend on the voucher's amount**, and is memoized per (receiver, issueDate), so
+re-asking as an invoice total is edited costs nothing. Only authority answers are cached; a fallback never
+is, since caching one would extend a brief outage for the life of the entry.
 
 | what is refused | `details.code` |
 | --- | --- |
@@ -1671,6 +1682,17 @@ whatever it uses, exactly as it would its own currency codes.
 | --- | --- | --- |
 | domestic | `issueDate` within ±5 authority days (§3) | `serviceDateFrom`/`serviceDateTo`/`paymentDueDate` |
 | export | `export.incoterm` required; `export.shippingPermits` allowed | `export.paymentDate` required; permits refused |
+
+**`paymentDueDate` is not only the concept's.** A credit-invoice voucher (`documentTypeCode` 201–203,
+206–208, 211–213) carries it whatever it bills, the régimen being a financing instrument rather than a
+formatting variant. So a goods FCE sends `paymentDueDate` and no service dates, where a goods factura has
+no field for it at all.
+
+An FCE **factura or nota de débito** (201, 202, 206, 207, 211, 212) is *required* to carry it — ARCA rejects
+one without it (10163) — and omitting it is refused here as `CREDIT_INVOICE_PAYMENT_DUE_DATE_REQUIRED`
+rather than costing the caller a voucher number. The split is between what falls due and what cancels: a
+débito adds to the same financed amount, so it falls due too. Only the **notas de crédito** (203, 208, 213)
+are exempt, one cancelling an FCE rather than extending it — they still carry the date when you send it.
 
 On ARCA, `1` additionally requires the issuer to be in the DGA exporter registry (rule 1668) for an export,
 which `2` and `4` skip. This service chooses none of that — the caller states what it is billing and the

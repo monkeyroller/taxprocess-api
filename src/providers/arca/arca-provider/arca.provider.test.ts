@@ -15,6 +15,10 @@ import type {TaxpayerData} from '../sdk/taxpayer-registry/padron.types.js';
 import type {ReceptionObligationInfo} from '../sdk/fecred/fecred.types.js';
 import {clearObligationCache} from '../credit-invoice-obligation/obligation-cache.js';
 import {
+    FCE_OBLIGATED_RECEIVERS,
+    FCE_REGISTRY_SNAPSHOT,
+} from '../mapping/fce-registry/obligated-receivers.generated.js';
+import {
     CredentialsRequiredError,
     DelegationNotAuthorizedError,
     DelegationNotConfiguredError,
@@ -2544,6 +2548,41 @@ describe('ArcaProvider.creditInvoiceObligation', () => {
         expect(receptionObligation).not.toHaveBeenCalled();
     });
 
+    it.each([
+        ['too short', '1234567'],
+        ['too long', '307111111199'],
+    ])('refuses a receiver tax id that is %s, rather than letting it reach the authority', async (_n, bad) => {
+        // Measured against homologación, not supposed: asked about a seven-digit id, WSFECRED answers with
+        // an empty body — no `obligado`, no `montoDesde`, and no error either. The parser refuses to read
+        // that as a verdict, so it degrades to the offline registry, which has no such key and answers
+        // `obligated: false`. A caller who dropped a digit would get an ordinary factura for a buyer who may
+        // well be obligated. Eleven digits is decidable here for nothing.
+        await expect(
+            new ArcaProvider(delegateStore()).creditInvoiceObligation('testing', ISSUER, bad, ISSUE_DATE),
+        ).rejects.toMatchObject({code: 'ARCA_VALIDATION', details: {code: 'INVALID_ID'}});
+
+        expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('accepts a formatted tax id and echoes back the canonical one', async () => {
+        // Refusing `30-71111111-9` would be a `400` for a value nobody could misread, and the audit trail
+        // is worth more carrying one spelling than the caller's.
+        receptionObligation.mockResolvedValue({obligated: true, thresholdAmount: 5000000, raw: {}});
+
+        const result = await new ArcaProvider(delegateStore()).creditInvoiceObligation(
+            'testing',
+            '20-11111111-2',
+            '30-71111111-9',
+            ISSUE_DATE,
+        );
+
+        expect(result.issuerTaxId).toBe('20111111112');
+        expect(receptionObligation).toHaveBeenCalledWith(expect.anything(), {
+            receiverTaxId: 30711111119,
+            issueDate: '2026-09-17',
+        });
+    });
+
     it('refuses a malformed issuerTaxId, informational though it is', async () => {
         // An audit trail carrying a value nobody ever checked is worth nothing.
         await expect(
@@ -2620,13 +2659,57 @@ describe('ArcaProvider.creditInvoiceObligation', () => {
     });
 
     it('surfaces a 502 when the authority is down and the snapshot cannot answer either', async () => {
-        // Only a *double* failure is an error. With a populated snapshot this same case is a
-        // `200 LOCAL_REGISTRY`; the committed one is an empty placeholder, so the outage shows through.
+        // Only a *double* failure is an error. The snapshot declines here on its floor rule — `ISSUE_DATE`
+        // falls before the day it was read — so the outage shows through. The case where it *can* answer is
+        // the test below; both are needed, and it is the pair that says the fallback is wired at all.
         receptionObligation.mockRejectedValue(new ArcaSoapError('WSFECRED unreachable', 503));
 
         await expect(
             new ArcaProvider(delegateStore()).creditInvoiceObligation('testing', ISSUER, RECEIVER, ISSUE_DATE),
         ).rejects.toMatchObject({code: 'ARCA_SOAP'});
+    });
+
+    it('answers 200 LOCAL_REGISTRY from the committed snapshot when the authority is down', async () => {
+        // The wiring, end to end, against the REAL vendored snapshot — the one path the reader's own suite
+        // cannot cover, because it mocks the generated module away. What broke here once was the provider
+        // handing the registry the caller's raw spelling instead of the canonical CUIT: every unit test
+        // stayed green because none of them ran the two together.
+        //
+        // The fixture is derived from the snapshot rather than hardcoded, so a refresh cannot rot it: any
+        // company already obligated by the day the listing was read, asked about on that day.
+        const issueDate = FCE_REGISTRY_SNAPSHOT.fetchedAt;
+        const listed = Object.entries(FCE_OBLIGATED_RECEIVERS).find(([, row]) => row.since <= issueDate);
+        if (listed === undefined) {
+            throw new Error('The committed snapshot holds no company obligated as at its own fetchedAt.');
+        }
+        const [listedCuit, {since, name}] = listed;
+
+        receptionObligation.mockRejectedValue(new ArcaSoapError('WSFECRED unreachable', 503));
+
+        // Sent hyphenated on purpose: `assertCuit` accepts that spelling, and the snapshot is keyed on bare
+        // digits, so this is the exact shape that answered `obligated: false` for a listed company.
+        const formatted = `${listedCuit.slice(0, 2)}-${listedCuit.slice(2, 10)}-${listedCuit.slice(10)}`;
+        const result = await new ArcaProvider(delegateStore()).creditInvoiceObligation(
+            'testing',
+            ISSUER,
+            formatted,
+            issueDate,
+        );
+
+        expect(result).toMatchObject({
+            obligated: true,
+            source: 'LOCAL_REGISTRY',
+            registrySnapshot: {
+                fetchedAt: FCE_REGISTRY_SNAPSHOT.fetchedAt,
+                thresholdEffectiveFrom: FCE_REGISTRY_SNAPSHOT.generalThreshold.effectiveFrom,
+            },
+            providerMetadata: {obligatedSince: since, ...(name === '' ? {} : {receiverName: name})},
+        });
+        // Present if and only if obligated — the invariant the two sources share.
+        expect(result.threshold).toEqual({
+            amount: FCE_REGISTRY_SNAPSHOT.generalThreshold.amount,
+            currencyCode: FCE_REGISTRY_SNAPSHOT.generalThreshold.currencyCode,
+        });
     });
 
     it('asks the authority once for a repeated (receiver, day), however often it is asked', async () => {
