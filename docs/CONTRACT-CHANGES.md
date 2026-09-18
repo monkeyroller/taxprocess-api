@@ -6,6 +6,223 @@ and **whether core must do anything**.
 
 ---
 
+## 2026-09-18 — An FCE states when it falls due, whatever it bills
+
+Branch `develop`. **Breaking for one régimen only:** a credit-invoice factura or nota de débito now requires
+`paymentDueDate`. Nothing else changes.
+
+`paymentDueDate` was gated on the concept alone, on both halves of the path: the mapper copied it only for
+concept 2/3, and the SOAP builder emitted `FchVtoPago` in the same block as the service dates. A domestic
+FCE is concept 1 — goods — so the field was dropped in between, and ARCA rejected every one of them with
+10163, naming a field the payload had no room for.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 26.1 | `invoice.paymentDueDate` is now carried on a **credit-invoice voucher of any concept**, not only on concept 2/3. `FchVtoPago` is emitted on its own; the service dates stay the concept's | **Send it on every FCE.** The authority's own field, an authority calendar day |
+| 26.2 | An FCE **factura or nota de débito** (201, 202, 206, 207, 211, 212) with no `paymentDueDate` is `400`, `details.code: "CREDIT_INVOICE_PAYMENT_DUE_DATE_REQUIRED"`. The notas de crédito are exempt — one cancels an FCE rather than extending it | **Handle the code**, or simply always send the date. Refused before a voucher number is taken |
+
+An ordinary goods voucher is unaffected: a `paymentDueDate` stated on one is still dropped, the authority
+having no field for it there. Only the FCE half is refused rather than relayed — a services voucher missing
+its dates stays the authority's to reject, since a caller may be relaying them some other way. And only the
+half of the FCE half that falls due: 10163 is measured against a factura, so the unmeasured types are
+refused where they plausibly fall due (a `400` you clear by sending a date) and let through where they
+plausibly do not (a nota de crédito), the two mistakes not costing the same.
+
+---
+
+## 2026-09-17 — The credit-invoice régimen: we answer who is obligated, you stop assembling `Opcionales`
+
+Branch `develop`. **Additive — nothing you send today changes meaning.** Answers the three asks in core's
+`2026-09-17_credit-invoice-obligation.md`. A new endpoint says whether a buyer must be sent a Factura de
+Crédito Electrónica and from what amount; a new `creditInvoice` block on the invoice carries the two fields
+an FCE needs without core touching ARCA's field ids.
+
+| # | What changed | Core action |
+| --- | --- | --- |
+| 25.1 | **New** `POST /api/taxpayers/credit-invoice-obligation` → `{entityCode, issuerTaxId, obligated, threshold?, source, asOf, registrySnapshot?, providerMetadata}` | **Build the client.** Request shape in 25.2 |
+| 25.2 | **No `entity` block and no credentials** — it reads under our own delegated identity, like `/taxpayers/lookup`. Body is flat: `{entityCode, environment, issuerTaxId, receiverTaxId, issueDate}`, and the receiver is a bare tax id rather than an identification pair | **Send no credentials.** `issuerTaxId` is informational and echoed back for your audit |
+| 25.3 | It **never** answers `409 CREDENTIALS_REQUIRED` or `403 DELEGATION_NOT_AUTHORIZED`. A missing enrolment of *our* certificate is `500 DELEGATION_NOT_CONFIGURED`, naming the service | **Do not fold that `500` into a retry.** It is a configuration problem; retrying cannot clear it |
+| 25.4 | An unknown receiver is **`obligated: false`**, never a `404` | None. `TAXPAYER_NOT_FOUND` stays scoped to `taxpayers/lookup` |
+| 25.5 | ⚠️ `threshold` is present **only when `obligated` is true** | **Do not read it unconditionally.** Say the word if you need the floor for display anyway |
+| 25.6 | ⚠️ `threshold.currencyCode` is **`PES`**, the entity's own code — never ISO `ARS` | **Assert against `PES`.** §5 deleted the ISO mapping deliberately |
+| 25.7 | `issueDate` is **required**, and is the voucher's own day | None, if you were already sending it |
+| 25.8 | An authority outage alone is a **`200` labelled `LOCAL_REGISTRY`**; only a double failure is a `502` | None. Store `source` and `registrySnapshot` as you planned |
+| 25.12 | ⚠️ `registrySnapshot` is `{fetchedAt, thresholdEffectiveFrom}` — **not** the `{publishedAt, fetchedAt}` we promised. ARCA publishes no date for the listing | **Store both fields.** `fetchedAt` is the honest version of `publishedAt`; see below |
+| 25.9 | **New** `invoice.creditInvoice` = `{issuerCbu, issuerCbuAlias?, transmissionMode?}` on the domestic branch | **Send the block instead of `optionals[]` ids** once you start issuing FCEs |
+| 25.10 | `transmissionMode` is **derivable here** — omitted means `SCA` | **Do not carry the field** until someone wants `ADC` |
+| 25.11 | Sending the same authority field id via **both** `creditInvoice` and `optionals[]` is a `400`, `details.code: "CREDIT_INVOICE_OPTIONAL_CONFLICT"` | **Handle the new code**, or simply never do both |
+| 25.12 | The block and the document type must agree, checked here rather than relayed from ARCA. An FCE type (201/202/203, 206/207/208, 211/212/213) with no account on it by either channel is `400 CREDIT_INVOICE_REQUIRED`; the block on a non-FCE type is `400 CREDIT_INVOICE_NOT_APPLICABLE`; the block on an **export** voucher is `400 CREDIT_INVOICE_NOT_ON_EXPORT` | **Handle the three codes.** If you already assemble `2101` by hand, nothing changes — either channel satisfies the first |
+
+### Your §22.6, answered: the first bullet
+
+**Send no `entity` block and no credentials.** The obligation is read under this service's own delegated
+identity, like `/taxpayers/lookup` and `/currencies/rates`, and the certificate that has to be enrolled in
+the credit-invoice register is ours — once, after which it serves every tenant. The endpoint is therefore
+reachable for a company with no configured integration, which removes the caveat we had both accepted.
+
+That is a design choice and not only a fact about the authority, so here is the reasoning: whether a buyer
+must be sent a credit invoice is a fact about the **receiver** and the régimen. A tenant's certificate
+authorizes that tenant's *sales*; it says nothing about a third party's obligations. Answering through one
+arbitrary tenant's credential would make a platform-wide fact depend on which tenant happened to ask, and
+break when that certificate lapsed — the same argument that keeps `/currencies/rates` credential-free.
+Per-taxpayer credentials remain what they were: the thing that authorizes that taxpayer's own voucher on
+WSFEv1.
+
+One consequence worth planning for rather than discovering: **the authority enrols each web service
+independently**, and the credit-invoice register is not `wsfe`. Until our certificate is enrolled in it, the
+endpoint answers `500 DELEGATION_NOT_CONFIGURED` naming the service.
+
+> ⚠️ **Please do not fold that `500` into a retry.** It is the one thing here we would ask you to special-case
+> deliberately. A missing enrolment and an authority outage both end in the call working later, so
+> "transient vs permanent" is the wrong axis — the one that matters is who has to act. An outage clears by
+> waiting; an enrolment clears only when somebody opens WSASS. Advising a retry on the second produces a
+> loop that cannot terminate and whose attempts read, from outside, as progress.
+
+### Your §22.2, answered honestly: we hold a figure, but not a constant
+
+You asked that nobody hold the general limit. On the `AUTHORITY` path nobody does — `montoDesde` is read off
+the service and passed through, and where the service disagrees with a published limit the service wins.
+
+The fallback is where we have to be straight with you: **it cannot answer a threshold without holding a
+figure.** What it holds is not a constant but a dated observation — *"as at this day, per this instrument,
+read from this URL on this day"* — living only in a machine-written file, and the difference is checked
+rather than promised. A test asserts the digits appear nowhere else in the source tree. The figure reaches
+the wire only with `source: "LOCAL_REGISTRY"` and its snapshot beside it, so an answer carrying it is
+self-dating months later. It is never compared against or blended with the authority's value. And it cannot
+be applied to a day before the listing took effect — a list published in April says nothing about February,
+when both the membership and the threshold were different.
+
+The alternative was a fallback that answers `obligated` and omits `threshold`. That is a partial answer you
+would have to special-case, and it is its own kind of mixing: a live-shaped response missing the field that
+makes it actionable.
+
+### Your §23, adapted: a build-time snapshot, not a scheduled job
+
+This service has no database and no scheduler, deliberately — it holds nothing at rest but its own delegate
+certificate and makes no outbound call except to the authority, always inside a request. So the "empresas
+grandes" listing is vendored by a build script into a committed file, and your refresh calendar becomes a
+release checklist item rather than a cron.
+
+That is a smaller change than it sounds, and arguably closer to what you actually asked for. Your reasoning
+for running a day after each milestone was that a fetch finding last year's list is worse than one that
+waits — and a script that **fails the build** when the page will not parse or carries no publication date is
+a stronger version of that than a job whose silent no-op nobody sees. `publishedAt` and `fetchedAt` are
+returned exactly as you asked, and there is deliberately no staleness expiry: a snapshot always answers, its
+dates always travel with it, and judging them is yours.
+
+> ⚠️ **The snapshot ships empty.** The listing has not been fetched yet, so the fallback cannot answer and
+> the endpoint runs authority-only — a WSFECRED outage is a `502` today rather than a `200 LOCAL_REGISTRY`.
+> Everything else works. The data lands as its own commit whose diff is pure data.
+
+### Why we are not asking you for the ids
+
+`optionals[]` still works and is unchanged, so `creditInvoice` adds no capability — it moves a boundary.
+Filling `optionals[]` for an FCE means core hardcoding three ARCA ids into a payload where every other field
+is canonical, which is the entity-specific mapping §5 and §9 put on our side. You offered to send the ids if
+we would rather; we would not.
+
+`transmissionMode` is this contract's own closed enum, and `"SCA"` coinciding with ARCA's own literal is the
+one thing about it worth arguing, because §9's `Pro_umed` post-mortem is exactly the trap. It survives the
+test: the members name the régimen's two circulation systems rather than an authority's field encoding, and
+nothing is translated *from* an ARCA value — we map these to whatever the authority wants. §5 has the table.
+
+### §22.3 answered: your assumption holds, and no wire change follows
+
+**The request carries the receiver's tax id and the date, and there is nowhere to put an activity even if
+you had one.** The service's own WSDL declares the operation's input as exactly three parts, all required,
+nothing else permitted:
+
+```xml
+<xsd:complexType name="ConsultarMontoObligadoRecepcionRequestType">
+  <xsd:sequence>
+    <xsd:element maxOccurs="1" minOccurs="1" name="authRequest"     type="tns:AuthRequestType"/>
+    <xsd:element maxOccurs="1" minOccurs="1" name="cuitConsultada"  type="tns:CuitSimpleType"/>
+    <xsd:element maxOccurs="1" minOccurs="1" name="fechaEmision"    type="xsd:date"/>
+  </xsd:sequence>
+</xsd:complexType>
+```
+
+The régimen's floor does vary by the receiver's principal activity, so the service must be resolving that
+itself from the tax id and the date. Nothing you have built against moves, and the second round-trip you
+were trying to avoid on the sale form's hot path is not needed.
+
+### The wire is measured now, and the WSDL is why
+
+We had this down as a probe-shaped question and it was not: `<endpoint>?wsdl` is public, needs no
+certificate, and answered most of it in one read (2026-09-17, both environments). So the earlier caution in
+this entry was overstated. What that read settled:
+
+| | |
+| --- | --- |
+| Endpoints | `https://fwshomo.afip.gov.ar/wsfecred/FECredService`, and **`serviciosjava.afip.gob.ar`** in production — the two environments genuinely differ in TLD |
+| Namespace | `http://ar.gob.afip.wsfecred/FECredService/` |
+| Style | `document`/`literal`, children unqualified |
+| Auth | `authRequest{token, sign, cuitRepresentada}` |
+| Date | `fechaEmision` is an `xsd:date` — `YYYY-MM-DD`, not ARCA's `yyyymmdd` |
+| Answer | `obligado` is `S`/`N`, `montoDesde` a 2-decimal importe, **both `minOccurs="0"`** |
+| Errors | in-payload as `arrayErrores`, not SOAP faults |
+
+Two of those were wrong on our side and are now corrected; none of them is visible to you.
+
+Worth one line on its own: **the authority itself declares `obligado` and `montoDesde` optional.** Our
+refusal to read an absent one as "not obligated" was a judgement call when we wrote it, and the schema
+turns out to agree that absence is a real possibility rather than a defensive hypothetical.
+
+### The listing is vendored now — and it does not publish a date
+
+The snapshot is populated: **1,180 companies, read 2026-09-18**, alongside the general threshold
+(`5549862` from `2026-04-14`, Resolución 1/2026) taken from the régimen's landing page. The endpoint is
+`502`-free for an ARCA outage from here on.
+
+Two things about that listing are worth passing on, because both changed the design:
+
+**It publishes no date.** The page shows "Fecha de actualización: <today>", and that value is generated
+client-side from the reader's own clock — it always reads as the day you look, whatever ARCA last did. So
+`registrySnapshot` carries `fetchedAt` (when we read it) and `thresholdEffectiveFrom` (when the figure took
+effect, which *is* published) rather than the `publishedAt` we promised in §23. That is 25.12, and it is
+the one field on this endpoint that moved after you started building.
+
+It also relocates the floor. An answer is refused for any `issueDate` before `fetchedAt`, because bajas
+take effect in July and a removed company is simply absent — for an earlier voucher the snapshot cannot
+tell "never obligated" from "no longer obligated".
+
+**Each row carries its own start date, and it is load-bearing.** Your §23.1 quoted ARCA's calendar at us:
+altas from September, notification by May. The listing reflects that literally — it holds companies whose
+obligation has not begun. Without the per-row day, every one of them would come back `obligated: true` for
+up to four months before the buyer owed anything, which is the expensive direction. A listed company is now
+reported obligated only from its own start date.
+
+### 🔴 Still unmeasured
+
+- **Whether our certificate is enrolled for `wsfecred`.** A WSDL cannot say. Until it is, the endpoint
+  answers `500 DELEGATION_NOT_CONFIGURED` — see 25.3, and please do not retry it.
+- **Whether the service answers about an arbitrary receiver under our own identity.** The schema names the
+  field `cuitConsultada` and asks for no relationship, but a schema cannot express a rule the server still
+  enforces. This is the one remaining thing that could change the design, and `pnpm probe:fecred` settles
+  it the moment the enrolment lands.
+- **§22.7, which amount the authority compares.** Your reading — the total including tax and perceptions —
+  matches the régimen as we understand it, but our understanding is not better than yours and the WSDL says
+  nothing about it: the operation never receives an amount, so the comparison is yours to make. Treat it as
+  agreed-pending-confirmation.
+- **Which `arrayErrores` codes mean what.** Needed for more than wording, and worth knowing before the
+  offline snapshot is populated: a rejection we cannot classify is currently treated as if the authority
+  were unreachable, so once the snapshot answers, a refusal about something *other* than an unknown
+  receiver comes back as a `LOCAL_REGISTRY` verdict indistinguishable from an outage fallback. Safe in the
+  sense that matters — a dated, labelled answer, never a confident wrong one, and 25.4 still holds — but
+  the fact that the authority actively refused is visible only in our logs until the codes are measured.
+
+### What did NOT change
+
+- `optionals[]` and `associatedVouchers[]`: same shape, same relay, same behaviour.
+- Every existing endpoint, including `taxpayers/lookup`, whose `404` is untouched.
+- The acceptance lifecycle is **not** implemented and no field anticipates it. Aceptación, rechazo,
+  aceptación tácita and anulación are about a *voucher*, while this endpoint asks about a *taxpayer*; they
+  will not share a shape, and when you need them it should be its own request.
+- No document-type deducer. The document type remains yours to decide, for the reasons you gave.
+- Nothing about issuer enrolment: the receiver's obligation alone is what this answers.
+
+---
+
 ## 2026-09-10 (later still) — Units are a standard now, and a discount stopped pretending to be one
 
 Branch `develop`. 🔴 **Breaking, and it needs a coordinated release.** `invoice.items[].unitOfMeasureCode`

@@ -357,5 +357,37 @@ describe('delegate-ticket eviction classifiers', () => {
                 ),
             ).toBe(false);
         });
+
+        it('classifies nothing for wsfecred, on either channel, until its error codes are known', () => {
+            // **This encodes a decision, not an oversight, and is not a gap to be closed by guessing.**
+            //
+            // The channel is measured: WSFECRED's WSDL declares `arrayErrores` inside the return type, so
+            // it reports in-payload and the padrón SOAP-fault reader is definitively wrong for it. What is
+            // not measured is which of those numbers mean a rejected ticket rather than a missing grant,
+            // and a `FAULT_CODES` entry is a claim about exactly those numbers.
+            //
+            // The two directions are not symmetric: classifying nothing evicts nothing, costing a `502`
+            // where a `403` would read better; a *wrong* classification can purge a delegate ticket ARCA
+            // will not re-mint for ~12h. That is how `wsfex` was once classified with `wsfe`'s `600`.
+            //
+            // Add an entry only from a measured `pnpm probe:fecred` run, and update this test in the same
+            // change so the claim and its evidence arrive together.
+            expect(
+                isDelegateTicketFault(
+                    serviceError('600', 'ValidacionDeToken: firma digital no valida'),
+                    ServiceId.WSFECRED,
+                ),
+            ).toBe(false);
+
+            // The assertion that actually bites, and the reason the one above is not enough on its own: an
+            // `ArcaServiceError` is turned away by `isPadronTicketFault`'s `instanceof ArcaSoapError` gate
+            // before any wording is read, so it answers `false` whatever the dispatch does. A transport
+            // fault is the class that reaches the padrón reader, and ARCA words plenty of them with the
+            // bare token vocabulary. While that reader was the fallthrough default this returned `true`,
+            // evicting our wsfecred ticket and degrading the endpoint to a silent `LOCAL_REGISTRY` answer.
+            expect(
+                isDelegateTicketFault(new ArcaSoapError('token no valido', 500), ServiceId.WSFECRED),
+            ).toBe(false);
+        });
     });
 });

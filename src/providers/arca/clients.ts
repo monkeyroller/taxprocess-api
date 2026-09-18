@@ -2,6 +2,7 @@ import type {ArcaEnvironment} from './sdk/core/constants.js';
 import {SoapClient} from './sdk/core/soap-client/soap-client.js';
 import {CommonInvoiceService} from './sdk/invoicing/common/common-invoice-service/common-invoice.service.js';
 import {FexInvoiceService} from './sdk/invoicing/export/fex-invoice-service/fex-invoice.service.js';
+import {FeCredService} from './sdk/fecred/fecred-service/fecred.service.js';
 import {ConstanciaInscripcionService} from './sdk/taxpayer-registry/constancia-inscripcion.service.js';
 import {TaxpayerIdentityService} from './sdk/taxpayer-registry/taxpayer-identity.service.js';
 
@@ -37,4 +38,13 @@ export function constanciaService(environment: ArcaEnvironment): ConstanciaInscr
 /** Padrón A13 — the taxpayer's identity, plus the identity-document → clave search. */
 export function taxpayerIdentityService(environment: ArcaEnvironment): TaxpayerIdentityService {
     return new TaxpayerIdentityService(soap, environment);
+}
+
+/**
+ * WSFECRED — the Factura de Crédito Electrónica registry, asked only whether a receiver is obligated to be
+ * sent one. Its own WSAA scope (`wsfecred`) and its own certificate enrolment, independent of `wsfe`:
+ * a certificate that authorizes vouchers today will still be refused here until it is granted separately.
+ */
+export function feCredService(environment: ArcaEnvironment): FeCredService {
+    return new FeCredService(soap, environment);
 }

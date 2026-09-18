@@ -396,6 +396,19 @@ describe("the rules that need ARCA's own codes", () => {
         expect(() => buildFexInvoiceRequest(SERVICES, 7, 41)).not.toThrow();
     });
 
+    it('refuses a credit-invoice block rather than dropping it, since WSFEXv1 cannot carry one', () => {
+        // The domestic mapper turns this block into Opcionales 2101/2102/27; there is no export equivalent,
+        // so relaying the voucher without them would answer `200` with a CAE and no account attached, and
+        // the caller would have no way to see the block was ignored.
+        const withBlock: NeutralInvoice = {
+            ...SERVICES,
+            creditInvoice: {issuerCbu: '0170099220000067797112'},
+        };
+        expect(codeOf(() => buildFexInvoiceRequest(withBlock, 7, 41))).toBe('CREDIT_INVOICE_NOT_ON_EXPORT');
+        // An export voucher without the block is untouched.
+        expect(() => buildFexInvoiceRequest(SERVICES, 7, 41)).not.toThrow();
+    });
+
     it('requires a payment date on an invoice for services or other (1673)', () => {
         const unpaid = {...SERVICES, export: {...SERVICES.export!, paymentDate: undefined}};
         expect(codeOf(() => buildFexInvoiceRequest(unpaid, 7, 41))).toBe('MISSING_PAYMENT_DATE');

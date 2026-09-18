@@ -3,6 +3,7 @@ import type {EntityAuthBlock} from './entity-auth.js';
 import type {NeutralInvoice} from './neutral-invoice.js';
 import type {
     AuthorityStatusResult,
+    CreditInvoiceObligationResult,
     CurrencyRatesResult,
     LastAuthorizedResult,
     NextNumbersResult,
@@ -95,6 +96,16 @@ export abstract class TaxEntityProvider {
             this.lookupTaxpayersImpl(environment, identificationTypeCode, identificationNumber),
         );
     }
+    creditInvoiceObligation(
+        environment: GenericEnvironment,
+        issuerTaxId: string,
+        receiverTaxId: string,
+        issueDate: string,
+    ): Promise<CreditInvoiceObligationResult> {
+        return this.guarded(() =>
+            this.creditInvoiceObligationImpl(environment, issuerTaxId, receiverTaxId, issueDate),
+        );
+    }
     pointsOfSale(entity: EntityAuthBlock, webService?: WebService): Promise<PointsOfSaleResult> {
         return this.guarded(() => this.pointsOfSaleImpl(entity, webService));
     }
@@ -127,6 +138,39 @@ export abstract class TaxEntityProvider {
         identificationTypeCode: number,
         identificationNumber: string,
     ): Promise<TaxpayerResult>;
+    /**
+     * Whether `receiverTaxId` must be sent a credit-invoice document (AR: Factura de Crédito Electrónica)
+     * for a voucher issued on `issueDate`, and the amount at or above which that applies.
+     *
+     * Three things a second entity implementing this needs:
+     *
+     * - **It takes no issuer block and no credentials**, like `lookupTaxpayers` and `currencyRates`: the
+     *   obligation is a property of the *receiver* and the régimen, not of whoever is asking, so it is read
+     *   under this service's own delegated identity and there is no `CREDENTIALS_REQUIRED` handshake. That
+     *   is a precondition rather than a convenience, and for the reason `currencyRates` gives: a tenant's
+     *   certificate authorizes that tenant's sales and says nothing about a third party's obligations, so
+     *   reading a platform-wide fact through one arbitrary tenant's credential would make the answer depend
+     *   on which tenant happened to ask, and break when that certificate lapsed.
+     *
+     *   `issuerTaxId` is therefore **informational**: required so an audit of "why was this voucher a credit
+     *   invoice" can name both parties, and used for nothing else.
+     * - **An unknown receiver is `obligated: false`, never a not-found.** "The registry does not know this
+     *   taxpayer" and "this taxpayer is not obligated" are the same outcome for the decision being made, and
+     *   translating an absence into a verdict at the call site is where that goes wrong.
+     * - **`source` says which of two independent answers this is**, and they are never blended. An
+     *   implementation that cannot reach its authority may answer from a local register, but every field of
+     *   the answer must then come from that register — an authority verdict beside a local threshold
+     *   disagrees exactly when the régimen changes.
+     *
+     * `issueDate` is the voucher's own day rather than today, and is required: a backdated sale must be
+     * judged against the régimen as it stood then, and a defaulted date is silently wrong for one.
+     */
+    protected abstract creditInvoiceObligationImpl(
+        environment: GenericEnvironment,
+        issuerTaxId: string,
+        receiverTaxId: string,
+        issueDate: string,
+    ): Promise<CreditInvoiceObligationResult>;
     /**
      * The entity's registered points of sale.
      *

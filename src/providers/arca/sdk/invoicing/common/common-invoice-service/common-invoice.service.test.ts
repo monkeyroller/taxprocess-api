@@ -230,6 +230,53 @@ describe('CommonInvoiceService request payloads', () => {
         ]);
     });
 
+    it('omits a service date the caller left out rather than sending an empty element', async () => {
+        // A services voucher missing one of its dates is the authority's to reject, and it should reject it
+        // as the missing field it is. A key holding `undefined` is not an absent key by the time this
+        // reaches the serializer, and an empty `<FchServHasta/>` draws a date-format complaint instead.
+        const {service, lastCall} = serviceReturning(authorizeResponse(APPROVED_DETAIL));
+
+        await service.requestAuthorization(AUTH, {...REQUEST, concept: 2, serviceDateFrom: '20260801'});
+
+        const detail = sentDetail(lastCall);
+        expect(detail.FchServDesde).toBe('20260801');
+        expect(detail).not.toHaveProperty('FchServHasta');
+        expect(detail).not.toHaveProperty('FchVtoPago');
+    });
+
+    it('sends FchVtoPago alone on a goods voucher, which is how an FCE carries its due date', async () => {
+        // A Factura de Crédito must state FchVtoPago whatever its concept (10163), and concept 1 is the
+        // only one a domestic FCE is issued with. The two service dates stay absent — an empty element is
+        // itself a rejection — and the one date still lands in its XSD position.
+        const {service, lastCall} = serviceReturning(authorizeResponse(APPROVED_DETAIL));
+
+        await service.requestAuthorization(AUTH, {...REQUEST, concept: 1, paymentDueDate: '20261010'});
+
+        const detail = sentDetail(lastCall);
+        expect(detail.FchVtoPago).toBe('20261010');
+        expect(detail).not.toHaveProperty('FchServDesde');
+        expect(detail).not.toHaveProperty('FchServHasta');
+        expect(Object.keys(detail)).toEqual([
+            'Concepto',
+            'DocTipo',
+            'DocNro',
+            'CbteDesde',
+            'CbteHasta',
+            'CbteFch',
+            'ImpTotal',
+            'ImpTotConc',
+            'ImpNeto',
+            'ImpOpEx',
+            'ImpTrib',
+            'ImpIVA',
+            'FchVtoPago',
+            'MonId',
+            'MonCotiz',
+            'CondicionIVAReceptorId',
+            'Iva',
+        ]);
+    });
+
     it('maps queryVoucher(pointOfSale, voucherType, voucherNumber) onto FeCompConsReq without transposing them', async () => {
         const {service, lastCall} = serviceReturning({
             FECompConsultarResult: {ResultGet: {Resultado: 'A', CodAutorizacion: '75123456789012'}},

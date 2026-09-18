@@ -28,6 +28,7 @@ import {
     InvoiceAssociatedVoucherDto,
     InvoiceExportDto,
     InvoiceItemDto,
+    InvoiceCreditInvoiceDto,
     InvoiceOptionalDto,
 } from './invoice-export/invoice-export.dto.js';
 
@@ -303,6 +304,19 @@ export class NeutralInvoiceDto {
     @Type(() => InvoiceExportDto)
     export?: InvoiceExportDto;
 
+    /**
+     * Credit-invoice details (AR: Factura de Crédito Electrónica), on a document type that is one.
+     *
+     * Unlike `receiver`/`export`, its presence decides nothing: the document type already says whether this
+     * is a credit invoice, and this block only carries the extra values such a document needs. So there is
+     * deliberately no cross-field rule here tying it to `documentTypeCode` — whether a given type requires
+     * or forbids it is the provider's question, needing the entity's catalogue to answer.
+     */
+    @IsOptional()
+    @ValidateNested()
+    @Type(() => InvoiceCreditInvoiceDto)
+    creditInvoice?: InvoiceCreditInvoiceDto;
+
 
     /**
      * Which of the entity's web services should authorize this voucher (its `configuration.webService`).
@@ -424,7 +438,13 @@ export class NeutralInvoiceDto {
     @IsAuthorityDate()
     serviceDateTo?: string;
 
-    /** Authority calendar day — required by the entity when concept is 2 or 3 (AR: `FchVtoPago`). */
+    /**
+     * Authority calendar day — required by the entity when concept is 2 or 3, and on a credit-invoice
+     * voucher whatever its concept (AR: `FchVtoPago`).
+     *
+     * Optional here because the second condition turns on the document type, which the mapper decides;
+     * an FCE sent without it is refused there.
+     */
     @IsOptional()
     @IsAuthorityDate()
     paymentDueDate?: string;

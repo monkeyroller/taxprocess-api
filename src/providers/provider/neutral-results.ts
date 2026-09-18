@@ -11,6 +11,7 @@ import type {AuthorityStatusResultDto} from '../../http/dto/authority-status-res
 import type {NextNumbersResultDto} from '../../http/dto/next-numbers-result.dto.js';
 import type {PointsOfSaleResultDto} from '../../http/dto/points-of-sale-result.dto.js';
 import type {CurrencyRatesResultDto} from '../../http/dto/currency-rates-result.dto.js';
+import type {CreditInvoiceObligationResultDto} from '../../http/dto/credit-invoice-obligation-result.dto.js';
 import type {TaxpayerResultDto} from '../../http/dto/taxpayer-result.dto.js';
 
 /** The neutral authorization result (reuses the country-agnostic result DTO). */
@@ -23,6 +24,9 @@ export type LastAuthorizedResult = LastAuthorizedResultDto;
 
 /** Neutral taxpayer-registry lookup result (reuses the country-agnostic result DTO). */
 export type TaxpayerResult = TaxpayerResultDto;
+
+/** Whether a buyer must be sent a Factura de Crédito Electrónica, and from what amount. */
+export type CreditInvoiceObligationResult = CreditInvoiceObligationResultDto;
 
 /** Neutral list of the entity's registered points of sale (reuses the country-agnostic result DTO). */
 export type PointsOfSaleResult = PointsOfSaleResultDto;

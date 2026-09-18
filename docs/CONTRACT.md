@@ -235,7 +235,7 @@ Request:
     "totals": { "untaxed": 0, "exempt": 0, "perceptions": 0 },  // optional
     "serviceDateFrom": "2026-08-01",  // optional; required for concept 2/3
     "serviceDateTo":   "2026-08-31",  // optional
-    "paymentDueDate":  "2026-09-10"   // optional
+    "paymentDueDate":  "2026-09-10"   // optional; required for concept 2/3, and on an FCE whatever its concept
   }
 }
 ```
@@ -373,6 +373,51 @@ Optional on `export`, for the cases that need them: `shippingPermitPresent` + `s
 a customs despacho), `incoterm` + `incotermDescription`, `clientCountryTaxId`,
 `settledInInvoiceCurrency`, `commercialObservations`, `observations`. `associatedVouchers[]` and `optionals[]`
 sit on the invoice itself, alongside `items`.
+
+#### `creditInvoice` — a credit-invoice document's own fields
+
+A credit-invoice document (AR: Factura de Crédito Electrónica) carries the issuer's bank account and a
+transmission mode that an ordinary factura has no field for. Send them as values on the invoice:
+
+```jsonc
+"creditInvoice": {
+  "issuerCbu":        "0170099220000067797112",
+  "issuerCbuAlias":   "MI.ALIAS.CBU",   // optional
+  "transmissionMode": "SCA"             // optional — omitted means SCA
+}
+```
+
+**It belongs on a credit-invoice voucher and only there.** Those are `documentTypeCode` 201/202/203 (A),
+206/207/208 (B) and 211/212/213 (C). Both mismatches are a `400 ARCA_VALIDATION` decided here rather than
+relayed from the authority:
+
+| | |
+| --- | --- |
+| an FCE type with no account on it, by either channel | `details.code: "CREDIT_INVOICE_REQUIRED"` |
+| the block on a type that is not an FCE | `details.code: "CREDIT_INVOICE_NOT_APPLICABLE"` |
+| the block on an **export** voucher, which has no field for it | `details.code: "CREDIT_INVOICE_NOT_ON_EXPORT"` |
+
+The first is satisfied by *either* channel: a caller already assembling `2101` by hand is issuing a perfectly
+good FCE and is not asked to stop. Only the typed block is constrained the other way — a raw id on a non-FCE
+voucher stays the authority's to reject, since that relay is deliberately open.
+
+**Not `optionals[]`, deliberately.** That channel still works and is unchanged, but filling it for this
+would mean core hardcoding the authority's own field ids, which is precisely the entity-specific mapping §5
+and §9 keep on this side. Every other field on this payload is canonical for the same reason.
+
+`transmissionMode` is this contract's own closed enum (§5) and **is derivable here**: omit it and the
+régimen's default applies, so a caller with no opinion need not carry the field at all. `issuerCbu` is
+checked for shape only — 22 characters — and relayed verbatim. Whether it is the *right* account is an
+operator judgement neither side can check, and this service does not try.
+
+**Sending the same authority field id both ways is refused**, with `400 ARCA_VALIDATION` and
+`details.code: "CREDIT_INVOICE_OPTIONAL_CONFLICT"`. Neither precedence rule is defensible: preferring the
+block silently discards a value the caller wrote, preferring the raw entry silently overrides the typed
+field the contract asked for, and both would put a bank account on a fiscal document that the caller did not
+unambiguously ask for. Send one or the other.
+
+**The acceptance lifecycle is not implemented.** Aceptación, rechazo, aceptación tácita and anulación are
+out of scope: this service issues the voucher and stops.
 
 The response is the ordinary authorization result — the same shape a domestic voucher answers with:
 
@@ -661,6 +706,122 @@ environment, **or it is not enrolled in the registry web service** — see §10;
 AR registries, so both enrolments have to be in place). A fallback that cannot reach the second registry
 fails with that error rather than degrading to a `404`: with the superset unread, "nobody is registered" is
 not something this service can state.
+
+
+### `POST /api/taxpayers/credit-invoice-obligation`
+Whether a buyer must be sent a credit-invoice document (AR: Factura de Crédito Electrónica), and the amount
+at or above which that applies. **No `entity` block and no credentials** — like `/taxpayers/lookup`, this is
+read under this service's own delegated identity, so it never returns `409 CREDENTIALS_REQUIRED` and no
+taxpayer has to delegate anything to us (§10).
+
+```jsonc
+{ "entityCode": "ARCA",
+  "environment": "production",
+  "issuerTaxId":   "30712345678",   // informational — see below
+  "receiverTaxId": "30711111119",   // the buyer's tax id, digits as a string
+  "issueDate":     "2026-09-17" }   // the VOUCHER's day, not today
+```
+
+**`issuerTaxId` is informational.** Nothing authenticates as that taxpayer and the answer does not depend on
+it — the régimen is a property of the receiver. It is required, and echoed back, because the régimen is a
+relationship between two parties and an audit of "why was this voucher an FCE" should be able to name both.
+It is checked for shape, so a value nobody ever looked at cannot end up in that trail.
+
+Taking no credential is a **precondition rather than a convenience**, and the same one `/currencies/rates`
+rests on: a tenant's certificate authorizes that tenant's *sales* and says nothing about a third party's
+obligations. Reading a platform-wide fact through one arbitrary tenant's credential would make the answer
+depend on which tenant happened to ask, and break when that certificate lapsed. The certificate that has to
+be enrolled in the credit-invoice register is therefore **ours**, once, for every tenant.
+
+```jsonc
+{ "entityCode": "ARCA",
+  "issuerTaxId": "30712345678",          // echoed back from the request
+  "obligated": true,
+  "threshold": { "amount": 5549862.00, "currencyCode": "PES" },
+  "source": "AUTHORITY",                  // AUTHORITY | LOCAL_REGISTRY
+  "asOf": "2026-09-17T09:00:00Z",
+  "registrySnapshot": { "fetchedAt": "2026-09-18",                  // only when source = LOCAL_REGISTRY
+                        "thresholdEffectiveFrom": "2026-04-14" },
+  "providerMetadata": {} }
+```
+
+**`issueDate` is the voucher's own date and is required.** A backdated sale must be judged against the
+régimen as it stood then — the same discipline `POST /api/currencies/rates` applies to a backdated batch —
+and a date defaulted to today would be silently wrong for exactly those vouchers.
+
+**The receiver is a bare `receiverTaxId`, not the `{identificationTypeCode, identificationNumber}` pair
+`/taxpayers/lookup` takes.** A registry lookup can legitimately be by identity document, and the type is
+what decides which register answers it. The régimen is a relationship between two *tax ids* — one register,
+one identification type — so the pair would carry a choice with no second option.
+
+**Two invariants on the answer**, both worth relying on:
+
+- `threshold` is present **if and only if** `obligated` is true. An unobligated receiver has no floor to
+  state.
+- `registrySnapshot` is present **if and only if** `source` is `LOCAL_REGISTRY`.
+
+**`threshold.amount` is the authority's own figure, passed through.** This service holds no threshold of its
+own on the `AUTHORITY` path — not in config, not in a column, not in a seed. Where the authority's value
+ever disagrees with a published general limit, the authority wins. `currencyCode` is the entity's own
+currency code (§5) — AR pesos are **`PES`, never `ARS`** — so compare against that rather than assuming.
+
+**An unknown receiver is `obligated: false`, never a `404`.** "The register does not hold this taxpayer" and
+"this taxpayer is not obligated" are the same outcome for the decision being made, and translating an
+absence into a verdict at the call site is where that goes wrong. `TAXPAYER_NOT_FOUND` stays scoped to
+`/taxpayers/lookup`.
+
+**`source` says which of two independent answers this is, and they are never blended.** The authority is
+always asked first. When it cannot be reached, this service answers from a locally-held snapshot of ARCA's
+published "empresas grandes" listing and says so, with the day it read that listing — so a voucher issued
+off a stale list is identifiable afterwards rather than indistinguishable from a live answer. Every
+field of an answer comes from the one source that produced it: a live `obligado` beside a snapshot's
+threshold would disagree precisely when the régimen changes, which is the only moment the answer matters.
+
+**An authority outage alone is a `200` labelled `LOCAL_REGISTRY`; only a double failure is an error.** This
+is the one behaviour a caller would otherwise discover by accident. It does not fail open — it never answers
+`obligated: false` because the service was down — and it does not fail closed either, since an outage that
+stops a tenant invoicing is worse than a day-old list, and the universe of empresas grandes changes twice a
+year rather than hourly.
+
+The snapshot declines to answer in two cases, and then the authority's own failure surfaces: when it has
+never been generated, and when `issueDate` falls **before** `registrySnapshot.fetchedAt`. Bajas take effect
+in July and a removed company is simply absent from the listing, so for an earlier voucher the snapshot
+cannot tell "never obligated" from "no longer obligated" — it declines rather than guess. There is
+deliberately no staleness expiry beyond that: a snapshot is always allowed to answer, its dates always
+travel with the answer, and judging them is the caller's business.
+
+> **Why the floor is a read date and not a publication date.** The listing appears to carry a "Fecha de
+> actualización", and it is not one — the page generates that value from the reader's own clock, so it
+> always shows the day you looked. There is no publication date to report, which is why `registrySnapshot`
+> carries `fetchedAt` (when this service read the listing) and `thresholdEffectiveFrom` (when the figure
+> took effect, which *is* published) rather than the `publishedAt` an earlier draft of this section promised.
+
+A listed company is **not** reported as obligated before its own alta takes effect. ARCA notifies the year's
+universe by May but its altas apply from September, so between those months the listing legitimately holds
+companies that owe nothing yet.
+
+**The answer does not depend on the voucher's amount**, and is memoized per (receiver, issueDate), so
+re-asking as an invoice total is edited costs nothing. Only authority answers are cached; a fallback never
+is, since caching one would extend a brief outage for the life of the entry.
+
+| what is refused | `details.code` |
+| --- | --- |
+| `issuerTaxId` or `receiverTaxId` is not all digits | `INVALID_ID` |
+| `issueDate` is not a real day, or is a datetime with no timezone | `INVALID_ISSUE_DATE` |
+| a missing field, or an unknown key | a `400` from the request body itself |
+
+**Errors:** `500 DELEGATION_NOT_CONFIGURED` when this service has no usable delegate certificate for the
+environment, **or it is not enrolled in the credit-invoice web service** — see §10; and `502 ARCA_SOAP` /
+`ARCA_SERVICE` / `ARCA_AUTH` when the authority failed **and** the snapshot could not answer.
+
+> ⚠️ **A missing enrolment is a `500`, not a `502`, and the difference is the point.** The authority enrols
+> each web service independently, so our certificate can authorize vouchers all day and still be unenrolled
+> here. Both statuses eventually resolve, but only one of them resolves by *waiting* — and advising a caller
+> to retry a configuration problem produces a loop that cannot terminate and that looks, from outside, like
+> progress. `DELEGATION_NOT_CONFIGURED` names the missing service in `details.reason` instead.
+
+Never `409 CREDENTIALS_REQUIRED` and never `403 DELEGATION_NOT_AUTHORIZED`: no tenant credential is spent
+here and there is no represented party to have failed to authorize us.
 
 
 ### `POST /api/currencies/rates`
@@ -992,6 +1153,10 @@ Any authenticated endpoint may respond:
              "details": { "entityCode":"ARCA", "issuerTaxId":"20123456789",
                           "service":"wsfe", "environment":"testing" } } }
 ```
+
+**Not every route can raise it.** `/taxpayers/lookup`, `/currencies/rates` and
+`/taxpayers/credit-invoice-obligation` read under this service's own delegated identity and never ask for a
+credential — see §10. A `409` from one of those would be a bug, not a handshake.
 
 Core's tax client must:
 1. Send the request with issuer identity and **no** credentials.
@@ -1518,6 +1683,17 @@ whatever it uses, exactly as it would its own currency codes.
 | domestic | `issueDate` within ±5 authority days (§3) | `serviceDateFrom`/`serviceDateTo`/`paymentDueDate` |
 | export | `export.incoterm` required; `export.shippingPermits` allowed | `export.paymentDate` required; permits refused |
 
+**`paymentDueDate` is not only the concept's.** A credit-invoice voucher (`documentTypeCode` 201–203,
+206–208, 211–213) carries it whatever it bills, the régimen being a financing instrument rather than a
+formatting variant. So a goods FCE sends `paymentDueDate` and no service dates, where a goods factura has
+no field for it at all.
+
+An FCE **factura or nota de débito** (201, 202, 206, 207, 211, 212) is *required* to carry it — ARCA rejects
+one without it (10163) — and omitting it is refused here as `CREDIT_INVOICE_PAYMENT_DUE_DATE_REQUIRED`
+rather than costing the caller a voucher number. The split is between what falls due and what cancels: a
+débito adds to the same financed amount, so it falls due too. Only the **notas de crédito** (203, 208, 213)
+are exempt, one cancelling an FCE rather than extending it — they still carry the date when you send it.
+
 On ARCA, `1` additionally requires the issuer to be in the DGA exporter registry (rule 1668) for an export,
 which `2` and `4` skip. This service chooses none of that — the caller states what it is billing and the
 consequences follow.
@@ -1636,6 +1812,29 @@ The revision this service vendors is published in §5 and in `REC20_SNAPSHOT`, n
 an *inbound* field would mean "which revision did you author against", which we would have to either ignore
 or hold you to; neither is worth the field.
 
+### Transmission modes (a third closed vocabulary, on the way in)
+
+`invoice.creditInvoice.transmissionMode` says how a credit-invoice document is put into circulation. Two
+values, and the field is optional with the first as the default, so a caller with no opinion sends nothing:
+
+| `transmissionMode` | what it means | example |
+| --- | --- | --- |
+| `SCA` | Sistema de Circulación Abierta — the régimen's default | `"SCA"` |
+| `ADC` | Agente de Depósito Colectivo | `"ADC"` |
+
+Same three guarantees as the vocabularies above — **stable**, **unique**, **key-safe**.
+
+**`"SCA"` coinciding with ARCA's own literal deserves a word**, because it looks like a fiscal code that
+escaped onto the wire, and §9's `Pro_umed` post-mortem is exactly the argument it has to answer. It is not
+one. The members are named after the régimen's two circulation systems — facts about the instrument, not
+about one authority's field encoding — and nothing here is translated *from* an ARCA value: this service
+maps these to whatever the authority wants, which today happens to be an `Opcionales` entry under an id that
+stays on this side and is not on this wire. A second entity spelling them differently supplies its own map
+and this table does not move.
+
+**There is deliberately no member naming an authority's own encoding**, for the same reason the unit schemes
+have none: the point of the field is that a caller states the mode, not the field id.
+
 ---
 
 ## 6. Core-side: providing credentials on the handshake (internal to webprocess-api)
@@ -1726,12 +1925,12 @@ All errors use `{ "error": { "code": string, "message": string, "details?": unkn
 | 400 | `BadRequestError` | request validation failed (`details` lists the fields) |
 | 400 | `UNKNOWN_ENTITY` | `entityCode` has no registered provider |
 | 400 / 413 / 415 | `INVALID_REQUEST_BODY` | the request body never parsed — malformed JSON, a truncated send, an oversized or unsupported payload. `details.reason` carries the parser's own reason (`entity.parse.failed`, `entity.too.large`, `charset.unsupported`…). `message` is fixed: the parser quotes the fragment it choked on, and a body may carry `entity.credentials`, so it is never relayed. **A request, not this service, is at fault — retrying an unchanged body cannot succeed** |
-| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`, `UNSUPPORTED_IDENTIFICATION_TYPE`, `UNKNOWN_CODE`, `INVALID_ID`) when known |
+| 400 | `ARCA_VALIDATION` | provider-side validation failed; `details.code` carries the specific reason (e.g. `UNMAPPED_CURRENCY`, `VOUCHER_ALREADY_AUTHORIZED_MISMATCH`, `VOUCHER_RANGE_UNSUPPORTED`, `VOUCHER_DATE_OUT_OF_WINDOW`, `INVALID_ISSUE_DATE`, `ISSUER_TAXID_CERT_MISMATCH`, `UNSUPPORTED_IDENTIFICATION_TYPE`, `UNKNOWN_CODE`, `INVALID_ID`, `CREDIT_INVOICE_OPTIONAL_CONFLICT`, `CREDIT_INVOICE_REQUIRED`, `CREDIT_INVOICE_NOT_APPLICABLE`, `CREDIT_INVOICE_NOT_ON_EXPORT`) when known |
 | 400 | `RECEIVER_MATCHES_ISSUER` | the authority rejected the voucher because the receiver's identification number equals the issuer's own (ARCA `10069`). Stable and caller-fixable, so it is a `400` — **not** the `502 ARCA_SERVICE` an unclassified rejection gets; `details: { arcaCode, arcaErrors }` |
 | 403 | `DELEGATION_NOT_AUTHORIZED` | delegated call (§10), but our delegate CUIT is not authorized for `issuerTaxId` at the authority — the represented taxpayer must grant the delegation; `details: { delegateTaxId, issuerTaxId, arcaCode, arcaMessage }` |
 | 404 | `VOUCHER_NOT_FOUND` | `query` only — the authority has no record of the voucher (never issued); `details` carries `entityCode`/`pointOfSaleNumber`/`documentTypeCode`/`voucherNumber`. Stable outcome, **never** a `502` — the signal core clears + re-authorizes a PENDING orphan on |
 | 404 | `TAXPAYER_NOT_FOUND` | `taxpayers/lookup` only — no registry will report a taxpayer under the identifier (an unregistered tax id, a cancelled clave, or a document matching no clave); `details: { entityCode, identificationTypeCode, identificationNumber }`. `message` carries the authority's own wording where it gave one. Stable outcome, **never** a `502`, and the reason a successful lookup never returns an empty list |
-| 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10) |
+| 409 | `CREDENTIALS_REQUIRED` | re-send with the issuer's credentials (§4). Never returned for a delegated request (§10). Raised by the issuing routes only — `taxpayers/lookup`, `taxpayers/credit-invoice-obligation` and `currencies/rates` read under our own delegated identity, carry no `entity` block, and never ask for credentials |
 | 422 | (result body, not error envelope) | the authority rejected the voucher (`status:"REJECTED"`) |
 | 501 | `NOT_IMPLEMENTED` | SDK operation not yet implemented |
 | 502 | `ARCA_SOAP` / `ARCA_SERVICE` / `ARCA_AUTH` | authority transport/business/auth failure. `ARCA_SERVICE` now carries `details.arcaErrors` — the authority's full `[{ code, message }]` list, previously dropped — so core can log or branch on the underlying rejection |
@@ -1861,6 +2060,25 @@ the one cached ticket automatically. Otherwise each certificate holds its own, a
 When ARCA rejects a delegate ticket with a genuine token fault, only that **service's** delegate ticket is
 dropped — the delegate identity's other tickets (e.g. padrón) are still valid and ARCA would not re-issue them
 for ~12h.
+
+### The credit-invoice register uses our delegate *identity* too
+
+`POST /api/taxpayers/credit-invoice-obligation` (§3) signs with our delegate certificate, and like the
+registry and cotización lookups it is **not** a delegated call in this section's sense: `Auth.Cuit` is our
+own CUIT, the service acts as itself, no taxpayer grants us anything, and it can never answer
+`403 DELEGATION_NOT_AUTHORIZED` — there is no second party to have failed to authorize us. The
+`issuerTaxId` on the wire is informational and selects no credential.
+
+The one prerequisite is easy to miss, because every other route already satisfies it: **the authority
+enrols each web service independently.** The credit-invoice register is not `wsfe`, so our certificate must
+be enrolled in it separately — once, after which it serves every tenant. Until then WSAA refuses the login
+and this service answers `500 DELEGATION_NOT_CONFIGURED` naming the service in `details.reason`.
+
+That status is deliberate and worth one sentence of justification, because a `502` looks defensible: a
+missing enrolment and an authority outage both end in the call working later, so "transient vs permanent" is
+the wrong axis to classify on. The one that matters is **who has to act**. An outage clears by waiting; an
+enrolment clears only when somebody opens WSASS or Administrador de Relaciones. Telling a caller to retry
+the second produces a loop that cannot terminate, and whose repeated attempts read as progress.
 
 ### Registry lookups use our delegate *identity*, not a representación
 

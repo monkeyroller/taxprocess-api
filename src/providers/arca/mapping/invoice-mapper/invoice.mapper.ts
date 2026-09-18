@@ -12,7 +12,9 @@ import {
     type InvoiceTotals,
 } from '../../sdk/invoicing/invoice-totals/invoice-totals.js';
 import {
+    isFceDocumentType,
     isNonVatDiscriminating,
+    requiresFcePaymentDueDate,
     toAssociatedCbteTipo,
     toCbteTipo,
     toCondicionIvaReceptorId,
@@ -29,6 +31,7 @@ import {Concept, type NeutralInvoice} from '../../../provider/neutral-invoice.js
 import {arcaDateToIso, toNeutralAuthorizationResult} from '../authority-result.js';
 import type {NeutralAuthorizationResultDto} from '../../../../http/dto/authorization-result.dto.js';
 import type {PointOfSaleDto} from '../../../../http/dto/points-of-sale-result.dto.js';
+import {mergeCreditInvoiceOptionals} from '../credit-invoice/credit-invoice.js';
 
 /**
  * Argentina-specific translation from the neutral invoice to the SDK's request, plus the RG-4892 QR and the
@@ -174,12 +177,19 @@ function toCbtesAsoc(invoice: NeutralInvoice): CommonInvoiceRequest['associatedV
     }));
 }
 
-/** `Opcionales` — fields ARCA defines by regulation, e.g. FCE MiPyMEs CBU (id 2101). Relayed as sent. */
+/**
+ * `Opcionales` — fields ARCA defines by regulation.
+ *
+ * Two channels feed this, and they are different in kind. `optionals[]` is an open relay, sent as-is,
+ * because the authority names new fields faster than a contract can. `creditInvoice` is a typed block whose
+ * ARCA ids (2101 CBU, 2102 alias, 27 transmission) live in `mapping/credit-invoice` — so a caller issuing
+ * an FCE sends values rather than hardcoding the authority's numbering.
+ *
+ * The merge — what happens when a caller populates the same id both ways, and whether the block belongs on
+ * this `documentTypeCode` at all — is that module's rule.
+ */
 function toOpcionales(invoice: NeutralInvoice): CommonInvoiceRequest['optionals'] {
-    if (invoice.optionals === undefined || invoice.optionals.length === 0) {
-        return undefined;
-    }
-    return invoice.optionals.map((optional) => ({id: optional.id, value: optional.value}));
+    return mergeCreditInvoiceOptionals(invoice.documentTypeCode, invoice.creditInvoice, invoice.optionals);
 }
 
 /**
@@ -270,10 +280,10 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
         optionals: toOpcionales(invoice),
     };
 
-    // Anything but goods requires the FchServ*/FchVtoPago dates, services being rendered over a period
-    // rather than shipped on a day. `!= null` for the same reason `invoiceCurrencyId` uses it: a `null`
-    // that slipped past validation would throw a `TypeError` off `.trim()`, and an omitted element is the
-    // honest rendering of a field the caller left blank.
+    // Anything but goods requires the service dates, services being rendered over a period rather than
+    // shipped on a day. `!= null` for the same reason `invoiceCurrencyId` uses it: a `null` that slipped
+    // past validation would throw a `TypeError` off `.trim()`, and an omitted element is the honest
+    // rendering of a field the caller left blank.
     if (concept !== Concept.GOODS) {
         if (invoice.serviceDateFrom != null) {
             request.serviceDateFrom = formatArcaDate(parseAuthorityDate(invoice.serviceDateFrom, 'serviceDateFrom'));
@@ -281,9 +291,31 @@ export function buildCommonInvoiceRequest(invoice: NeutralInvoice, voucherNumber
         if (invoice.serviceDateTo != null) {
             request.serviceDateTo = formatArcaDate(parseAuthorityDate(invoice.serviceDateTo, 'serviceDateTo'));
         }
-        if (invoice.paymentDueDate != null) {
-            request.paymentDueDate = formatArcaDate(parseAuthorityDate(invoice.paymentDueDate, 'paymentDueDate'));
-        }
+    }
+
+    // The payment date is NOT part of that trio, and the two rules it answers to are deliberately
+    // different widths — named together here so the asymmetry is readable in one place:
+    //
+    // - **carried** on any FCE, whatever it bills, the régimen being a financing instrument. So a goods FCE
+    //   sends it where a goods factura has no field for it, and the concept gate is ORed rather than nested.
+    // - **required** on the narrower set that actually falls due. See {@link requiresFcePaymentDueDate}:
+    //   a nota de crédito cancels an FCE rather than extending it, so it is carried but never demanded.
+    const isFce = isFceDocumentType(voucherType);
+    const needsPaymentDueDate = requiresFcePaymentDueDate(voucherType);
+
+    if ((concept !== Concept.GOODS || isFce) && invoice.paymentDueDate != null) {
+        request.paymentDueDate = formatArcaDate(parseAuthorityDate(invoice.paymentDueDate, 'paymentDueDate'));
+    }
+
+    // Refused here rather than relayed as ARCA's 10163, which names a field the caller has no word for.
+    // Only the FCE half is decidable from the body: a services voucher missing its dates is the
+    // authority's to reject, since a caller may legitimately be relaying them some other way.
+    if (needsPaymentDueDate && request.paymentDueDate === undefined) {
+        throw new ArcaValidationError(
+            `documentTypeCode ${String(invoice.documentTypeCode)} is a credit-invoice factura or nota de ` +
+                'débito, which the authority requires a payment due date on — send `paymentDueDate`',
+            'CREDIT_INVOICE_PAYMENT_DUE_DATE_REQUIRED',
+        );
     }
 
     return request;

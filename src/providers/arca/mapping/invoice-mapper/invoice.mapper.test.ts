@@ -177,7 +177,11 @@ describe('buildCommonInvoiceRequest — the blocks a domestic voucher carries be
     it('carries optionals, which an FCE cannot be issued without', () => {
         // Id 2101 is the CBU a Factura de Crédito MiPyMEs has to declare.
         const req = buildCommonInvoiceRequest(
-            invoice({documentTypeCode: 201, optionals: [{id: '2101', value: '0170099220000067797'}]}),
+            invoice({
+                documentTypeCode: 201,
+                optionals: [{id: '2101', value: '0170099220000067797'}],
+                paymentDueDate: '2026-10-10',
+            }),
             10,
         );
         expect(req.optionals).toEqual([{id: '2101', value: '0170099220000067797'}]);
@@ -193,6 +197,72 @@ describe('buildCommonInvoiceRequest — the blocks a domestic voucher carries be
         const req = buildCommonInvoiceRequest(invoice({associatedVouchers: [], optionals: []}), 10);
         expect(req.associatedVouchers).toBeUndefined();
         expect(req.optionals).toBeUndefined();
+    });
+
+    it('turns a creditInvoice block into the Opcionales an FCE needs, without the caller naming ids', () => {
+        // The point of the block: core sends an account and (optionally) a mode, and ARCA's 2101/2102/27
+        // stay on this side. The mode is absent here and still reaches the wire, defaulted.
+        const req = buildCommonInvoiceRequest(
+            invoice({
+                documentTypeCode: 201,
+                creditInvoice: {issuerCbu: '0170099220000067797112', issuerCbuAlias: 'MI.ALIAS.CBU'},
+                paymentDueDate: '2026-10-10',
+            }),
+            10,
+        );
+
+        expect(req.optionals).toEqual([
+            {id: '2101', value: '0170099220000067797112'},
+            {id: '2102', value: 'MI.ALIAS.CBU'},
+            {id: '27', value: 'SCA'},
+        ]);
+    });
+
+    it('carries the payment due date of a goods FCE, which the concept gate dropped', () => {
+        // ARCA requires FchVtoPago on a Factura de Crédito whatever it bills (10163), where an ordinary
+        // goods voucher has no such field. Concept 1 here, the only concept a domestic FCE is issued with.
+        const req = buildCommonInvoiceRequest(
+            invoice({
+                documentTypeCode: 201,
+                concept: 1,
+                creditInvoice: {issuerCbu: '0170099220000067797112'},
+                paymentDueDate: '2026-10-10',
+            }),
+            10,
+        );
+
+        expect(req.paymentDueDate).toBe('20261010');
+        // The service dates stay keyed on the concept — an FCE for goods renders no period.
+        expect(req.serviceDateFrom).toBeUndefined();
+        expect(req.serviceDateTo).toBeUndefined();
+    });
+
+    it('refuses an FCE with no payment due date rather than relaying ARCA 10163', () => {
+        expect(() =>
+            buildCommonInvoiceRequest(
+                invoice({documentTypeCode: 201, creditInvoice: {issuerCbu: '0170099220000067797112'}}),
+                10,
+            ),
+        ).toThrow(/payment due date/);
+    });
+
+    it('still drops a payment due date stated on an ordinary goods voucher', () => {
+        const req = buildCommonInvoiceRequest(invoice({concept: 1, paymentDueDate: '2026-10-10'}), 10);
+        expect(req.paymentDueDate).toBeUndefined();
+    });
+
+    it('refuses a creditInvoice block and a raw optionals entry claiming the same id', () => {
+        expect(() =>
+            buildCommonInvoiceRequest(
+                invoice({
+                    documentTypeCode: 201,
+                    creditInvoice: {issuerCbu: '0170099220000067797112'},
+                    optionals: [{id: '2101', value: '0170099220000067797999'}],
+                    paymentDueDate: '2026-10-10',
+                }),
+                10,
+            ),
+        ).toThrow(ArcaValidationError);
     });
 });
 
@@ -446,7 +516,20 @@ describe('buildCommonInvoiceRequest — letter-C vouchers report no VAT', () => 
         ['RECIBO C', 15],
         ['FCE FACTURA C', 211],
     ])('applies to %s (code %i) as well as the factura', (_name, documentTypeCode) => {
-        const req = buildCommonInvoiceRequest(facturaC({documentTypeCode}), 1);
+        // The FCE row carries an account and a due date because that type cannot be issued without either.
+        // Beside the point for the VAT rule under test, and the mapper refuses the voucher otherwise.
+        const req = buildCommonInvoiceRequest(
+            facturaC({
+                documentTypeCode,
+                ...(documentTypeCode === 211
+                    ? {
+                          creditInvoice: {issuerCbu: '0170099220000067797112'},
+                          paymentDueDate: '2026-10-10',
+                      }
+                    : {}),
+            }),
+            1,
+        );
 
         expect(req.vatAmount).toBe(0);
         expect(req.vatSubtotals).toEqual([]);
