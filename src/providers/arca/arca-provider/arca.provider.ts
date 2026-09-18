@@ -17,6 +17,7 @@ import type {TaxpayerData} from '../sdk/taxpayer-registry/padron.types.js';
 import {
     commonInvoiceService,
     constanciaService,
+    feCredService,
     fexInvoiceService,
     taxpayerIdentityService,
 } from '../clients.js';
@@ -84,6 +85,12 @@ import {
 import {toNeutralTaxpayerResult} from '../mapping/taxpayer-mapper/taxpayer.mapper.js';
 import {validateArcaCredentials} from '../auth/credentials/credentials.js';
 import {parseArcaId} from '../mapping/identifiers.js';
+import type {ReceptionObligationInfo} from '../sdk/fecred/fecred.types.js';
+import {lookupObligatedReceiver} from '../mapping/fce-registry/fce-registry.js';
+import {decideReceptionObligation} from '../credit-invoice-obligation/credit-invoice-obligation.js';
+import {cachedAuthorityObligation} from '../credit-invoice-obligation/obligation-cache.js';
+import type {ObligationAnswer} from '../../../http/dto/credit-invoice-obligation-result.dto.js';
+import type {CreditInvoiceObligationResult} from '../../provider/neutral-results.js';
 import {TaxEntityProvider} from '../../provider/provider.js';
 import {
     DelegationNotConfiguredError,
@@ -1215,6 +1222,71 @@ export class ArcaProvider extends TaxEntityProvider {
         };
     }
 
+    /**
+     * Whether `receiverTaxId` must be sent a Factura de Crédito Electrónica on `issueDate`, and from what
+     * amount.
+     *
+     * WSFECRED first, the vendored "empresas grandes" listing only if it cannot be reached. The composition
+     * is {@link decideReceptionObligation}'s, which owns the rule that an answer's fields all come from one
+     * source; everything here is about getting each source into a state where it can be asked.
+     *
+     * Note what is *not* here: no `TaxpayerNotFoundError`, no `404`. A receiver the register does not hold
+     * is `obligated: false`, because "not registered" and "not obligated" are the same outcome for this
+     * decision, and translating an absence into a verdict at the call site is where that goes wrong. The
+     * neighbouring `lookupTaxpayersImpl` does raise a `404`, which makes it the likeliest thing to be
+     * copied across here by accident.
+     */
+    protected async creditInvoiceObligationImpl(
+        environment: GenericEnvironment,
+        issuerTaxId: string,
+        receiverTaxId: string,
+        issueDate: string,
+    ): Promise<CreditInvoiceObligationResult> {
+        // All three refusals are decidable from the body, so they come before any ticket is spent.
+        // `issuerTaxId` is informational here (see the abstract's docblock) and is still parsed: a caller
+        // sending a malformed one has made a mistake worth naming, and an audit trail carrying it is worth
+        // nothing if it was never checked.
+        parseArcaId(issuerTaxId, 'issuerTaxId');
+        const receiver = parseArcaId(receiverTaxId, 'receiverTaxId');
+        // Not `clampToAuthorityToday`, which the cotización path uses because ARCA publishes no future rate.
+        // A future issue date is the authority's to refuse here, and clamping would silently answer about a
+        // different day than the caller named — on a question whose whole point is that it is date-dependent.
+        const issueDay = toArcaDay(issueDate, 'issueDate');
+
+        const arcaEnvironment = toArcaEnvironment(environment);
+
+        // Inside the thunk, not before it: the thunk is what the cache wraps, so resolving out here made a
+        // cache hit pay a WSAA resolution for a call it was not going to make.
+        const askAuthority = async (): Promise<ObligationAnswer> => {
+            const auth = await this.delegateAuth(environment, ServiceId.WSFECRED);
+            const info = await this.delegateCall(environment, ServiceId.WSFECRED, () =>
+                feCredService(arcaEnvironment).receptionObligation(auth, {
+                    receiverTaxId: receiver,
+                    // The wire wants an `xsd:date`. `issueDay` stays the ARCA day because that is what the
+                    // cache is keyed on, and converting here keeps the calendar question in the layer that
+                    // owns one.
+                    issueDate: arcaDayToIsoDate(issueDay),
+                }),
+            );
+            // Stamped when the authority answered, and cached with the answer — so a cached one reports
+            // when it was true rather than when it was read.
+            return toAuthorityAnswer(info, environment, new Date());
+        };
+
+        const answer = await decideReceptionObligation({
+            // The cache wraps the authority thunk only, so a fallback has no code path into it. See
+            // `obligation-cache.ts` for why that is structural rather than a convention.
+            authority: () => cachedAuthorityObligation(environment, receiver, issueDay, askAuthority),
+            // `receiverTaxId` rather than `String(receiver)`: the snapshot's index is a set of 11-digit CUIT
+            // strings and the caller already sent one, so the number is a detour that only loses things —
+            // `parseArcaId` admits any run of digits, and a leading zero or a value past 2^53 comes back out
+            // of `String(Number(…))` as something no row can match.
+            registry: () => lookupObligatedReceiver(receiverTaxId, issueDay),
+        });
+
+        return {entityCode: ENTITY_CODE, issuerTaxId, ...answer};
+    }
+
     protected async lookupTaxpayersImpl(
         environment: GenericEnvironment,
         identificationTypeCode: number,
@@ -1395,4 +1467,63 @@ export class ArcaProvider extends TaxEntityProvider {
             throw err;
         }
     }
+}
+
+/**
+ * The currency `montoDesde` is denominated in.
+ *
+ * ARCA states the amount without a currency because the régimen is pesos-only, so this names what the
+ * authority means rather than inventing it. `PES` is ARCA's own code, not ISO 4217 — the contract removed
+ * that mapping deliberately, and an `amount`/`currencyCode` pair is exactly where `ARS` creeps back in.
+ *
+ * Here rather than in the registry snapshot because it is a fact about the *authority's* answer. The
+ * offline listing states its own.
+ */
+const AUTHORITY_THRESHOLD_CURRENCY = 'PES';
+
+/**
+ * One WSFECRED reading as a whole {@link ObligationAnswer}.
+ *
+ * Refuses to compose a partial one. An unreadable `obligado`, or an obligated verdict with no threshold,
+ * raises rather than filling the gap — because every plausible filler is wrong in the expensive direction:
+ * `false` issues an ordinary factura to a buyer the authority requires an FCE for, and `0` makes every
+ * voucher clear the floor. Raising an `ArcaServiceError` instead puts the decision back where it belongs,
+ * and the caller falls back to the offline registry and labels the answer honestly.
+ */
+function toAuthorityAnswer(
+    info: ReceptionObligationInfo,
+    environment: GenericEnvironment,
+    at: Date,
+): ObligationAnswer {
+    const unreadable = (what: string): ArcaServiceError =>
+        new ArcaServiceError(
+            `WSFECRED answered without a readable ${what}, so the obligation cannot be decided from it`,
+            [{code: 'FECRED_UNREADABLE', message: `missing or unparseable ${what}`}],
+        );
+
+    if (info.obligated === undefined) {
+        throw unreadable('obligado');
+    }
+    if (info.obligated && info.thresholdAmount === undefined) {
+        throw unreadable('montoDesde');
+    }
+
+    return {
+        obligated: info.obligated,
+        // Present only when obligated: an unobligated receiver has no floor to state.
+        ...(info.obligated && info.thresholdAmount !== undefined
+            ? {threshold: {amount: info.thresholdAmount, currencyCode: AUTHORITY_THRESHOLD_CURRENCY}}
+            : {}),
+        source: 'AUTHORITY',
+        // Milliseconds trimmed, matching every other instant this service publishes.
+        asOf: `${at.toISOString().slice(0, 19)}Z`,
+        providerMetadata: {
+            service: ServiceId.WSFECRED,
+            operation: 'consultarMontoObligadoRecepcion',
+            environment,
+            // The untouched node. Not the element names, which the WSDL settled — what ARCA actually
+            // populates, which no live call has yet shown. Drop once `pnpm probe:fecred` has.
+            raw: info.raw,
+        },
+    };
 }

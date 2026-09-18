@@ -127,12 +127,20 @@ see the **Neutral field glossary** in [docs/CONTRACT.md](docs/CONTRACT.md) for w
 | `POST /invoices/query` | ✅ wired | idempotency backstop |
 | `POST /points-of-sale` | ✅ wired | the issuer's registered points of sale; identity-only body |
 | `POST /taxpayers/lookup` | ✅ wired | registry lookup by identification type; uses this service's own delegated identity (no `entity` block) |
+| `POST /taxpayers/credit-invoice-obligation` | ⚠️ wired, unenrolled | whether a buyer must be sent a Factura de Crédito Electrónica, and from what amount. Reads under this service's own delegated identity (no `entity` block), like its neighbour — our certificate must be enrolled in the credit-invoice service separately from `wsfe`. Wire read from the live WSDL (2026-09-17); **our certificate still needs enrolling in `wsfecred`** before it answers — `pnpm probe:fecred` |
 | `POST /currencies/rates` | ✅ wired | published exchange rates + the band the authority accepts; delegated identity, no `entity` block |
 
 Authenticated endpoints reply `409 CREDENTIALS_REQUIRED` on a ticket-cache miss; core re-sends with
-`entity.credentials` attached (see the contract doc). `POST /taxpayers/lookup` is the exception: it signs with
-this service's own delegate certificate, so it carries no issuer and never asks for credentials — it does
-require that certificate to be enrolled in `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` at ARCA.
+`entity.credentials` attached (see the contract doc). Three endpoints are the exception — `/taxpayers/lookup`,
+`/taxpayers/credit-invoice-obligation` and `/currencies/rates` — because each answers a question about the
+authority or about a third party rather than about the caller. They sign with this service's own delegate
+certificate, carry no issuer block and never ask for credentials.
+
+What they need instead is **our** certificate enrolled in each web service they touch, and ARCA enrols each
+one independently: `ws_sr_constancia_inscripcion` and `ws_sr_padron_a13` for the registry lookup, `wsfe` for
+the rates, `wsfecred` for the credit-invoice obligation. A missing enrolment answers
+`500 DELEGATION_NOT_CONFIGURED` naming the service — deliberately not a `502`, because no amount of retrying
+clears it.
 
 ## Layout
 

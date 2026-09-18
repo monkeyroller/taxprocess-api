@@ -22,6 +22,14 @@ export const ServiceId = {
     WSFEXV1: 'wsfex',
     CONSTANCIA_INSCRIPCION: 'ws_sr_constancia_inscripcion',
     PADRON_A13: 'ws_sr_padron_a13',
+    /**
+     * WSFECRED — the Factura de Crédito Electrónica registry. Only the reception-obligation query is used;
+     * the acceptance lifecycle lives here too and is deliberately out of scope.
+     *
+     * Enrolment is independent of `wsfe`, so a certificate that authorizes vouchers will still fail this
+     * login with `coe.notAuthorized` until it is granted separately.
+     */
+    WSFECRED: 'wsfecred',
 } as const;
 
 export type ServiceIdValue = (typeof ServiceId)[keyof typeof ServiceId];
@@ -34,6 +42,8 @@ export const Namespaces = {
     /** Constancia de inscripción — still the alcance-5 namespace after the service rename. */
     CONSTANCIA: 'http://a5.soap.ws.server.puc.sr/',
     PADRON_A13: 'http://a13.soap.ws.server.puc.sr/',
+    /** WSFECRED. Read from the live WSDL 2026-09-17; note it is `gob`, unlike the two above. */
+    WSFECRED: 'http://ar.gob.afip.wsfecred/FECredService/',
 } as const;
 
 export interface ServiceEndpoints {
@@ -43,6 +53,11 @@ export interface ServiceEndpoints {
     /** Constancia de inscripción — still the `personaServiceA5` path after the service rename. */
     readonly constanciaInscripcion: string;
     readonly padronA13: string;
+    /**
+     * WSFECRED. Required rather than optional so a URL supplied for one environment only is a compile
+     * error here, not a 404 that surfaces the first time production asks.
+     */
+    readonly wsfecred: string;
 }
 
 export const ENDPOINTS: Record<ArcaEnvironment, ServiceEndpoints> = {
@@ -52,6 +67,7 @@ export const ENDPOINTS: Record<ArcaEnvironment, ServiceEndpoints> = {
         wsfexv1: 'https://wswhomo.afip.gov.ar/wsfexv1/service.asmx',
         constanciaInscripcion: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5',
         padronA13: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13',
+        wsfecred: 'https://fwshomo.afip.gov.ar/wsfecred/FECredService',
     },
     produccion: {
         wsaa: 'https://wsaa.afip.gov.ar/ws/services/LoginCms',
@@ -59,5 +75,10 @@ export const ENDPOINTS: Record<ArcaEnvironment, ServiceEndpoints> = {
         wsfexv1: 'https://servicios1.afip.gov.ar/wsfexv1/service.asmx',
         constanciaInscripcion: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5',
         padronA13: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13',
+        // The one `gob.ar` host here, and a genuine exception to the note at the top of this file rather
+        // than an oversight: WSFECRED is in the newer Java family and its own WSDL publishes this address
+        // (read 2026-09-17). Homologación stays on `gov.ar`, so the two environments genuinely differ in
+        // the TLD — do not "fix" either to match the other.
+        wsfecred: 'https://serviciosjava.afip.gob.ar/wsfecred/FECredService',
     },
 };

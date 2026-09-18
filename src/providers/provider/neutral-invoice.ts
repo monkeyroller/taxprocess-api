@@ -5,6 +5,7 @@
 import type {InvoiceLineType} from './invoice-line-type/invoice-line-type.js';
 import type {UnitOfMeasureCodeScheme} from './unit-of-measure-scheme/unit-of-measure-scheme.js';
 import type {WebService} from './web-service.js';
+import type {TransmissionMode} from './transmission-mode/transmission-mode.js';
 
 /**
  * What is being invoiced — **this contract's own catalogue**, four codes covering every document an entity
@@ -162,6 +163,20 @@ export interface NeutralInvoiceExport {
     readonly paymentDate?: string;
 }
 
+/**
+ * Credit-invoice details (AR: Factura de Crédito Electrónica MiPyME) — the account the document is payable
+ * to and how it is put into circulation.
+ *
+ * Neutral values rather than authority field ids: turning these into the entity own optional-field entries
+ * is the provider job, which is where every other entity-specific mapping lives.
+ */
+export interface NeutralInvoiceCreditInvoice {
+    readonly issuerCbu: string;
+    readonly issuerCbuAlias?: string;
+    /** Omitted means the régimen default, which the provider supplies. */
+    readonly transmissionMode?: TransmissionMode;
+}
+
 /** An optional data field the authority defines by regulation (AR: `Opcionales`). */
 export interface NeutralInvoiceOptional {
     readonly id: string;
@@ -238,6 +253,8 @@ export interface NeutralInvoice {
     readonly associatedVouchers?: ReadonlyArray<NeutralAssociatedVoucher>;
     /** Optional data fields the authority defines by regulation. */
     readonly optionals?: ReadonlyArray<NeutralInvoiceOptional>;
+    /** Credit-invoice details, on a document type that is one. */
+    readonly creditInvoice?: NeutralInvoiceCreditInvoice;
     readonly totals?: NeutralInvoiceTotals;
     readonly serviceDateFrom?: string;
     readonly serviceDateTo?: string;

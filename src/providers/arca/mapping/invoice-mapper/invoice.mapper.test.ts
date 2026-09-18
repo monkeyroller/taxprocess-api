@@ -194,6 +194,37 @@ describe('buildCommonInvoiceRequest — the blocks a domestic voucher carries be
         expect(req.associatedVouchers).toBeUndefined();
         expect(req.optionals).toBeUndefined();
     });
+
+    it('turns a creditInvoice block into the Opcionales an FCE needs, without the caller naming ids', () => {
+        // The point of the block: core sends an account and (optionally) a mode, and ARCA's 2101/2102/27
+        // stay on this side. The mode is absent here and still reaches the wire, defaulted.
+        const req = buildCommonInvoiceRequest(
+            invoice({
+                documentTypeCode: 201,
+                creditInvoice: {issuerCbu: '0170099220000067797112', issuerCbuAlias: 'MI.ALIAS.CBU'},
+            }),
+            10,
+        );
+
+        expect(req.optionals).toEqual([
+            {id: '2101', value: '0170099220000067797112'},
+            {id: '2102', value: 'MI.ALIAS.CBU'},
+            {id: '27', value: 'SCA'},
+        ]);
+    });
+
+    it('refuses a creditInvoice block and a raw optionals entry claiming the same id', () => {
+        expect(() =>
+            buildCommonInvoiceRequest(
+                invoice({
+                    documentTypeCode: 201,
+                    creditInvoice: {issuerCbu: '0170099220000067797112'},
+                    optionals: [{id: '2101', value: '0170099220000067797999'}],
+                }),
+                10,
+            ),
+        ).toThrow(ArcaValidationError);
+    });
 });
 
 describe('the concepts a domestic voucher can express', () => {
@@ -446,7 +477,17 @@ describe('buildCommonInvoiceRequest — letter-C vouchers report no VAT', () => 
         ['RECIBO C', 15],
         ['FCE FACTURA C', 211],
     ])('applies to %s (code %i) as well as the factura', (_name, documentTypeCode) => {
-        const req = buildCommonInvoiceRequest(facturaC({documentTypeCode}), 1);
+        // The FCE row carries an account because that type cannot be issued without one. Beside the point
+        // for the VAT rule under test, and the mapper refuses the voucher before reaching it otherwise.
+        const req = buildCommonInvoiceRequest(
+            facturaC({
+                documentTypeCode,
+                ...(documentTypeCode === 211
+                    ? {creditInvoice: {issuerCbu: '0170099220000067797112'}}
+                    : {}),
+            }),
+            1,
+        );
 
         expect(req.vatAmount).toBe(0);
         expect(req.vatSubtotals).toEqual([]);

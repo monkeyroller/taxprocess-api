@@ -25,6 +25,10 @@ import {
 } from '../../../providers/provider/invoice-line-type/invoice-line-type.js';
 import {UnitOfMeasureCodeScheme} from '../../../providers/provider/unit-of-measure-scheme/unit-of-measure-scheme.js';
 import {IsAuthorityDate} from '../authority-date/authority-date.js';
+import {
+    TRANSMISSION_MODES,
+    type TransmissionMode,
+} from '../../../providers/provider/transmission-mode/transmission-mode.js';
 
 /**
  * The foreign-trade block: what an export voucher carries and a domestic one has no field for.
@@ -420,4 +424,46 @@ export class InvoiceOptionalDto {
 
     @IsString()
     value!: string;
+}
+
+/**
+ * Credit-invoice details (AR: Factura de Crédito Electrónica MiPyME).
+ *
+ * Present on a credit-invoice document, absent on every other. Carried as values rather than as
+ * `optionals[]` entries because the authority's field ids are entity-specific mapping, which is this
+ * service's side of the boundary — a caller assembling `Opcionales` itself would be hardcoding ARCA's
+ * `2101`/`2102`/`27` into a payload where every other field is canonical.
+ *
+ * **Not validated against the document type here.** Whether this block belongs on a given
+ * `documentTypeCode` is the provider's call, because it needs the entity's catalogue to answer — the same
+ * division `unitOfMeasureCode` follows. A cross-field rule about it would also have to hang off a
+ * *required* property: `@IsOptional()` disables every validator on its own property when the value is
+ * absent, so a class-level check attached to this block would switch itself off in exactly the case it
+ * existed to catch.
+ */
+export class InvoiceCreditInvoiceDto {
+    /**
+     * The issuer's CBU — the account the credit invoice is payable to.
+     *
+     * Shape only. The full 22-digit form including both check digits is validated by the caller, and
+     * whether it is the *right* account is an operator judgement neither side can check.
+     *
+     * No `@TrimmedCode()`, per that decorator's own rule: this value travels verbatim to the authority,
+     * nothing on this side normalizes it, so trimming would widen what the wire accepts on a field the
+     * authority judges for itself.
+     */
+    @IsString()
+    @Length(22, 22)
+    issuerCbu!: string;
+
+    /** The alias registered for that CBU, when the issuer has one. */
+    @IsOptional()
+    @IsString()
+    @MinLength(1)
+    issuerCbuAlias?: string;
+
+    /** Omitted means `SCA`, the régimen's default. */
+    @IsOptional()
+    @IsIn(TRANSMISSION_MODES)
+    transmissionMode?: TransmissionMode;
 }

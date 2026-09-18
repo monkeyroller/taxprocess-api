@@ -132,6 +132,33 @@ describe('unknown request fields are refused (forbidNonWhitelisted)', () => {
         expect(rejectedProperties(json)).toContain('bogusFlat');
     });
 
+    it('rejects a bogus key inside the nested `invoice.creditInvoice` block', async () => {
+        const {status, json} = await post('/api/invoices/authorize', {
+            entity: ENTITY,
+            invoice: {
+                creditInvoice: {
+                    issuerCbu: '0170099220000067797112',
+                    bogusCredit: 1,
+                },
+            },
+        });
+        expect(status).toBe(400);
+        expect(rejectedProperties(json)).toContain('bogusCredit');
+    });
+
+    it('rejects a bogus key on the POST /taxpayers/credit-invoice-obligation body', async () => {
+        const {status, json} = await post('/api/taxpayers/credit-invoice-obligation', {
+            entityCode: 'ARCA',
+            environment: 'testing',
+            issuerTaxId: '20111111112',
+            receiverTaxId: '30711111119',
+            issueDate: '2026-09-17',
+            bogusObligation: 1,
+        });
+        expect(status).toBe(400);
+        expect(rejectedProperties(json)).toContain('bogusObligation');
+    });
+
     it('rejects a bogus key inside the nested `entity` block', async () => {
         const {status, json} = await post('/api/invoices/authorize', {
             entity: {...ENTITY, bogusEntity: 1},

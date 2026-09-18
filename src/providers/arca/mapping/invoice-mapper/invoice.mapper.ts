@@ -29,6 +29,7 @@ import {Concept, type NeutralInvoice} from '../../../provider/neutral-invoice.js
 import {arcaDateToIso, toNeutralAuthorizationResult} from '../authority-result.js';
 import type {NeutralAuthorizationResultDto} from '../../../../http/dto/authorization-result.dto.js';
 import type {PointOfSaleDto} from '../../../../http/dto/points-of-sale-result.dto.js';
+import {mergeCreditInvoiceOptionals} from '../credit-invoice/credit-invoice.js';
 
 /**
  * Argentina-specific translation from the neutral invoice to the SDK's request, plus the RG-4892 QR and the
@@ -174,12 +175,19 @@ function toCbtesAsoc(invoice: NeutralInvoice): CommonInvoiceRequest['associatedV
     }));
 }
 
-/** `Opcionales` — fields ARCA defines by regulation, e.g. FCE MiPyMEs CBU (id 2101). Relayed as sent. */
+/**
+ * `Opcionales` — fields ARCA defines by regulation.
+ *
+ * Two channels feed this, and they are different in kind. `optionals[]` is an open relay, sent as-is,
+ * because the authority names new fields faster than a contract can. `creditInvoice` is a typed block whose
+ * ARCA ids (2101 CBU, 2102 alias, 27 transmission) live in `mapping/credit-invoice` — so a caller issuing
+ * an FCE sends values rather than hardcoding the authority's numbering.
+ *
+ * The merge — what happens when a caller populates the same id both ways, and whether the block belongs on
+ * this `documentTypeCode` at all — is that module's rule.
+ */
 function toOpcionales(invoice: NeutralInvoice): CommonInvoiceRequest['optionals'] {
-    if (invoice.optionals === undefined || invoice.optionals.length === 0) {
-        return undefined;
-    }
-    return invoice.optionals.map((optional) => ({id: optional.id, value: optional.value}));
+    return mergeCreditInvoiceOptionals(invoice.documentTypeCode, invoice.creditInvoice, invoice.optionals);
 }
 
 /**

@@ -98,6 +98,58 @@ describe('SoapClient', () => {
         expect(capture.body).not.toContain('xmlns="http://a5.soap.ws.server.puc.sr/"');
     });
 
+    /**
+     * WSFECRED binds operation `consultarMontoObligadoRecepcion` to an input element
+     * `consultarMontoObligadoRecepcion**Request**` while the output stays `…Response`. `requestElement`
+     * names that one asymmetry, so the body element moves and nothing else does.
+     */
+    it('names the request body element separately from the operation when asked', async () => {
+        const responseXml =
+            '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>' +
+            '<consultarMontoObligadoRecepcionResponse>' +
+            '<consultarMontoObligadoRecepcionReturn><obligado>S</obligado></consultarMontoObligadoRecepcionReturn>' +
+            '</consultarMontoObligadoRecepcionResponse>' +
+            '</soap:Body></soap:Envelope>';
+        const capture = mockFetch(responseXml);
+
+        const client = new SoapClient();
+        const result: any = await client.call(
+            'https://fecred/x',
+            'http://ar.gob.afip.wsfecred/FECredService/',
+            'consultarMontoObligadoRecepcion',
+            {cuitConsultada: 30711111119},
+            {elementForm: 'unqualified', requestElement: 'consultarMontoObligadoRecepcionRequest'},
+        );
+
+        // The body element takes the request name — the whole point of the option.
+        expect(capture.body).toContain('<ns1:consultarMontoObligadoRecepcionRequest ');
+        expect(capture.body).toContain('</ns1:consultarMontoObligadoRecepcionRequest>');
+        expect(capture.body).not.toContain('<ns1:consultarMontoObligadoRecepcion ');
+
+        // … and the other two stay on the bare operation. Both are separate reads of `operation` in
+        // `call`, so collapsing either into `requestElement` would go unnoticed without these.
+        expect(capture.headers.SOAPAction).toBe(
+            'http://ar.gob.afip.wsfecred/FECredService/consultarMontoObligadoRecepcion',
+        );
+        expect(result.consultarMontoObligadoRecepcionReturn.obligado).toBe('S');
+    });
+
+    it('keeps the body element on the operation when requestElement is omitted', async () => {
+        // The other side of the same branch: every other ARCA service names the request after the
+        // operation, so the option defaulting away is what keeps them untouched.
+        const responseXml =
+            '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>' +
+            '<FooResponse><FooResult/></FooResponse>' +
+            '</soap:Body></soap:Envelope>';
+        const capture = mockFetch(responseXml);
+
+        const client = new SoapClient();
+        await client.call('https://svc/x', 'http://ns.example/', 'Foo', {A: 1});
+
+        expect(capture.body).toContain('<Foo xmlns="http://ns.example/">');
+        expect(capture.body).not.toContain('FooRequest');
+    });
+
     it('qualifies children by default, leaving the .NET services untouched', async () => {
         const responseXml =
             '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>' +

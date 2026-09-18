@@ -5,6 +5,7 @@ import type {EntityAuthBlock} from './entity-auth.js';
 import type {CredentialValidationResult} from './credential-validation.js';
 import type {
     AuthorityStatusResult,
+    CreditInvoiceObligationResult,
     CurrencyRatesResult,
     LastAuthorizedResult,
     NextNumbersResult,
@@ -55,6 +56,9 @@ describe('TaxEntityProvider fault guard', () => {
         protected async lookupTaxpayersImpl(): Promise<TaxpayerResult> {
             this.boom();
         }
+        protected async creditInvoiceObligationImpl(): Promise<CreditInvoiceObligationResult> {
+            this.boom();
+        }
         protected async pointsOfSaleImpl(): Promise<PointsOfSaleResult> {
             this.boom();
         }
@@ -84,6 +88,9 @@ describe('TaxEntityProvider fault guard', () => {
 
     it('translates on every public method, so none of them can leak a native error', async () => {
         const provider = new FakeProvider(native);
+        // Hand-maintained, and nothing enforces that it is complete: a public method left out of here
+        // compiles, passes, and is simply never checked for the one property this test exists to prove.
+        // Adding a method to `TaxEntityProvider` means adding a row here in the same change.
         const calls: ReadonlyArray<[string, Promise<unknown>]> = [
             ['authorizeInvoice', provider.authorizeInvoice(entity, {} as never)],
             ['lastAuthorized', provider.lastAuthorized(entity, 1, 1)],
@@ -91,7 +98,9 @@ describe('TaxEntityProvider fault guard', () => {
             ['queryVoucher', provider.queryVoucher(entity, 1, 1, 1)],
             ['authorityStatus', provider.authorityStatus('testing')],
             ['lookupTaxpayers', provider.lookupTaxpayers('testing', 80, '1')],
+            ['creditInvoiceObligation', provider.creditInvoiceObligation('testing', '20111111112', '30711111119', '2026-04-20')],
             ['pointsOfSale', provider.pointsOfSale(entity)],
+            ['currencyRates', provider.currencyRates('testing')],
             ['validateCredentials', provider.validateCredentials({} as never)],
         ];
         for (const [name, call] of calls) {

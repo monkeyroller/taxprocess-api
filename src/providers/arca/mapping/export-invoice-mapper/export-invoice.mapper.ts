@@ -224,6 +224,25 @@ function assertRequiredForInvoice(
 }
 
 /**
+ * The credit-invoice block belongs to the domestic régimen, so it is refused here rather than dropped.
+ *
+ * WSFEXv1 has no `Opcionales` id for a CBU, and `invoice.mapper.ts` is the only mapper that turns the block
+ * into 2101/2102/27. Relaying the voucher without them would authorize an ordinary export invoice with no
+ * account attached and answer `200` with a CAE — the caller has no way to see that the block the contract
+ * told them to send was ignored. A `400` naming the field is decidable from the body and costs no login,
+ * which is the same rule `assertRequiredForInvoice` above follows.
+ */
+function assertNoCreditInvoice(invoice: NeutralInvoice): void {
+    if (invoice.creditInvoice !== undefined) {
+        throw new ArcaValidationError(
+            'invoice.creditInvoice is a Factura de Crédito Electrónica block, which the export service does ' +
+                'not carry — omit it, or authorize the voucher through the domestic web service',
+            'CREDIT_INVOICE_NOT_ON_EXPORT',
+        );
+    }
+}
+
+/**
  * `CanMisMonExt`, which must **not** be sent on a peso Factura or on any nota (1605).
  *
  * So the caller's flag is dropped in exactly those cases rather than passed through — the one place this
@@ -272,6 +291,7 @@ export function buildFexInvoiceRequest(
     const currencyId = toMonId(invoice.currencyCode, 'WSFEXV1');
     assertLocalCurrencyRate(currencyId, invoice.currencyRate);
     assertRequiredForInvoice(block, voucherType, invoice.concept);
+    assertNoCreditInvoice(invoice);
 
     const request: FexInvoiceRequest = {
         requestId,

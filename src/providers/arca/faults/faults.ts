@@ -67,6 +67,20 @@ interface ServiceFaultCodes {
  * precedence, same eviction policy — and only the numbers move. Writing it twice is how `wsfex` came to be
  * classified with `wsfe`'s `600`, a code WSFEX never sends, so no WSFEX credential failure was ever
  * recognized.
+ * `wsfecred` is **deliberately absent, for a narrower reason than it used to be.** Its WSDL settles the
+ * channel — `arrayErrores` is declared inside the return type, so it reports in-payload like the two above
+ * and unlike the padrón services — but a channel is not an entry. What this table holds is a pair of
+ * *numbers*, and the WSDL says nothing about which code means a bad ticket versus a missing grant.
+ *
+ * Guessing them is the expensive half. An entry whose numbers never match is the `wsfex` defect again:
+ * silently recognising nothing while looking measured. An entry whose numbers match the wrong condition is
+ * worse, because a crypto-flavoured message on a matched code evicts a delegate ticket ARCA will not
+ * re-mint for ~12h. Absence costs a `502` where a `403` would read better, and costs nothing else.
+ * Fill it from `pnpm probe:fecred`, which is now the only thing that can, or leave it out.
+ *
+ * Absence alone is not what makes that safe — {@link SOAP_FAULT_CHANNEL_SERVICES} is. A service in neither
+ * table is classified by neither reader, so `wsfecred` evicts nothing until somebody measures which channel
+ * it speaks on. See that set's docblock for why the padrón reader is no longer the default.
  */
 const FAULT_CODES: Partial<Record<ServiceIdValue, ServiceFaultCodes>> = {
     [ServiceId.WSFEV1]: {
@@ -252,11 +266,34 @@ export function isInPayloadTicketFault(err: unknown, service: ServiceIdValue): b
  * Membership in `FAULT_CODES` is the dispatch key, so the two facts that travel together — reports in the
  * payload, and which numbers it uses to do so — cannot fall out of step. That is what went wrong before:
  * `wsfex` was listed as an in-payload service while only `wsfe`'s numbers were ever read.
+ *
+ * **A service in neither table classifies nothing**, which is why {@link SOAP_FAULT_CHANNEL_SERVICES} is a
+ * named set rather than "everything that is not in `FAULT_CODES`". Read as a fallthrough, absence from
+ * `FAULT_CODES` meant two different things at once: "reports as a SOAP fault" for the padrón services, and
+ * "we do not know yet" for a service being wired for the first time — and it silently gave the second the
+ * first's vocabulary, where `isPadronTicketFault` matches the bare word `token` on any `ArcaSoapError`.
+ *
+ * `wsfecred` is the case that made it matter, and it is now measured on exactly this point: its WSDL
+ * declares `arrayErrores` inside the return type, so it is an **in-payload** service and the padrón reader
+ * is definitively wrong for it. Its absence from this set is therefore settled, not provisional. What is
+ * still unknown is narrower — which `arrayErrores` *numbers* mean a rejected ticket rather than a missing
+ * grant — and that is what keeps it out of `FAULT_CODES` too, since an entry there is a claim about the
+ * numbers.
+ *
+ * Unclassified is the safe direction while that gap lasts, and cheaply so: nothing is evicted and the
+ * failure travels as itself. Add a service below only when its credential rejections are known to arrive
+ * as SOAP faults in ARCA's padrón wording.
  */
+const SOAP_FAULT_CHANNEL_SERVICES: ReadonlySet<ServiceIdValue> = new Set<ServiceIdValue>([
+    ServiceId.CONSTANCIA_INSCRIPCION,
+    ServiceId.PADRON_A13,
+]);
+
 export function isDelegateTicketFault(err: unknown, service: ServiceIdValue): boolean {
-    return FAULT_CODES[service] === undefined
-        ? isPadronTicketFault(err)
-        : isInPayloadTicketFault(err, service);
+    if (FAULT_CODES[service] !== undefined) {
+        return isInPayloadTicketFault(err, service);
+    }
+    return SOAP_FAULT_CHANNEL_SERVICES.has(service) && isPadronTicketFault(err);
 }
 
 /**
@@ -335,3 +372,18 @@ export function toProviderFault(err: unknown): unknown {
     }
     return err;
 }
+
+/*
+ * There is deliberately no WSFECRED delegation translator here.
+ *
+ * An earlier draft had one, for a design in which the obligation lookup authenticated as the issuing
+ * tenant: a represented taxpayer who had never granted us `wsfecred` needed a `403` rather than an opaque
+ * retryable `502`. That whole class of failure no longer exists. The lookup is read under our own delegate
+ * identity, so there is no represented party to have failed to authorize us, and the only enrolment that
+ * can be missing is our own — which `delegateAuth` already routes through `notEnrolledError` into a
+ * `DELEGATION_NOT_CONFIGURED` naming the service.
+ *
+ * Recorded rather than silently deleted because the `403` looks like an obvious gap from the outside, and
+ * the reason it is absent is a property of the call path rather than of this file.
+ */
+

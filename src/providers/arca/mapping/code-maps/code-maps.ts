@@ -105,3 +105,32 @@ export const NON_VAT_DISCRIMINATING_CBTE_TIPOS: ReadonlySet<number> = new Set<nu
 export function isNonVatDiscriminating(cbteTipo: number): boolean {
     return NON_VAT_DISCRIMINATING_CBTE_TIPOS.has(cbteTipo);
 }
+
+/**
+ * The voucher types of the credit-invoice régimen (AR: Factura de Crédito Electrónica MiPyME), across all
+ * three letters.
+ *
+ * A membership list for the same reason {@link NON_VAT_DISCRIMINATING_CBTE_TIPOS} is one: the régimen
+ * attaches a rule to a set of types rather than to a property a caller states. Here the rule is that these
+ * types, and only these, carry the `Opcionales` an FCE needs — which is what lets `mapping/credit-invoice`
+ * refuse the two pairings ARCA would otherwise reject in Spanish.
+ *
+ * `204`, `205`, `209`, `210` are absent because ARCA does not use them; the régimen numbers each letter's
+ * factura, nota de débito and nota de crédito and leaves the gaps.
+ */
+export const FCE_CBTE_TIPOS: ReadonlySet<number> = new Set<number>([
+    TaxProcessDocumentTypeCode.FCE_FACTURA_A,
+    TaxProcessDocumentTypeCode.FCE_NOTA_DEBITO_A,
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_A,
+    TaxProcessDocumentTypeCode.FCE_FACTURA_B,
+    TaxProcessDocumentTypeCode.FCE_NOTA_DEBITO_B,
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_B,
+    TaxProcessDocumentTypeCode.FCE_FACTURA_C,
+    TaxProcessDocumentTypeCode.FCE_NOTA_DEBITO_C,
+    TaxProcessDocumentTypeCode.FCE_NOTA_CREDITO_C,
+]);
+
+/** Whether `cbteTipo` is a credit-invoice voucher, which must carry the `creditInvoice` block. */
+export function isFceDocumentType(cbteTipo: number): boolean {
+    return FCE_CBTE_TIPOS.has(cbteTipo);
+}

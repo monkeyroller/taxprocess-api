@@ -28,6 +28,7 @@ import {
     InvoiceAssociatedVoucherDto,
     InvoiceExportDto,
     InvoiceItemDto,
+    InvoiceCreditInvoiceDto,
     InvoiceOptionalDto,
 } from './invoice-export/invoice-export.dto.js';
 
@@ -302,6 +303,19 @@ export class NeutralInvoiceDto {
     @ValidateNested()
     @Type(() => InvoiceExportDto)
     export?: InvoiceExportDto;
+
+    /**
+     * Credit-invoice details (AR: Factura de Crédito Electrónica), on a document type that is one.
+     *
+     * Unlike `receiver`/`export`, its presence decides nothing: the document type already says whether this
+     * is a credit invoice, and this block only carries the extra values such a document needs. So there is
+     * deliberately no cross-field rule here tying it to `documentTypeCode` — whether a given type requires
+     * or forbids it is the provider's question, needing the entity's catalogue to answer.
+     */
+    @IsOptional()
+    @ValidateNested()
+    @Type(() => InvoiceCreditInvoiceDto)
+    creditInvoice?: InvoiceCreditInvoiceDto;
 
 
     /**

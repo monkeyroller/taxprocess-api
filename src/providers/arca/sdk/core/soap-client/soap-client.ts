@@ -34,6 +34,21 @@ export interface SoapCallOptions {
     soapAction?: string;
     /** Namespace form for the operation element's children. Defaults to `'qualified'`. */
     elementForm?: ElementForm;
+    /**
+     * The body's own element name, when it is not the operation name.
+     *
+     * Most of ARCA's services name the request element after the operation, so this is unset and the
+     * operation names both the request element and the response lookup. WSFECRED does not: its WSDL binds
+     * operation `consultarMontoObligadoRecepcion` to an input element
+     * `consultarMontoObligadoRecepcionRequest`, while the response stays `…Response`.
+     *
+     * **This moves the request element and nothing else.** The response lookup keeps the operation name,
+     * and so does {@link soapAction}'s default — which is the URI form documented above, not the bare
+     * operation. A JAX-WS service that wants a bare action has to say so itself; `FeCredService` passes
+     * `soapAction` alongside this for exactly that reason. Assuming otherwise buys the failure this file
+     * warns about twice: a mismatch that comes back reading like an authentication problem.
+     */
+    requestElement?: string;
 }
 
 const SOAP_ENVELOPE_NS = 'http://schemas.xmlsoap.org/soap/envelope/';
@@ -102,7 +117,12 @@ export class SoapClient {
         payload: Record<string, unknown>,
         options: SoapCallOptions = {},
     ): Promise<Record<string, unknown>> {
-        const envelope = this.buildEnvelope(namespace, operation, payload, options.elementForm ?? 'qualified');
+        const envelope = this.buildEnvelope(
+            namespace,
+            options.requestElement ?? operation,
+            payload,
+            options.elementForm ?? 'qualified',
+        );
         const action = options.soapAction ?? this.defaultSoapAction(namespace, operation);
         const rawXml = await this.fetchWithRetry(endpoint, envelope, action);
         return this.extractResponse(rawXml, operation);
