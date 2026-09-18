@@ -56,26 +56,6 @@ second authority is a new sibling directory rather than a longer filename:
 ```
 
 `cache/` is separate on purpose: it is **derived** and safe to delete at any time (tickets are re-minted on
-demand), whereas a deleted certificate has to be re-issued by ARCA. Ticket persistence is best-effort, so a
-missing `cache/` does not crash the service — it silently drops back to an in-memory cache, and since WSAA
-will not re-mint a ticket while a prior one is still valid, restarts then stall for up to ~12h per
-certificate. That silence is why the `mkdir` above is part of setup.
-
-### `.secrets/`
-
-Every local credential lives here, and nothing in it is committed. It is laid out
-`<entity>/<environment>/`, mirroring `src/providers/<entity>/` and the per-environment dispatch — so a
-second authority is a new sibling directory rather than a longer filename:
-
-```
-.secrets/
-├── arca/
-│   ├── production/       # delegate.crt + delegate.key — issued by CN=Computadores
-│   └── testing/          # delegate.crt + delegate.key — homologación ("Computadores Test")
-└── cache/                # arca-tickets.json — ARCA_TICKET_CACHE_PATH
-```
-
-`cache/` is separate on purpose: it is **derived** and safe to delete at any time (tickets are re-minted on
 demand), whereas a deleted certificate has to be re-issued by ARCA. It is also the one entry the `mkdir`
 above omits, because `ExpiringCache` creates it on first write — a certificate directory cannot be
 conjured that way, but a cache directory can, and having it created rather than required is what keeps a
@@ -100,20 +80,30 @@ curl -X POST http://localhost:4101/api/authority/status \
 | `pnpm serve` | run the built `dist/index.js` |
 | `pnpm typecheck` | strict type gate — `src` **and** `scripts/` (`tsconfig.json` + `tsconfig.scripts.json`, both `--noEmit`) |
 | `pnpm test` | unit tests (provider logic + the copied SDK's extraction regression oracle) |
+| `pnpm test:watch` | the same suite in watch mode |
 | `pnpm lint` | ESLint strict-type-checked (new code only; the copied SDK is ignored) |
 | `pnpm format` | Prettier |
 | `pnpm probe:band` | measure the exchange-rate band ARCA enforces. **Homologación only**; `PROBE_MODE=full` authorizes real vouchers and burns voucher numbers — read-only by default |
-| `node scripts/build-fce-registry.mjs` | re-vendor ARCA's "empresas grandes" listing + the general FCE threshold into `obligated-receivers.generated.ts`. Run a day after each May/July/September milestone; throws rather than emitting suspect data |
-| `pnpm probe:fecred` | settle what the WSFECRED WSDL cannot: whether our certificate is enrolled, and whether the register answers about an arbitrary receiver under our own identity |
 | `pnpm probe:cotizacion-day` | measure which DAY a cotización is for. Read-only in every mode; `PROBE_ENVIRONMENT=production` is required for a meaningful answer (homologación's series is generated) |
+| `pnpm probe:fecred` | settle what the WSFECRED WSDL cannot: whether our certificate is enrolled, and whether the register answers about an arbitrary receiver under our own identity |
+| `pnpm probe:wsfex-rates` | ask WSFEv1 and WSFEXv1 for the same currency on the same day and compare: whether the two services' rates agree, whether WSFEXv1's batch agrees with its own per-currency method, and which currencies the batch omits. Read-only; ask **production**, since homologación's cotizaciones are generated |
+| `pnpm probe:wsfex-smoke` | drive the real `FexInvoiceService` over its read-only operations: `FEXDummy`'s element names, whether our certificate is enrolled for `wsfex`, whether a FEEWS point of sale exists, and the current `FEXGetLast_ID`/`FEXGetLast_CMP`. `FEXAuthorize` is deliberately not called |
+| `pnpm dump:wsfex-table <table>` | dump a WSFEX reference table (`Dst_cmp`, `Moneda_Id`, `Incoterms`, `Idioma_cbte`, `Umed`, …). Neither the manual nor the WSDL carries these rows, so runtime is the only source; ask **production** for anything that will back validation. `DUMP_JSON=out.json` also writes them. No argument lists the tables |
+| `node scripts/build-fce-registry.mjs` | re-vendor ARCA's "empresas grandes" listing + the general FCE threshold into `obligated-receivers.generated.ts`. Run a day after each May/July/September milestone |
+| `node scripts/build-indec-index.mjs` | re-vendor the INDEC localidades censales + the BAHRA projection into `localities.generated.ts`, from georef-ar |
+| `node scripts/build-rec20-units.mjs <workbook.xlsx>` | re-emit `rec20-units.data.ts` from the UN/ECE Recommendation 20 workbook. The workbook is a multi-megabyte binary and is deliberately **not** vendored, so its path is an argument |
 
 The probes exist because their answers are measurements with a shelf life, not readings of ARCA's manual —
 re-run the probe rather than re-reading the PDF. They are configured through `PROBE_*` env vars; see
 [.env.example](.env.example) and the header comment in each script.
 
-`build-fce-registry.mjs` is not a probe but a vendoring step, and it reads two sources: the listing's own
-JSON endpoint (the page paginates ten rows at a time, so its HTML is not the data) and the régimen landing
-page for the threshold. It refuses to write rather than emit a partial or undated snapshot.
+The three `build-*` rows are not probes but **vendoring steps**: each fetches an upstream catalogue and
+emits a committed file meant to be regenerated rather than edited, and each validates and throws rather
+than emitting suspect data. `build-fce-registry.mjs` reads two sources — the listing's own JSON endpoint (the
+page paginates ten rows at a time, so its HTML is not the data) and the régimen landing page for the
+threshold — and refuses to write rather than emit a partial or undated snapshot. `build-indec-index.mjs`
+rewrites the rows and the snapshot stamp together, so `cityCodeSchemeVersion` cannot go stale apart from
+the codes it dates.
 
 ## HTTP contract (routePrefix `/api`)
 
